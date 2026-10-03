@@ -1,0 +1,5 @@
+# 已合并：BFF 依赖（fastapi / uvicorn）现已并入根级 requirements.txt。
+# 请改用一次安装：.venv/bin/pip install -r requirements.txt
+# 本文件保留仅为兼容旧指引，内容与主 requirements.txt 重复，可忽略。
+fastapi>=0.115
+uvicorn[standard]>=0.30

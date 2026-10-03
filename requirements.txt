@@ -1,0 +1,19 @@
+# AIOps 后端依赖（一次安装：.venv/bin/pip install -r requirements.txt）
+# 说明：本文件为完整依赖集合，含核心 + BFF 控制台 + 向量后端 + 可选工具。
+
+# --- 核心（工作流 / 策略 / 日志聚类） ---
+temporalio>=1.7.0
+pydantic>=2.5.0
+PyYAML>=6.0.1
+drain3>=0.9.11
+
+# --- BFF 运维控制台 ---
+fastapi>=0.115
+uvicorn[standard]>=0.30
+
+# --- 向量检索后端（Code RAG，FAISS 加速） ---
+faiss-cpu>=1.7.4
+numpy>=1.26
+
+# --- 可选：.env 自动加载（未安装也能运行，见 config.py） ---
+python-dotenv>=1.0

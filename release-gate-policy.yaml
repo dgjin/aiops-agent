@@ -1,0 +1,31 @@
+# AIOps 闸门策略配置（设计方案第 5 节 / 附录 A）
+# 策略即配置：工作流启动时加载快照，运行期不热修改，变更走版本升级。
+release_gate:
+  triage:
+    confidence_threshold: 0.8     # 闸门 1：根因置信度低于阈值转人工（设计方案 4.2）
+    max_fix_retries: 2            # 补丁回炉重试上限（防 token/资源雪崩）
+  approval:
+    timeout: 30m                  # 超时自动驳回（锁定）
+    on_timeout: reject
+    on_timeout_escalation: phone
+    second_approval_dirs: [auth/**, payment/**, crypto/**]
+  notify_window:
+    countdown: 15m                # 用户弹窗后的部署延迟
+    deploy_on_expiry: true
+    allow_deploy_now: true
+    allow_cancel: true
+    new_patch_during_window:
+      strategy: queue             # 仅排队（锁定）
+      reset_timer: false
+      merge_with_current: false
+      queue_limit: 0              # 不设上限（锁定）
+      next_cycle: auto
+    feedback_circuit_breaker:
+      enabled: false              # 不设熔断阈值（锁定）
+    concurrency:
+      max_active_deployments: 1
+  canary:
+    traffic_percent: 5
+    observe_duration: 5m
+    health_metrics: [error_rate, p99_latency]
+    auto_rollback: true

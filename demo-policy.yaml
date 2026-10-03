@@ -1,0 +1,31 @@
+# 演示策略（加速版）：仅用于本地端到端演示，键位结构与 release-gate-policy.yaml 完全一致。
+# 使用方式：export AIOPS_POLICY_PATH=./demo-policy.yaml
+release_gate:
+  triage:
+    confidence_threshold: 0.8
+    max_fix_retries: 2
+  approval:
+    timeout: 300s                 # 演示缩短：300 秒
+    on_timeout: reject
+    on_timeout_escalation: phone
+    second_approval_dirs: [auth/**, payment/**, crypto/**]
+  notify_window:
+    countdown: 30s                # 演示缩短：30 秒（生产为 15m）
+    deploy_on_expiry: true
+    allow_deploy_now: true
+    allow_cancel: true
+    new_patch_during_window:
+      strategy: queue
+      reset_timer: false
+      merge_with_current: false
+      queue_limit: 0
+      next_cycle: auto
+    feedback_circuit_breaker:
+      enabled: false
+    concurrency:
+      max_active_deployments: 1
+  canary:
+    traffic_percent: 5
+    observe_duration: 10s         # 演示缩短：10 秒（生产为 5m）
+    health_metrics: [error_rate, p99_latency]
+    auto_rollback: true

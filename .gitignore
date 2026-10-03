@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 虚拟环境
+.venv/
+.venv-verify/
+venv/
+
+# 环境配置（含本地密钥/地址，.env.example 除外）
+.env
+
+# 前端依赖与缓存（web/dist 保留以便 BFF 开箱即用）
+web/node_modules/
+web/.vite/
+
+# 运行产物（索引 / 沙箱 / 留痕 / 审计 / 验证截图）
+data/
+
+# 运行日志
+*.log
+nohup.out
+
+# 系统文件
+.DS_Store

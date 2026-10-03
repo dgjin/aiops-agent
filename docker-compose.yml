@@ -1,0 +1,24 @@
+# AIOps 演示基础设施：Temporal + Loki（一键起停）
+# 用法：docker compose up -d        启动
+#       docker compose ps           查看状态
+#       docker compose down         停止并删除
+# 说明：容器名固定为 aiops-temporal / aiops-loki，与部署手册及演示脚本约定一致；
+#       端口 7233 / 3101 与代码默认值（TEMPORAL_ADDRESS / AIOPS_LOKI_URL）对齐。
+
+services:
+  temporal:
+    image: temporalio/temporal:latest
+    container_name: aiops-temporal
+    command: server start-dev --ip 0.0.0.0
+    ports:
+      - "7233:7233"   # gRPC（worker / BFF / demo_cli 连接）
+      - "8233:8233"   # Web UI（可选，浏览工作流历史）
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:latest
+    container_name: aiops-loki
+    ports:
+      - "3101:3100"   # 宿主机 3101 → 容器 3100（避开本栈 Grafana 的 3100）
+    command: -config.file=/etc/loki/local-config.yaml
+    restart: unless-stopped
