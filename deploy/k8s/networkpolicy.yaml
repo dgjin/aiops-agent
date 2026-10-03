@@ -1,0 +1,159 @@
+# 网络策略：default-deny + 白名单（优化方案 P4-06 / 3.2）
+#
+# 语义说明：NetworkPolicy 为「并集」模型 —— 下面每条策略只负责放行一类流量，
+# 未被任何策略放行的流量一律拒绝（由 aiops-default-deny 兜底）。
+#
+# 白名单一览：
+#   - DNS：全部 pod → kube-system CoreDNS（53/UDP+TCP）
+#   - 同命名空间：组件互访（worker↔temporal↔mysql↔redis、BFF 读 MySQL 等）
+#   - ingress-nginx → BFF:8600（公网入口）
+#   - monitoring → webhook:8099（Alertmanager 告警投递）
+#   - monitoring → worker:9090 / bff:8600（Prometheus 指标抓取）
+#   - 出网：443/80（Git 平台 MR / Ollama / 通知回调）
+#   - observability：Loki 3100（日志聚类）/ OTLP 4318（链路追踪）
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aiops-default-deny
+  namespace: aiops-system
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aiops-allow-dns
+  namespace: aiops-system
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aiops-allow-intra-namespace
+  namespace: aiops-system
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - to:
+        - podSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aiops-allow-ingress-nginx-to-bff
+  namespace: aiops-system
+spec:
+  podSelector:
+    matchLabels:
+      app: aiops-bff
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8600
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aiops-allow-alertmanager-to-webhook
+  namespace: aiops-system
+spec:
+  podSelector:
+    matchLabels:
+      app: aiops-webhook
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        # 监控栈命名空间（Alertmanager 所在）；按实际部署调整 label 值
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8099
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aiops-allow-monitoring-scrape
+  namespace: aiops-system
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["aiops-worker", "aiops-bff"]
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+        - protocol: TCP
+          port: 8600
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aiops-allow-egress-web
+  namespace: aiops-system
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    # Git 平台（GitLab/GitHub/Gitee MR 创建）、Ollama/LLM、通知回调等外部 HTTPS 服务
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aiops-allow-egress-observability
+  namespace: aiops-system
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    # Loki（日志聚类查询）与 OTLP（链路追踪导出）
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - protocol: TCP
+          port: 3100
+        - protocol: TCP
+          port: 4318

@@ -2,8 +2,8 @@
 
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
-import { api } from '../lib/api'
+import { Link, useSearchParams } from 'react-router-dom'
+import { api, describeError } from '../lib/api'
 import { fmtDateTime, fmtDuration } from '../lib/format'
 import { EmptyState } from '../components/EmptyState'
 import { StageBadge } from '../components/StageBadge'
@@ -19,6 +19,7 @@ const STAGE_OPTIONS = [
   'ROLLING_OUT',
   'DONE',
   'ESCALATED',
+  'FAILED',
   'CANCELLED',
 ]
 
@@ -26,9 +27,11 @@ const INPUT_CLS =
   'rounded-lg border border-line bg-panel px-3 py-1.5 text-sm text-ink focus:border-accent/50 focus:outline-none'
 
 export function Flows() {
+  // 支持从看板环图跳转（/flows?stage=DONE）：以 URL 参数初始化筛选
+  const [params] = useSearchParams()
   const [status, setStatus] = useState('all')
-  const [stage, setStage] = useState('')
-  const [service, setService] = useState('')
+  const [stage, setStage] = useState(params.get('stage') ?? '')
+  const [service, setService] = useState(params.get('service') ?? '')
 
   const { data, isError, error } = useQuery({
     queryKey: ['flows', status, stage, service],
@@ -66,7 +69,7 @@ export function Flows() {
 
       {isError && (
         <div className="mt-4">
-          <EmptyState title="无法加载流程列表" hint={String(error)} />
+          <EmptyState title="无法加载流程列表" hint={describeError(error)} />
         </div>
       )}
 

@@ -9,6 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 PY="$ROOT/.venv/bin/python"
+export AIOPS_MODE="${AIOPS_MODE:-demo}"   # 演示强制文件后端，绝不触达生产 MySQL
 export AIOPS_POLICY_PATH="${AIOPS_POLICY_PATH:-./demo-policy.yaml}"
 SERVICE="${AIOPS_DEMO_SERVICE:-order}"
 ALERT_ID="demo-$(date +%H%M%S)"

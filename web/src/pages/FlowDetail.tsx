@@ -4,7 +4,7 @@ import type { ReactNode } from 'react'
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { api } from '../lib/api'
+import { api, describeError } from '../lib/api'
 import { cn, downloadJson, fmtDateTime, fmtDuration } from '../lib/format'
 import { useWriteAction } from '../lib/actions'
 import { ActionButton } from '../components/ActionButton'
@@ -14,6 +14,8 @@ import { CountdownText } from '../components/CountdownText'
 import { DiffViewer } from '../components/DiffViewer'
 import { EmptyState } from '../components/EmptyState'
 import { EventTimeline } from '../components/EventTimeline'
+import { FlowStateMachine } from '../components/charts/FlowStateMachine'
+import { ReleasePipeline } from '../components/charts/ReleasePipeline'
 import { JsonBlock } from '../components/JsonBlock'
 import { QueuePatchDialog } from '../components/QueuePatchDialog'
 import { StageBadge } from '../components/StageBadge'
@@ -264,6 +266,8 @@ function WindowPanel({
 function StatusSummary({ status }: { status: StatusPayload }) {
   return (
     <Panel title="运行状态">
+      {/* 全链路状态机（交互式 SVG）：当前阶段高亮、三道闸门与异常出口一目了然 */}
+      <FlowStateMachine stage={status.stage} className="mb-4" />
       <div className="space-y-2">
         <Field label="阶段">
           <StageBadge stage={status.stage} />
@@ -292,6 +296,19 @@ function StatusSummary({ status }: { status: StatusPayload }) {
       <div className="mt-4">
         <JsonBlock data={status} />
       </div>
+    </Panel>
+  )
+}
+
+/** 发布管道（交互式 SVG）：审批 → 公告 → 金丝雀 → 全量 → 观察；含回滚分支。 */
+function ReleasePanel({ result, stage }: { result: ResultPayload; stage: string }) {
+  return (
+    <Panel title="发布管道">
+      <ReleasePipeline
+        stage={stage}
+        rolledBack={result.deploy_result?.rolled_back}
+        version={result.deploy_result?.version}
+      />
     </Panel>
   )
 }
@@ -374,19 +391,22 @@ function ResultSummary({ result }: { result: ResultPayload }) {
         </Panel>
       )}
       {result.deploy_result && (
-        <Panel title="发布结果">
-          <div className="space-y-2">
-            <Field label="版本">
-              <span className="font-mono text-accent">{result.deploy_result.version}</span>
-            </Field>
-            <Field label="回滚">
-              <span className={result.deploy_result.rolled_back ? 'text-danger' : 'text-ok'}>
-                {result.deploy_result.rolled_back ? '已回滚' : '未回滚'}
-              </span>
-            </Field>
-            <Field label="原因">{result.deploy_result.reason || '—'}</Field>
-          </div>
-        </Panel>
+        <>
+          <ReleasePanel result={result} stage={result.stage} />
+          <Panel title="发布结果">
+            <div className="space-y-2">
+              <Field label="版本">
+                <span className="font-mono text-accent">{result.deploy_result.version}</span>
+              </Field>
+              <Field label="回滚">
+                <span className={result.deploy_result.rolled_back ? 'text-danger' : 'text-ok'}>
+                  {result.deploy_result.rolled_back ? '已回滚' : '未回滚'}
+                </span>
+              </Field>
+              <Field label="原因">{result.deploy_result.reason || '—'}</Field>
+            </div>
+          </Panel>
+        </>
       )}
       {!result.root_cause && !result.patch && !result.test_report && !result.deploy_result && (
         <EmptyState title="审计记录为空" hint="该流程在生成补丁前结束（转人工 / 取消）" />
@@ -408,7 +428,7 @@ export function FlowDetail() {
   })
 
   if (isError) {
-    return <EmptyState title="无法加载流程详情" hint={String(error)} />
+    return <EmptyState title="无法加载流程详情" hint={describeError(error)} />
   }
   if (!data) return <div className="text-sm text-muted">加载中…</div>
 
@@ -487,10 +507,24 @@ export function FlowDetail() {
       </nav>
 
       <div className="mt-4">
-        {tab === 'overview' &&
-          (result ? <ResultSummary result={result} /> : status ? <StatusSummary status={status} /> : (
-            <EmptyState title="暂无状态数据" hint="工作流状态读取失败" />
-          ))}
+        {tab === 'overview' && (
+          <div className="space-y-4">
+            {result ? (
+              <>
+                {/* 终态流程：状态机仍展示（可直观看到走到哪一步、在哪中断） */}
+                <Panel title="流程状态机">
+                  <FlowStateMachine stage={stage} />
+                </Panel>
+                <ResultSummary result={result} />
+              </>
+            ) : status ? (
+              /* 运行中流程：状态机在「运行状态」面板内展示 */
+              <StatusSummary status={status} />
+            ) : (
+              <EmptyState title="暂无状态数据" hint="工作流状态读取失败" />
+            )}
+          </div>
+        )}
 
         {tab === 'timeline' &&
           (result ? (

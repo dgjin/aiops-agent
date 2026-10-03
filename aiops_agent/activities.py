@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from datetime import datetime, timezone
 
 from temporalio import activity
@@ -201,23 +202,27 @@ async def generate_patch(
 
     失败/演示分支走确定性兜底补丁（degraded 留痕），保证流程不中断。
     """
-    from . import fix_agent
+    from . import fix_agent, metrics
 
+    started = time.monotonic()
     await _tiny_delay()
     patch, meta = await asyncio.to_thread(
         fix_agent.run_fix, alert, root_cause, references, attempt
     )
+    duration = time.monotonic() - started
     reason_note = f"，原因={meta['reason']}" if meta["reason"] else ""
     log.info(
-        "[fix] 补丁 %s（attempt=%d，文件=%s，model=%s，validated=%s，degraded=%s%s）",
+        "[fix] 补丁 %s（attempt=%d，provider=%s，文件=%s，model=%s，validated=%s，degraded=%s%s）",
         patch.patch_id,
         attempt,
+        meta.get("provider", "ollama"),
         patch.files,
         patch.model_version,
         meta["validated"],
         meta["degraded"],
         reason_note,
     )
+    metrics.observe_fix_attempt(meta.get("provider", "ollama"), bool(meta["degraded"]), duration)
     return patch
 
 
@@ -248,19 +253,23 @@ async def run_tests_in_sandbox(patch: Patch, attempt: int) -> TestReport:
 
 @activity.defn
 async def create_merge_request(patch: Patch, test_report: TestReport) -> dict:
-    """TODO 接真实实现：调 GitLab/GitHub API 创建 MR，描述含根因、测试报告、回滚预案。"""
+    """真实实现（P5-01 / 优化方案 3.7）：策略 git 段配置时调 GitLab/GitHub/Gitee API 创建 MR。
+
+    未配置（演示/未接入）或调用失败时返回确定性桩结果（mode=recorded / degraded），
+    流程照常进入闸门 2，人工审批仍可依据测试报告与告警上下文决策。
+    """
+    from . import git_integration
+
     await _tiny_delay()
-    mr = {
-        "mr_id": f"!{_stable_id(patch.patch_id, 9000) + 1000}",
-        "url": f"https://git.example.com/ops/{patch.alert_id}/-/merge_requests/demo",
-        "labels": [
-            f"ai-fix:{patch.alert_id}",
-            f"model:{patch.model_version}",
-            f"confidence:{patch.confidence:.2f}",
-        ],
-    }
-    log.info("[mr] 已创建 MR %s（%s）", mr["mr_id"], mr["url"])
+    mr = await asyncio.to_thread(git_integration.create_mr_for_patch, patch, test_report)
+    mode = mr.get("mode", "recorded")
+    if mode == "live":
+        log.info("[mr] 已创建 MR %s（%s，provider=%s）", mr["mr_id"], mr["url"], mr.get("provider"))
+    else:
+        log.info("[mr] 桩结果（mode=%s）%s（%s）", mode, mr["mr_id"], mr["url"])
     log.info("[mr] 标签: %s", ", ".join(mr["labels"]))
+    if mr.get("error"):
+        log.warning("[mr] 降级原因: %s", mr["error"])
     return mr
 
 
@@ -359,7 +368,7 @@ async def deploy_canary(
     alert: Alert, patch: Patch, traffic_percent: int, observe_seconds: int = 10
 ) -> CanaryResult:
     """真实实现（WP7）：ArgoCD 风格金丝雀——镜像构建 + 容器启动 + 真实探活观测。"""
-    from . import release
+    from . import metrics, release
 
     result = await asyncio.to_thread(
         release.run_canary, alert, patch, traffic_percent, observe_seconds
@@ -371,6 +380,7 @@ async def deploy_canary(
         result.p99_latency_ms,
         result.observation,
     )
+    metrics.observe_canary_deploy(result.healthy, result.error_rate)
     return result
 
 

@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from pydantic import ValidationError
@@ -56,6 +59,131 @@ class TestChunkPythonSource(unittest.TestCase):
     def test_syntax_error_raises(self) -> None:
         with self.assertRaises(SyntaxError):
             code_rag.chunk_python_source("def broken(:\n", "bad.py")
+
+
+TS_SAMPLE = '''/** 计算折扣 */
+export function computeDiscount(coupon) {
+  if (!coupon) {
+    return 0;
+  }
+  return coupon.discount;
+}
+
+export class OrderService {
+  constructor(private repo) {}
+
+  submit(payload) {
+    const d = computeDiscount(payload.coupon);
+    return d;
+  }
+}
+
+export const fetchCoupons = async (code) => {
+  return [];
+};
+'''
+
+
+class TestChunkTsSource(unittest.TestCase):
+    """TS/JS 语义切块（无原生解析器：声明正则 + 花括号配平）。"""
+
+    def test_declarations_and_methods(self) -> None:
+        chunks = code_rag.chunk_ts_source(TS_SAMPLE, "order.ts")
+        names = {(c["kind"], c["qualname"]) for c in chunks}
+        self.assertIn(("function", "computeDiscount"), names)
+        self.assertIn(("class", "OrderService"), names)
+        self.assertIn(("method", "OrderService.submit"), names)
+        self.assertIn(("function", "fetchCoupons"), names)
+
+    def test_line_ranges_and_snippet(self) -> None:
+        chunks = code_rag.chunk_ts_source(TS_SAMPLE, "order.ts")
+        fn = next(c for c in chunks if c["qualname"] == "computeDiscount")
+        self.assertEqual(fn["start_line"], 2)
+        self.assertGreater(fn["end_line"], fn["start_line"])
+        self.assertIn("return coupon.discount", fn["snippet"])
+        self.assertEqual(fn["file"], "order.ts")
+
+    def test_jsdoc_extracted(self) -> None:
+        chunks = code_rag.chunk_ts_source(TS_SAMPLE, "order.ts")
+        fn = next(c for c in chunks if c["qualname"] == "computeDiscount")
+        self.assertEqual(fn["docstring"], "计算折扣")
+
+    def test_control_flow_not_treated_as_method(self) -> None:
+        chunks = code_rag.chunk_ts_source(TS_SAMPLE, "order.ts")
+        self.assertNotIn("OrderService.if", {c["qualname"] for c in chunks})
+
+    def test_fallback_block_chunking_when_no_declarations(self) -> None:
+        source = "\n".join(f"line {i}" for i in range(12))  # 无声明、无空行
+        chunks = code_rag.chunk_ts_source(source, "plain.ts")
+        self.assertTrue(chunks)
+        self.assertTrue(all(c["kind"] == "block" for c in chunks))
+        self.assertEqual(chunks[0]["start_line"], 1)
+
+    def test_blank_line_block_fallback(self) -> None:
+        source = "\n".join(f"const n{i} = {i};" for i in range(8)) + "\n\n" + "\n".join(
+            f"const m{i} = {i};" for i in range(7)
+        )
+        chunks = code_rag.chunk_ts_source(source, "blocks.ts")
+        self.assertTrue(chunks)
+        self.assertTrue(all(c["kind"] == "block" for c in chunks))
+
+
+class TestChunkSourceDispatch(unittest.TestCase):
+    def test_python_uses_ast_chunker(self) -> None:
+        chunks = code_rag.chunk_source("def foo():\n    return 1\n", "m.py")
+        self.assertEqual([c["qualname"] for c in chunks], ["foo"])
+
+    def test_ts_uses_ts_chunker(self) -> None:
+        chunks = code_rag.chunk_source(TS_SAMPLE, "m.ts")
+        self.assertIn("computeDiscount", {c["qualname"] for c in chunks})
+
+    def test_unsupported_extension_returns_empty(self) -> None:
+        self.assertEqual(code_rag.chunk_source("# hello", "README.md"), [])
+
+
+class TestIndexPathSelection(unittest.TestCase):
+    """AIOPS_CODE_INDEX 允许把检索指向「被监控应用」的独立索引。"""
+
+    def _write_index(self, tmp: str) -> Path:
+        path = Path(tmp) / "idx.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "model": "m",
+                    "chunks": [
+                        {
+                            "kind": "function",
+                            "file": "server/routes/query.ts",
+                            "qualname": "runQuery",
+                            "start_line": 1,
+                            "end_line": 5,
+                            "snippet": "runQuery",
+                            "vector": [1.0, 0.0],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_aiops_code_index_env_respected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_index(tmp)
+            with mock.patch.dict(os.environ, {"AIOPS_CODE_INDEX": str(path)}), mock.patch(
+                "aiops_agent.code_rag.embed_texts", return_value=[[1.0, 0.0]]
+            ):
+                hits = code_rag.search_index("query", top_k=1)
+        self.assertEqual(hits[0]["file"], "server/routes/query.ts")
+
+    def test_explicit_index_path_beats_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            explicit = self._write_index(tmp)
+            with mock.patch.dict(os.environ, {"AIOPS_CODE_INDEX": "/nonexistent/x.json"}), mock.patch(
+                "aiops_agent.code_rag.embed_texts", return_value=[[1.0, 0.0]]
+            ):
+                hits = code_rag.search_index("q", index_path=explicit, top_k=1)
+        self.assertEqual(hits[0]["qualname"], "runQuery")
 
 
 class TestCosineAndRank(unittest.TestCase):
@@ -171,6 +299,64 @@ class TestApplyUnifiedDiff(unittest.TestCase):
         self.assertIsNone(fix_agent.apply_unified_diff(SAMPLE, ""))
 
 
+class TestSplitUnifiedDiff(unittest.TestCase):
+    """WP11：多文件补丁按文件切分（受保护目录场景需同时改动多个文件）。"""
+
+    def test_single_file(self) -> None:
+        parts = fix_agent.split_unified_diff(DIFF)
+        self.assertEqual(list(parts), ["s.py"])
+        self.assertIn("@@", parts["s.py"])
+
+    def test_two_files(self) -> None:
+        multi = (
+            "--- a/order_service.py\n+++ b/order_service.py\n@@ -1,2 +1,3 @@\n a\n+b\n"
+            "--- a/auth/token_service.py\n+++ b/auth/token_service.py\n@@ -5,1 +5,2 @@\n x\n+y\n"
+        )
+        parts = fix_agent.split_unified_diff(multi)
+        self.assertEqual(sorted(parts), ["auth/token_service.py", "order_service.py"])
+        self.assertIn("+b", parts["order_service.py"])
+        self.assertIn("+y", parts["auth/token_service.py"])
+
+    def test_without_headers_returns_empty(self) -> None:
+        self.assertEqual(fix_agent.split_unified_diff("@@ -1 +1 @@\n-a\n+b\n"), {})
+
+
+class TestProtectedFallbackTwoFile(unittest.TestCase):
+    """WP11：受保护目录（auth/**）的兜底补丁必须同时修复应用侧缺陷。
+
+    否则只改 auth/** 时应用既有缺陷仍在 → 沙箱 5/6 → 重试耗尽 → 走不到二级审批。
+    """
+
+    ALERT = Alert(alert_id="wp11-u1", service="order", description="protected 演示")
+    RC = RootCause(
+        error_type="NullPointerException",
+        suspect_files=["auth/token_service.py"],
+        confidence=0.92,
+        summary="受保护目录演示。",
+    )
+
+    def test_protected_patch_covers_both_files(self) -> None:
+        patch = fix_agent.fallback_patch(
+            self.ALERT, self.RC, 0, "auth/token_service.py", repo_dir=code_rag.DEFAULT_REPO_DIR
+        )
+        self.assertEqual(patch.files, ["order_service.py", "auth/token_service.py"])
+        parts = fix_agent.split_unified_diff(patch.diff)
+        self.assertEqual(sorted(parts), ["auth/token_service.py", "order_service.py"])
+        # 两处修复都真实可应用且可编译
+        for rel, file_diff in parts.items():
+            original = (code_rag.DEFAULT_REPO_DIR / rel).read_text(encoding="utf-8")
+            new_text = fix_agent.apply_unified_diff(original, file_diff)
+            self.assertIsNotNone(new_text, rel)
+            ok, err = fix_agent.validate_source(new_text, rel)
+            self.assertTrue(ok, f"{rel}: {err}")
+
+    def test_non_protected_stays_single_file(self) -> None:
+        patch = fix_agent.fallback_patch(
+            self.ALERT, self.RC, 0, "order_service.py", repo_dir=code_rag.DEFAULT_REPO_DIR
+        )
+        self.assertEqual(patch.files, ["order_service.py"])
+
+
 class TestValidateSource(unittest.TestCase):
     def test_syntax_error_reported(self) -> None:
         ok, error = fix_agent.validate_source("def broken(:\n", "bad.py")
@@ -238,6 +424,20 @@ def _real_diff_for_order_service() -> str:
 
 
 class TestRunFix(unittest.TestCase):
+    """run_fix 单测：**必须钉死 Ollama 提供者**。
+
+    环境里若配置了 AIOPS_FIX_PROVIDER=qoder（.env 会被自动加载），run_fix 会走 Qoder 分支：
+    既绕过被 mock 的 call_ollama 导致断言失败，又会真的调用 Qoder CLI（慢且消耗额度）。
+    测试不得依赖环境，故在此显式固定提供者。
+    """
+
+    def setUp(self) -> None:
+        patcher = mock.patch.dict(
+            os.environ, {"AIOPS_FIX_PROVIDER": "ollama"}, clear=False
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_llm_validated_patch(self) -> None:
         response = json.dumps(
             {"diff": _real_diff_for_order_service(), "description": "增加 coupon 空值防护", "risk": "低：单点防御"},
@@ -300,7 +500,10 @@ class TestRunFix(unittest.TestCase):
         )
         patch, meta = fix_agent.run_fix(alert, protected_root, references=[], attempt=0)
         self.assertTrue(meta["stub"])
-        self.assertEqual(patch.files, ["auth/token_service.py"])  # 供闸门 2 二级审批判定
+        # 受保护目录仍须出现在补丁内（供闸门 2 二级审批判定）；WP11 起同时携带应用侧修复，
+        # 否则沙箱 5/6 → 走不到二级审批
+        self.assertIn("auth/token_service.py", patch.files)
+        self.assertEqual(patch.files, ["order_service.py", "auth/token_service.py"])
 
 
 class TestActivitiesWP4(unittest.TestCase):

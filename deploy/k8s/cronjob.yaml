@@ -1,0 +1,56 @@
+# 数据清理 CronJob（优化方案 P4-07 / 3.6：过期数据自动清理）
+#
+# 执行的清理逻辑（aiops_agent/cleanup.py，TTL 按 AIOPS_MODE 区分）：
+#   - 审计 JSONL 文件 / 沙箱工作区 / 通知文件 / Qoder 工作区 / ArgoCD 记录 / workflow_runs 行；
+#   - production 保留期默认 365/7/90/7/90/365 天；
+#   - 幂等可重入：单域失败不影响其他域（errors 非空时退出码 1，CronJob 记录为 Failed）。
+#
+# 注意：与 worker 共用数据卷 aiops-data（需 RWX；清理沙箱/Qoder 工作区目录）。
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: aiops-cleanup
+  namespace: aiops-system
+spec:
+  # 每日 03:00（集群时区；如需固定 UTC 可加 timeZone: UTC 字段，K8s >= 1.27）
+  schedule: "0 3 * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600
+      template:
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
+          containers:
+            - name: cleanup
+              image: aiops-agent:1.0.0
+              imagePullPolicy: IfNotPresent
+              command: ["python", "-m", "aiops_agent.cleanup"]
+              envFrom:
+                - configMapRef:
+                    name: aiops-config
+                - secretRef:
+                    name: aiops-secrets
+              volumeMounts:
+                - name: data
+                  mountPath: /var/lib/aiops
+                - name: tmp
+                  mountPath: /tmp
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { cpu: 500m, memory: 512Mi }
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: aiops-data
+            - name: tmp
+              emptyDir: {}

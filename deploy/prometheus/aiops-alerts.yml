@@ -1,0 +1,72 @@
+# AIOps 系统自身健康告警（优化方案 P3-06 / GAP-07）
+#
+# 指标来源：aiops_agent/metrics.py（BFF :8600/metrics、worker :9090/metrics）。
+# 标签口径与 metrics.py 对齐：
+#   - stage 为大写下划线终态（DONE / ESCALATED / CANCELLED）；
+#   - degraded / healthy / passed 为字符串 "true" / "false"；
+#   - gate ∈ approval / second_approval / deploy_command。
+#
+# 挂载：
+#   - 本机演示：docker compose --profile obs up -d（prometheus.yml 引用本文件）
+#   - K8s：由 Prometheus Operator 经 deploy/k8s/servicemonitor.yaml 发现（规则按环境写入 PrometheusRule）
+
+groups:
+  - name: aiops-self-health
+    rules:
+      # Worker 指标端点不可达 → 修复流程停止推进（最严重的系统自身故障）
+      - alert: AIOpsWorkerDown
+        expr: up{job="aiops-worker"} == 0
+        for: 2m
+        labels: { severity: critical, component: aiops-worker }
+        annotations:
+          summary: "AIOps worker 指标端点不可达（:9090/metrics）"
+          description: "worker 可能已下线或指标服务未启动（AIOPS_METRICS_PORT=0），修复流程将停止推进。"
+
+      # BFF 指标端点不可达 → 控制台不可用
+      - alert: AIOpsBffDown
+        expr: up{job="aiops-bff"} == 0
+        for: 2m
+        labels: { severity: critical, component: aiops-bff }
+        annotations:
+          summary: "AIOps 控制台 BFF 指标端点不可达（:8600/metrics）"
+          description: "控制台或 BFF 进程不可用，运维无法审批/查看流程。"
+
+      # BFF 5xx 错误率超过 5%（读写配额/DB 故障等会先在此暴露）
+      - alert: AIOpsBffHighErrorRate
+        expr: |
+          (
+            sum(rate(aiops_bff_requests_total{status=~"5.."}[5m]))
+              / clamp_min(sum(rate(aiops_bff_requests_total[5m])), 0.001)
+          ) > 0.05
+        for: 5m
+        labels: { severity: warning, component: aiops-bff }
+        annotations:
+          summary: "BFF 5xx 错误率超过 5%"
+          description: "近 5 分钟服务端错误占比过高，检查 MySQL / Temporal 连通性与 kill switch 状态。"
+
+      # 转人工（ESCALATED）突增：补丁质量或环境异常的信号
+      - alert: AIOpsWorkflowEscalationSpike
+        expr: increase(aiops_workflow_completed_total{stage="ESCALATED"}[30m]) > 3
+        for: 5m
+        labels: { severity: warning, component: aiops-workflow }
+        annotations:
+          summary: "近 30 分钟转人工流程超过 3 个"
+          description: "可能是 LLM/沙箱环境异常导致修复链路整体降级，优先检查 Ollama/Qoder 与沙箱运行时。"
+
+      # 金丝雀劣化（healthy=false）→ 自动回滚已触发，人工复核必要
+      - alert: AIOpsCanaryUnhealthy
+        expr: increase(aiops_canary_deploys_total{healthy="false"}[30m]) > 0
+        for: 1m
+        labels: { severity: critical, component: aiops-canary }
+        annotations:
+          summary: "出现金丝雀劣化（自动回滚已触发）"
+          description: "金丝雀观测错误率超阈值并回滚；复核补丁与发布批次，必要时停用自动修复。"
+
+      # 沙箱测试失败密集：连续补丁不可用
+      - alert: AIOpsSandboxFailureSpike
+        expr: increase(aiops_sandbox_runs_total{passed="false"}[1h]) > 5
+        for: 10m
+        labels: { severity: warning, component: aiops-sandbox }
+        annotations:
+          summary: "近 1 小时沙箱测试失败超过 5 次"
+          description: "补丁通过率下降，检查修复模型输出质量与沙箱运行时状态（docker/K8s Job）。"

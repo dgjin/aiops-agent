@@ -23,6 +23,7 @@ def main() -> None:
     parser.add_argument("--repo", default=None, help=f"代码仓库目录（默认 {code_rag.DEFAULT_REPO_DIR}）")
     parser.add_argument("--index", default=None, help=f"索引输出路径（默认 {code_rag.INDEX_PATH}）")
     parser.add_argument("--model", default=None, help=f"嵌入模型（默认 {code_rag.DEFAULT_EMBED_MODEL}）")
+    parser.add_argument("--tickets", default=None, help=f"历史工单语料（默认 {code_rag.TICKETS_PATH}；传不存在的路径可排除）")
     parser.add_argument("--query", default=None, help="检索查询（给出则进入检索模式）")
     parser.add_argument("--top-k", type=int, default=5, help="返回条数（默认 5）")
     args = parser.parse_args()
@@ -48,6 +49,7 @@ def main() -> None:
         repo_dir=Path(args.repo) if args.repo else None,
         index_path=Path(args.index) if args.index else None,
         model=args.model,
+        tickets_path=Path(args.tickets) if args.tickets else None,
     )
     print(
         f"索引完成：files={stats['files']} chunks={stats['chunks']} "

@@ -1,0 +1,28 @@
+# AIOps 共享配置（生产模式环境变量；非敏感项）
+#
+# 镜像内 env 约定（详见 .env.example 与 aiops_agent/mode.py / db.py）：
+#   - AIOPS_MODE=production 时 AIOPS_DATABASE_URL 必填（fail-fast，见 secret.example.yaml）
+#   - AIOPS_DATA_ROOT 指向 PVC 挂载点（沙箱工作区 / Qoder 工作区 / 审计兜底文件）
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aiops-config
+  namespace: aiops-system
+data:
+  AIOPS_MODE: "production"
+  AIOPS_DATA_ROOT: "/var/lib/aiops"
+  # 策略文件已打入镜像（见 deploy/Dockerfile）；如需自定义，改为挂载 ConfigMap 路径
+  AIOPS_POLICY_PATH: "/app/release-gate-policy.yaml"
+  # Temporal 集群内服务名（deploy/k8s/temporal.yaml）
+  TEMPORAL_ADDRESS: "aiops-temporal:7233"
+  # 速率限制：多副本共享 Redis 滑动窗口（未配置 Redis 时退化为进程内内存窗口）
+  AIOPS_RATE_LIMIT_ENABLED: "1"
+  AIOPS_REDIS_URL: "redis://aiops-redis:6379/0"
+  # worker 指标服务端口（Prometheus 抓取；BFF 的 /metrics 在 8600 本身）
+  AIOPS_METRICS_PORT: "9090"
+  # Alertmanager webhook 监听端口（deploy/k8s/webhook.yaml）
+  AIOPS_WEBHOOK_PORT: "8099"
+  # 日志检索后端（Loki）：生产请改为集群内 Loki 网关地址；留空则 triage 降级为本地日志
+  AIOPS_LOKI_URL: "http://loki-gateway.observability.svc.cluster.local"
+  # OpenTelemetry（可选）：配置 OTLP 端点后启用链路追踪；留空完全 no-op
+  AIOPS_OTEL_ENDPOINT: ""

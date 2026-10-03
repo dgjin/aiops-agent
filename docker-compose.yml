@@ -1,18 +1,38 @@
 # AIOps 演示基础设施：Temporal + Loki（一键起停）
 # 用法：docker compose up -d        启动
 #       docker compose ps           查看状态
-#       docker compose down         停止并删除
+#       docker compose down         停止并删除（默认保留命名卷，数据不丢）
+#       docker compose down -v      停止并删除（含卷，数据清空）
 # 说明：容器名固定为 aiops-temporal / aiops-loki，与部署手册及演示脚本约定一致；
 #       端口 7233 / 3101 与代码默认值（TEMPORAL_ADDRESS / AIOPS_LOKI_URL）对齐。
+#
+# 持久化（2026-10-03 修复）：
+#   此前 Temporal 用 `start-dev` 且未指定 --db-filename → 后端为内存存储，
+#   任何容器重启都会清空全部工作流历史（控制台看不到已完成的流程）；
+#   Loki 未挂卷 → WAL/索引/块留在容器可写层，重建即丢。
+#   现改为：Temporal 落 SQLite 文件（/home/temporal/temporal.db，该目录属 temporal 用户可写），
+#   Loki 挂 /loki（WAL 默认开启，落在卷内）。两服务均加命名卷，重启/重建后数据仍在。
+#
+# profiles（可选组件，生产化改造批次 8；不指定 profile 时行为与改造前完全一致）：
+#   --profile prod ：MySQL 8.0 + Redis 7（AIOPS_MODE=production 容器化运行所需）
+#                    示例：docker compose --profile prod up -d
+#                          AIOPS_MODE=production AIOPS_DATABASE_URL=mysql+pymysql://aiops:aiops-demo-pass@127.0.0.1:3316/aiops?charset=utf8mb4 ...
+#                    端口 3316/6380：避开宿主机常见 MySQL 3306 / Redis 6379（勿改为 3306——
+#                    若宿主机已有 MySQL 监听，Docker 端口映射会被遮蔽导致连错库）
+#   --profile obs  ：Prometheus + Grafana（采集 BFF :8600/metrics 与 worker :9090/metrics；
+#                    自动加载 deploy/grafana 概览面板与 deploy/prometheus 告警规则）
+#                    示例：docker compose --profile obs up -d    # Grafana http://127.0.0.1:3200
 
 services:
   temporal:
     image: temporalio/temporal:latest
     container_name: aiops-temporal
-    command: server start-dev --ip 0.0.0.0
+    command: server start-dev --ip 0.0.0.0 --ui-port 8233 --db-filename /home/temporal/temporal.db
     ports:
       - "7233:7233"   # gRPC（worker / BFF / demo_cli 连接）
       - "8233:8233"   # Web UI（可选，浏览工作流历史）
+    volumes:
+      - temporal-data:/home/temporal   # 工作流历史持久化（SQLite）
     restart: unless-stopped
 
   loki:
@@ -21,4 +41,78 @@ services:
     ports:
       - "3101:3100"   # 宿主机 3101 → 容器 3100（避开本栈 Grafana 的 3100）
     command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - loki-data:/loki                # WAL / tsdb 索引 / chunks 持久化（path_prefix=/loki）
     restart: unless-stopped
+
+  # ---------- profile: prod（生产持久化：MySQL + Redis） ----------
+  mysql:
+    profiles: ["prod"]
+    image: mysql:8.0
+    container_name: aiops-mysql
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_DATABASE: aiops
+      MYSQL_USER: aiops
+      # 本地演示口令；生产请经密钥管理注入（K8s 见 deploy/k8s/secret.example.yaml）
+      MYSQL_PASSWORD: aiops-demo-pass
+      MYSQL_ROOT_PASSWORD: aiops-root-pass
+    ports:
+      # 3316：避开宿主机 MySQL 3306（被宿主机进程占用时 Docker 映射会失效，见文件头说明）
+      - "3316:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uaiops", "-paiops-demo-pass"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    profiles: ["prod"]
+    image: redis:7-alpine
+    container_name: aiops-redis
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      # 6380：避开宿主机 Redis 6379（同上；AIOPS_REDIS_URL 记得同步端口）
+      - "6380:6379"
+    restart: unless-stopped
+
+  # ---------- profile: obs（可观测：Prometheus + Grafana） ----------
+  prometheus:
+    profiles: ["obs"]
+    image: prom/prometheus:latest
+    container_name: aiops-prometheus
+    ports:
+      - "9095:9090"   # 宿主机 9095（避开 worker 指标端口 9090）
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/aiops-alerts.yml:/etc/prometheus/aiops-alerts.yml:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      # 采集宿主机上的 BFF/worker 指标端点（Linux 需 host-gateway；macOS 原生支持）
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  grafana:
+    profiles: ["obs"]
+    image: grafana/grafana:latest
+    container_name: aiops-grafana
+    ports:
+      - "3200:3000"   # 宿主机 3200（避开 nl2sql-monitoring 栈 Grafana 的 3100）
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: aiops-demo   # 本地演示口令；生产请修改并走 Secret 注入
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/aiops-overview.json:/var/lib/grafana/dashboards/aiops-overview.json:ro
+      - grafana-data:/var/lib/grafana
+    restart: unless-stopped
+
+volumes:
+  temporal-data:
+  loki-data:
+  mysql-data:
+  prometheus-data:
+  grafana-data:

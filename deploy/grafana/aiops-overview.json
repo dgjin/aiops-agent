@@ -1,0 +1,229 @@
+{
+  "uid": "aiops-overview",
+  "title": "AIOps 系统概览",
+  "description": "AIOps 自动运维智能体生产化概览：工作流成功率 / 耗时 / 闸门分布 / 修复与沙箱 / 金丝雀 / BFF 服务端。指标口径对齐 aiops_agent/metrics.py（stage 大写终态、布尔标签为字符串 \"true\"/\"false\"、BFF status 为数字字符串）。",
+  "tags": ["aiops", "overview"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "mode",
+        "label": "运行模式",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+        "query": { "query": "label_values(aiops_workflow_started_total, mode)", "refId": "mode" },
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" },
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "工作流成功率（区间内 DONE / 全部终态）",
+      "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+          "expr": "sum(increase(aiops_workflow_completed_total{stage=\"DONE\", mode=~\"$mode\"}[$__range])) / clamp_min(sum(increase(aiops_workflow_completed_total{mode=~\"$mode\"}[$__range])), 0.001)",
+          "legendFormat": "成功率",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0.7 },
+              { "color": "green", "value": 0.9 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "工作流完成速率（按终态 stage）",
+      "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+      "gridPos": { "h": 6, "w": 9, "x": 6, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+          "expr": "sum by (stage) (rate(aiops_workflow_completed_total{mode=~\"$mode\"}[$__rate_interval]))",
+          "legendFormat": "{{stage}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "工作流耗时 p95（秒）",
+      "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+      "gridPos": { "h": 6, "w": 9, "x": 15, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(aiops_workflow_duration_seconds_bucket{mode=~\"$mode\"}[$__rate_interval])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(aiops_workflow_duration_seconds_bucket{mode=~\"$mode\"}[$__rate_interval])))",
+          "legendFormat": "p50"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 0, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "三道闸门事件（gate / decision）",
+      "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+          "expr": "sum by (gate, decision) (rate(aiops_gate_events_total{mode=~\"$mode\"}[$__rate_interval]))",
+          "legendFormat": "{{gate}} / {{decision}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "修复生成尝试（degraded=true 为降级路径）",
+      "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+          "expr": "sum by (provider, degraded) (rate(aiops_fix_attempts_total{mode=~\"$mode\"}[$__rate_interval]))",
+          "legendFormat": "{{provider}} (degraded={{degraded}})"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "沙箱测试通过率",
+      "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 12 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+          "expr": "sum(increase(aiops_sandbox_runs_total{passed=\"true\", mode=~\"$mode\"}[$__range])) / clamp_min(sum(increase(aiops_sandbox_runs_total{mode=~\"$mode\"}[$__range])), 0.001)",
+          "legendFormat": "通过率",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0.6 },
+              { "color": "green", "value": 0.8 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "金丝雀发布（healthy=false 为已触发回滚）",
+      "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+      "gridPos": { "h": 6, "w": 9, "x": 6, "y": 12 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+          "expr": "sum by (healthy) (increase(aiops_canary_deploys_total{mode=~\"$mode\"}[$__rate_interval]))",
+          "legendFormat": "healthy={{healthy}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "BFF 请求速率（按 HTTP status）",
+      "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+      "gridPos": { "h": 6, "w": 9, "x": 15, "y": 12 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+          "expr": "sum by (status) (rate(aiops_bff_requests_total[$__rate_interval]))",
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "BFF 请求耗时 p95（秒）",
+      "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 18 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "aiops-prom" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(aiops_bff_request_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p95（全部接口）"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 0, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    }
+  ],
+  "timepicker": {},
+  "annotations": { "list": [] }
+}

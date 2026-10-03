@@ -8,6 +8,8 @@ interface ConfirmDialogProps {
   confirmLabel?: string
   busy?: boolean
   error?: string | null
+  /** 表单存在校验错误时禁用提交（字段级校验在调用方计算）。 */
+  confirmDisabled?: boolean
   onConfirm: () => void
   onClose: () => void
   children?: ReactNode
@@ -21,6 +23,7 @@ export function ConfirmDialog({
   confirmLabel = '确认',
   busy = false,
   error,
+  confirmDisabled = false,
   onConfirm,
   onClose,
   children,
@@ -60,9 +63,9 @@ export function ConfirmDialog({
           <button
             type="button"
             onClick={onConfirm}
-            disabled={busy}
+            disabled={busy || confirmDisabled}
             className={cn(
-              'rounded-lg px-3.5 py-1.5 text-sm font-medium text-canvas transition-colors disabled:opacity-50',
+              'rounded-lg px-3.5 py-1.5 text-sm font-medium text-canvas transition-colors disabled:cursor-not-allowed disabled:opacity-50',
               tone === 'danger' ? 'bg-danger/90 hover:bg-danger' : 'bg-accent/90 hover:bg-accent',
             )}
           >

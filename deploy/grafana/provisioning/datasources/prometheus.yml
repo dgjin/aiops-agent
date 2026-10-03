@@ -1,0 +1,19 @@
+# Grafana 数据源自动配置（docker compose --profile obs 挂载到
+# /etc/grafana/provisioning/datasources/prometheus.yml）
+#
+# uid 固定为 aiops-prom：deploy/grafana/aiops-overview.json 的全部面板
+# 通过该 uid 引用数据源，修改 uid 需同步修改面板 JSON。
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: aiops-prom
+    type: prometheus
+    access: proxy
+    # compose 网络内按服务名访问（prometheus:9090）；K8s 环境改为外部 Prometheus 地址
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
+      # 与 prometheus.yml 的 scrape_interval 对齐

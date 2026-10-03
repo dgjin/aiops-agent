@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { api } from '../lib/api'
+import { api, describeError } from '../lib/api'
 import { useWriteAction } from '../lib/actions'
 import { ActionButton } from '../components/ActionButton'
 import { ConfirmDialog } from '../components/ConfirmDialog'
@@ -12,6 +12,7 @@ import { EmptyState } from '../components/EmptyState'
 import { QueuePatchDialog } from '../components/QueuePatchDialog'
 import { StageBadge } from '../components/StageBadge'
 import { Toast } from '../components/Toast'
+import { ReleasePipeline } from '../components/charts/ReleasePipeline'
 import type { FlowItem } from '../lib/types'
 
 type WriteHandle = ReturnType<typeof useWriteAction>
@@ -71,7 +72,7 @@ export function WindowPage() {
 
       {isError && (
         <div className="mt-5">
-          <EmptyState title="无法加载发布窗口" hint={String(error)} />
+          <EmptyState title="无法加载发布窗口" hint={describeError(error)} />
         </div>
       )}
 
@@ -107,6 +108,14 @@ export function WindowPage() {
                     <div className="text-xs text-muted">公告剩余</div>
                     <CountdownText at={item.deadline?.at} className="text-4xl font-semibold" />
                   </div>
+                </div>
+                <div className="mt-4 border-t border-line pt-4">
+                  <ReleasePipeline
+                    stage={item.stage}
+                    deadlineAt={item.deadline?.at}
+                    windowSeconds={data.countdown_seconds}
+                    version={item.version}
+                  />
                 </div>
                 <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-line pt-4">
                   <ActionButton tone="accent" onClick={() => openDeploy(item, write)}>

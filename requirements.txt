@@ -17,3 +17,19 @@ numpy>=1.26
 
 # --- 可选：.env 自动加载（未安装也能运行，见 config.py） ---
 python-dotenv>=1.0
+
+# --- 生产持久化（AIOPS_MODE=production：MySQL 8.0；见 aiops_agent/db.py） ---
+sqlalchemy>=2.0
+pymysql>=1.1
+cryptography>=42.0          # PyMySQL 连接 caching_sha2_password 认证依赖
+
+# --- 可观测与安全（生产） ---
+prometheus-client>=0.20     # /metrics 指标暴露（批次 5）
+redis>=5.0                  # 可选：多副本速率限制后端（未配置 AIOPS_REDIS_URL 时用内存滑动窗口）
+bandit>=1.7                 # 可选：SAST 扫描（scripts/security-scan.sh；未安装则脚本提示）
+
+# --- OpenTelemetry（可选：配置 AIOPS_OTEL_ENDPOINT 后启用链路追踪） ---
+opentelemetry-api>=1.25
+opentelemetry-sdk>=1.25
+opentelemetry-instrumentation-fastapi>=0.46b0
+opentelemetry-exporter-otlp-proto-http>=1.25

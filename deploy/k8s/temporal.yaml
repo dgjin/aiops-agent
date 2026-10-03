@@ -1,0 +1,129 @@
+# Temporal（工作流引擎：auto-setup 集群模式 + MySQL 后端 + Web UI）
+#
+# 说明（优化方案 P4-02）：
+#   - temporalio/auto-setup 在启动时自动建表（temporal / temporal_visibility 库由
+#     mysql.yaml 的 initdb 预先创建并授权 aiops 用户）；
+#   - DEFAULT_NAMESPACE_RETENTION=720h（30 天）：与数据清理 TTL 对齐（优化方案 3.6），
+#     避免 Temporal 历史无限增长；
+#   - 生产高可用可横向扩展 temporal-server 副本（auto-setup 支持多副本竞争启动），
+#     本清单保守使用 1 副本 + 注释，集群规模扩大时再调；
+#   - 存储容量规划参考：单库约 1000 事件/s 吞吐，超出请迁移 Temporal Cloud / Cassandra。
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiops-temporal
+  namespace: aiops-system
+  labels:
+    app: aiops-temporal
+spec:
+  type: ClusterIP
+  ports:
+    - name: grpc
+      port: 7233
+      targetPort: 7233
+  selector:
+    app: aiops-temporal
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiops-temporal
+  namespace: aiops-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: aiops-temporal
+  template:
+    metadata:
+      labels:
+        app: aiops-temporal
+    spec:
+      containers:
+        - name: temporal
+          image: temporalio/auto-setup:1.25.2
+          ports:
+            - name: grpc
+              containerPort: 7233
+          env:
+            - name: DB
+              value: mysql8
+            - name: DB_PORT
+              value: "3306"
+            - name: MYSQL_SEEDS
+              value: aiops-mysql
+            - name: MYSQL_USER
+              value: aiops
+            - name: MYSQL_PWD
+              valueFrom:
+                secretKeyRef: { name: aiops-secrets, key: MYSQL_PASSWORD }
+            # 命名空间保留期 30 天（对齐数据清理 TTL / 优化方案 3.6）
+            - name: DEFAULT_NAMESPACE_RETENTION
+              value: "720h"
+          readinessProbe:
+            tcpSocket:
+              port: 7233
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 7233
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 500m, memory: 512Mi }
+            limits: { cpu: "2", memory: 1Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiops-temporal-ui
+  namespace: aiops-system
+  labels:
+    app: aiops-temporal-ui
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  selector:
+    app: aiops-temporal-ui
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiops-temporal-ui
+  namespace: aiops-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aiops-temporal-ui
+  template:
+    metadata:
+      labels:
+        app: aiops-temporal-ui
+    spec:
+      containers:
+        - name: temporal-ui
+          image: temporalio/ui:2.31.2
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: TEMPORAL_ADDRESS
+              value: aiops-temporal:7233
+            - name: TEMPORAL_CORS_ORIGINS
+              value: http://localhost:8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 256Mi }

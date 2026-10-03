@@ -25,16 +25,19 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import code_rag
-from .fix_agent import apply_unified_diff
+from . import code_rag, metrics
+from .fix_agent import apply_unified_diff, split_unified_diff
 from .models import Patch, TestReport
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -92,7 +95,7 @@ class SandboxOutcome:
 
 
 def scan_patch_diff(diff: str) -> tuple[bool, str]:
-    """SAST 演示实现：扫描 diff 新增行中的高危模式。返回 (ok, detail)。"""
+    """SAST 第一道（快速正则）：扫描 diff 新增行中的高危模式。返回 (ok, detail)。"""
     added = [
         line[1:] for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++")
     ]
@@ -105,6 +108,85 @@ def scan_patch_diff(diff: str) -> tuple[bool, str]:
     return True, f"无高危模式，无硬编码敏感信息（新增 {len(added)} 行已扫描）"
 
 
+# Bandit 第二道（AST 深度扫描，P2-04）：拦截补丁**新引入**的 HIGH/MEDIUM 问题
+_BANDIT_BLOCKING_SEVERITIES = {"HIGH", "MEDIUM"}
+_BANDIT_TIMEOUT_SECONDS = 30
+
+
+def _bandit_scan(target: Path) -> tuple[list[dict] | None, str]:
+    """对目录运行 bandit（JSON 输出），返回 (issues, error)；不可用时 issues 为 None。
+
+    本机形态在宿主 venv 运行——bandit 仅做 AST 静态分析、不执行代码，安全等价；
+    生产镜像可将 bandit 预装进沙箱镜像，把该命令下推到隔离容器内执行。
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "bandit", "-r", str(target), "-f", "json", "-q"],
+            capture_output=True,
+            timeout=_BANDIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, f"bandit 不可用（{exc.__class__.__name__}）"
+    try:
+        payload = json.loads(_as_text(proc.stdout) or "{}")
+    except json.JSONDecodeError:
+        return None, "bandit 输出解析失败"
+    results = payload.get("results")
+    return (results if isinstance(results, list) else []), ""
+
+
+def _bandit_key(issue: dict, root: Path) -> tuple[str, str]:
+    """归一化问题标识（相对路径 + 规则号），使 baseline 与 workspace 可比。"""
+    try:
+        filename = str(
+            Path(str(issue.get("filename"))).resolve().relative_to(Path(root).resolve())
+        )
+    except (ValueError, OSError):
+        filename = Path(str(issue.get("filename", "?"))).name
+    return filename, str(issue.get("test_id", "?"))
+
+
+def run_bandit(workspace: Path, baseline: Path) -> tuple[bool, str]:
+    """Bandit 深度扫描（返回 (ok, detail)）：仅拦截补丁新引入的 HIGH/MEDIUM 问题。
+
+    demo-app 存在既有的 bandit 发现（0.0.0.0 绑定、测试样例口令等），
+    因此对 baseline（原代码）与 workspace（补丁后）分别扫描并做多重集差集——
+    否则任何补丁都会被历史问题拦下。LOW / 既有问题仅记录不拦截；
+    bandit 不可用时降级放行（正则第一道仍在），链路不中断。
+    """
+    ws_issues, ws_error = _bandit_scan(workspace)
+    if ws_issues is None:
+        return True, f"Bandit 未执行（{ws_error}）"
+    base_issues, base_error = _bandit_scan(baseline)
+    if base_issues is None:
+        return True, f"Bandit 基线不可比（{base_error}），跳过深度拦截"
+    known = Counter(_bandit_key(issue, baseline) for issue in base_issues)
+    seen: Counter = Counter()
+    new_issues: list[dict] = []
+    for issue in ws_issues:
+        key = _bandit_key(issue, workspace)
+        seen[key] += 1
+        if seen[key] > known.get(key, 0):
+            new_issues.append(issue)
+    blocking = [
+        issue
+        for issue in new_issues
+        if str(issue.get("issue_severity", "")).upper() in _BANDIT_BLOCKING_SEVERITIES
+    ]
+    if blocking:
+        desc = "；".join(
+            f"{issue.get('test_id')} {issue.get('issue_severity')} "
+            f"{Path(str(issue.get('filename', '?'))).name}:{issue.get('line_number')} "
+            f"{str(issue.get('issue_text', '')).strip()}"
+            for issue in blocking[:5]
+        )
+        return False, f"Bandit 拦截：补丁新增 {len(blocking)} 个 HIGH/MEDIUM 问题（{desc}）"
+    suffix = (
+        f"（新增 LOW 问题 {len(new_issues)} 个，已记录）" if new_issues else "（0 新增问题）"
+    )
+    return True, f"Bandit 通过{suffix}"
+
+
 def prepare_workspace(
     patch: Patch, repo_dir: Path, sandbox_root: Path
 ) -> tuple[Path | None, str]:
@@ -113,6 +195,20 @@ def prepare_workspace(
     if workspace.exists():
         shutil.rmtree(workspace)
     shutil.copytree(repo_dir, workspace, ignore=_IGNORE)
+
+    # 多文件补丁（如受保护目录场景需同时改动 auth/** 与应用文件）：逐文件分别应用
+    sections = split_unified_diff(patch.diff)
+    if len(sections) > 1:
+        for rel, file_diff in sections.items():
+            target = workspace / rel
+            if not target.is_file():
+                return None, f"工作区中目标文件不存在: {rel}"
+            original = target.read_text(encoding="utf-8")
+            new_text = apply_unified_diff(original, file_diff)
+            if new_text is None:
+                return None, f"补丁 diff 无法应用（上下文不匹配）: {rel}"
+            target.write_text(new_text, encoding="utf-8")
+        return workspace, ""
 
     target_rel = patch.files[0] if patch.files else ""
     target = workspace / target_rel
@@ -311,9 +407,22 @@ def run_patch_tests(
             details=f"{prep_error}（attempt={attempt}）",
         )
 
+    # 第二道 SAST：Bandit AST 深度扫描（仅拦截补丁新引入的 HIGH/MEDIUM 问题）
+    bandit_ok, bandit_detail = run_bandit(workspace, repo_dir)
+    sast_combined = f"{sast_detail}；{bandit_detail}"
+    if not bandit_ok:
+        return TestReport(
+            patch_id=patch.patch_id,
+            passed=False,
+            unit_tests="未执行（Bandit 拦截）",
+            regression_tests="未执行",
+            sast=sast_combined,
+            details=f"深度静态扫描失败：{bandit_detail}（attempt={attempt}）",
+        )
+
     job = SandboxJob(patch_id=patch.patch_id, workspace=workspace)
     outcome = (runner or DockerSandboxRunner()).run(job)
-    return _report_from_outcome(patch, attempt, outcome, sast_detail)
+    return _report_from_outcome(patch, attempt, outcome, sast_combined)
 
 
 def _report_from_outcome(
@@ -343,6 +452,7 @@ def _report_from_outcome(
         if tests_run
         else "未执行"
     )
+    metrics.observe_sandbox_run(outcome.passed, outcome.duration_seconds)
     return TestReport(
         patch_id=patch.patch_id,
         passed=outcome.passed,

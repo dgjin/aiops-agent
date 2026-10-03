@@ -12,6 +12,7 @@ Alertmanager 侧接入点（本机 nl2sql-monitoring 栈 deploy/alertmanager.yml
       （labelset 稳定哈希，同一告警重复投递时保证幂等键不变）；
     - 幂等：workflow id = aiops-fix-{service}-{alert_id}，REJECT_DUPLICATE + FAIL，
       重复投递仅返回 duplicates，不产生第二个流程实例；
+    - kill switch：启动前检查，激活时返回 503 拒绝新流程；状态不可读时 fail-closed；
     - 策略快照在服务启动时加载一次（与 worker 语义一致，运行期不热修改）；
     - 启动失败返回 5xx，交由 Alertmanager 按重试策略再次投递。
 """
@@ -29,6 +30,7 @@ from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
+from aiops_agent import kill_switch, metrics
 from aiops_agent.config import load_policy, snapshot_for_workflow
 from aiops_agent.models import Alert
 from aiops_agent.workflows import AIOpsFixWorkflow
@@ -81,6 +83,17 @@ def workflow_id_for(alert: Alert) -> str:
     return f"aiops-fix-{alert.service}-{alert.alert_id}"
 
 
+def check_kill_switch() -> dict | None:
+    """kill switch 检查：放行返回 None；拒绝返回响应体（含 error；fail-closed）。"""
+    try:
+        state = kill_switch.get_state()
+    except kill_switch.KillSwitchError as exc:
+        return {"error": f"kill switch 状态不可读，拒绝启动（fail-closed）：{exc}"}
+    if state.get("active"):
+        return {"error": "kill switch 已激活，拒绝启动新流程", "kill_switch": state}
+    return None
+
+
 async def _start_workflows(alerts: list[Alert], snapshot: dict) -> tuple[list[str], list[str]]:
     """逐条启动 workflow，返回 (started, duplicates)。幂等冲突不算失败。"""
     client = await Client.connect(os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))
@@ -98,6 +111,7 @@ async def _start_workflows(alerts: list[Alert], snapshot: dict) -> tuple[list[st
                 id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
             )
             started.append(wf_id)
+            metrics.observe_workflow_started(alert.service)
         except WorkflowAlreadyStartedError:
             duplicates.append(wf_id)
     return started, duplicates
@@ -124,6 +138,15 @@ class _WebhookHandler(BaseHTTPRequestHandler):
         if not alerts:
             logger.info("收到载荷：0 条 firing（忽略 resolved=%d）", resolved)
             self._respond(200, {"started": [], "duplicates": [], "ignored_resolved": resolved})
+            return
+
+        # kill switch：激活时拒绝启动新流程；状态不可读 fail-closed（503）
+        blocked = check_kill_switch()
+        if blocked:
+            logger.warning(
+                "kill switch 拦截告警启动（%d 条 firing）：%s", len(alerts), blocked["error"]
+            )
+            self._respond(503, blocked)
             return
 
         try:

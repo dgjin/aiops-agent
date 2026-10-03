@@ -1,8 +1,9 @@
 /** 审批中心：待办审批队列（2 秒轮询，按截止时间升序，一级 / 二级区分）（设计方案 7.4）。 */
 
+import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { api } from '../lib/api'
-import { cn } from '../lib/format'
+import { api, describeError } from '../lib/api'
+import { cn, diffStat } from '../lib/format'
 import { useWriteAction } from '../lib/actions'
 import { ActionButton } from '../components/ActionButton'
 import { ConfirmDialog } from '../components/ConfirmDialog'
@@ -21,20 +22,70 @@ function openDecision(item: FlowItem, second: boolean, decision: 'approve' | 're
     title: second ? `确认二级${approve ? '批准' : '驳回'}？` : `确认${approve ? '批准' : '驳回'}？`,
     tone: approve ? 'default' : 'danger',
     confirmLabel: second ? `二级${approve ? '批准' : '驳回'}` : approve ? '批准' : '驳回',
-    detail: (
-      <div className="space-y-1.5">
-        <div>
-          工作流：<span className="font-mono text-xs">{item.wf_id}</span>
+    detail: (() => {
+      const stat = diffStat(item.patch?.diff)
+      return (
+        <div className="space-y-2.5 text-sm">
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+            <div>服务：{item.alert?.service ?? '—'}</div>
+            <div>
+              置信度：
+              <span className="font-mono text-ink">
+                {item.confidence != null ? item.confidence.toFixed(2) : '—'}
+              </span>
+            </div>
+            <div className="col-span-2">
+              工作流：<span className="font-mono text-xs">{item.wf_id}</span>
+            </div>
+            <div className="col-span-2">
+              告警：<span className="font-mono text-xs">{item.alert?.alert_id ?? '—'}</span>
+            </div>
+          </div>
+
+          {item.patch ? (
+            <div className="rounded-lg border border-line bg-canvas p-2.5">
+              <div className="text-xs">
+                补丁改动：<span className="text-ink">{stat.files} 个文件</span>
+                <span className="ml-2 font-mono text-ok">+{stat.added}</span>
+                <span className="ml-1 font-mono text-danger">-{stat.removed}</span>
+              </div>
+              <div className="mt-1 truncate font-mono text-[11px] text-muted" title={item.patch.files.join('、')}>
+                {item.patch.files.join('、')}
+              </div>
+              {item.patch.risk && <div className="mt-1 text-[11px] text-idle">风险：{item.patch.risk}</div>}
+            </div>
+          ) : (
+            <div className="text-xs text-idle">（未取到补丁信息）</div>
+          )}
+
+          {item.test_report && (
+            <div
+              className={cn(
+                'rounded-lg border p-2.5 text-xs',
+                item.test_report.passed
+                  ? 'border-ok/30 bg-ok/10 text-ok'
+                  : 'border-danger/30 bg-danger/10 text-danger',
+              )}
+            >
+              测试结论：{item.test_report.passed ? '通过' : '未通过'} · {item.test_report.unit_tests || '—'}
+              {item.test_report.sast && (
+                <div className="mt-0.5 text-[11px] text-idle">SAST：{item.test_report.sast}</div>
+              )}
+            </div>
+          )}
+
+          <div className="text-ink">
+            决策：{approve ? '批准（进入公告窗口）' : '驳回（转人工处理）'}
+          </div>
+          <Link
+            to={`/flows/${encodeURIComponent(item.wf_id)}`}
+            className="inline-block text-xs text-accent hover:underline"
+          >
+            查看完整详情（diff / 测试报告 / 事件时间线）→
+          </Link>
         </div>
-        <div>服务：{item.alert?.service ?? '—'}</div>
-        <div>
-          告警：<span className="font-mono text-xs">{item.alert?.alert_id ?? '—'}</span>
-        </div>
-        <div className="text-ink">
-          决策：{approve ? '批准（进入公告窗口）' : '驳回（转人工处理）'}
-        </div>
-      </div>
-    ),
+      )
+    })(),
     run: () =>
       second ? api.secondApproval(item.wf_id, decision) : api.approval(item.wf_id, decision),
     success: `${second ? '二级' : '一级'}审批已提交：${approve ? '批准' : '驳回'}`,
@@ -56,7 +107,7 @@ export function Approvals() {
 
       {isError && (
         <div className="mt-5">
-          <EmptyState title="无法加载审批列表" hint={String(error)} />
+          <EmptyState title="无法加载审批列表" hint={describeError(error)} />
         </div>
       )}
 
@@ -91,6 +142,25 @@ export function Approvals() {
                         {item.patch_id && (
                           <span>
                             补丁 <CopyableId value={item.patch_id} />
+                          </span>
+                        )}
+                        <span>
+                          置信度{' '}
+                          <span className="font-mono text-ink">
+                            {item.confidence != null ? item.confidence.toFixed(2) : '—'}
+                          </span>
+                        </span>
+                        {item.patch && (
+                          <span>
+                            改动{' '}
+                            <span className="font-mono text-ok">+{diffStat(item.patch.diff).added}</span>{' '}
+                            <span className="font-mono text-danger">-{diffStat(item.patch.diff).removed}</span>
+                          </span>
+                        )}
+                        {item.test_report && (
+                          <span className={item.test_report.passed ? 'text-ok' : 'text-danger'}>
+                            测试 {item.test_report.passed ? '通过' : '未通过'}
+                            {item.test_report.unit_tests ? ` · ${item.test_report.unit_tests}` : ''}
                           </span>
                         )}
                       </div>

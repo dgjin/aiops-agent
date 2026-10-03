@@ -1,8 +1,14 @@
-"""Code RAG（WP4 交付物）：AST 语义切块 + Ollama 嵌入 + 向量索引 + 余弦检索。
+"""Code RAG（WP4 交付物）：语义切块 + Ollama 嵌入 + 向量索引 + 余弦检索。
+
+多语言（对齐「被监控应用」接入）：
+    - ``.py``       → ``chunk_python_source``：ast 解析，函数/类方法级切块；
+    - ``.ts/.tsx/.js/.jsx/.mjs/.cjs`` → ``chunk_ts_source``：声明（function/class/箭头函数）
+      正则识别 + 花括号配平近似切块，未识别出声明时回退块切分。
+    统一切块入口 ``chunk_source`` 按扩展名分派。
 
 流程（对齐实施计划 WP4 任务 1/2）：
     build_index(repo_dir)
-      → chunk_python_source：ast 解析按「函数/方法」语义切块（附行号区间）；
+      → chunk_source：按语言语义切块（附行号区间）；
       → 历史工单语料（data/historical_tickets.json）以 kind=ticket 同库索引；
       → embed_texts：Ollama /api/embed 批量嵌入（默认 bge-m3）；
       → 持久化 data/code_index.json（向量 + 元数据）。
@@ -30,6 +36,7 @@ import ast
 import json
 import math
 import os
+import re
 import time
 import urllib.request
 from pathlib import Path
@@ -80,24 +87,164 @@ def chunk_python_source(source: str, file_path: str) -> list[dict]:
     return chunks
 
 
+# 代码切块支持的语言：Python 走 AST 语义切块；TS/JS 走声明切块（无原生解析器，用声明+花括号配平）
+PYTHON_EXTS = (".py",)
+TSJS_EXTS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+CODE_EXTS = PYTHON_EXTS + TSJS_EXTS
+
+# TS/JS 顶层声明：function / class
+_TS_DECL = re.compile(
+    r"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(?:declare\s+)?(?:async\s+)?"
+    r"(?P<kind>function|class)\s+(?P<name>[A-Za-z_$][\w$]*)"
+)
+# TS/JS 顶层箭头函数 / 函数表达式：const name = (...) => {...} / const name = async () => ...
+_TS_ARROW = re.compile(
+    r"^\s*(?:export\s+)?(?:const|let|var)\s+(?P<name>[A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?"
+    r"(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)"
+)
+# 类方法：缩进后的 name(...) { （排除控制流关键字）
+_TS_METHOD = re.compile(
+    r"^\s{2,}(?:(?:public|private|protected|static|readonly|async|override|get|set|abstract)\s+)*"
+    r"(?P<name>[A-Za-z_$][\w$]*)\s*\([^;{}]*\)\s*(?::[^;{]+)?\{"
+)
+_TS_METHOD_SKIP = {"if", "for", "while", "switch", "catch", "return", "constructor"}
+
+
+def _brace_block_end(lines: list[str], start: int) -> int:
+    """从 start 行起做花括号配平，返回块结束行（0-based）；未配平则到文件末。
+
+    简化实现：把字符串/注释内的花括号也计入（切块用途可接受，宁可块大不可漏块）。
+    """
+    depth = 0
+    opened = False
+    for i in range(start, len(lines)):
+        for ch in lines[i]:
+            if ch == "{":
+                depth += 1
+                opened = True
+            elif ch == "}":
+                depth -= 1
+        if opened and depth <= 0:
+            return i
+    return len(lines) - 1
+
+
+def _jsdoc_above(lines: list[str], start: int) -> str:
+    """取紧邻声明上方的 JSDoc 注释（/** ... */）作为 docstring。"""
+    i = start - 1
+    if i < 0 or not lines[i].strip().endswith("*/"):
+        return ""
+    end = i
+    while i >= 0 and "/**" not in lines[i]:
+        i -= 1
+    if i < 0:
+        return ""
+    block = "\n".join(lines[i : end + 1]).replace("/**", "").replace("*/", "")
+    parts = [ln.strip().lstrip("*").strip() for ln in block.splitlines()]
+    return "\n".join(p for p in parts if p).strip()
+
+
+def chunk_ts_source(source: str, file_path: str, *, fallback_window: int = 40) -> list[dict]:
+    """TS/JS 语义切块：顶层函数/类/箭头函数各成一块，类方法另行切块。
+
+    无原生解析器，采用「声明正则 + 花括号配平」近似；若一个文件未识别出任何声明，
+    回退为空白分隔的块切分（再退化到定长窗口），保证文件不整体丢失。
+    """
+    lines = source.splitlines()
+    chunks: list[dict] = []
+
+    def add(kind: str, qualname: str, start0: int, end0: int) -> None:
+        chunks.append(
+            {
+                "kind": kind,
+                "file": file_path,
+                "qualname": qualname,
+                "start_line": start0 + 1,
+                "end_line": end0 + 1,
+                "docstring": _jsdoc_above(lines, start0),
+                "snippet": "\n".join(lines[start0 : end0 + 1]),
+            }
+        )
+
+    class_names: list[str] = []
+    for idx, line in enumerate(lines):
+        decl = _TS_DECL.match(line)
+        arrow = _TS_ARROW.match(line) if not decl else None
+        if decl:
+            name, block_kind = decl.group("name"), decl.group("kind")
+            end = _brace_block_end(lines, idx)
+            add("class" if block_kind == "class" else "function", name, idx, end)
+            if block_kind == "class":
+                class_names.append(name)
+                for sub in range(idx + 1, end):
+                    method = _TS_METHOD.match(lines[sub])
+                    if method and method.group("name") not in _TS_METHOD_SKIP:
+                        add(
+                            "method",
+                            f"{name}.{method.group('name')}",
+                            sub,
+                            _brace_block_end(lines, sub),
+                        )
+        elif arrow:
+            add("function", arrow.group("name"), idx, _brace_block_end(lines, idx))
+
+    if chunks:
+        return chunks
+
+    # 回退：按空行分块；整文件无空行时按定长窗口切
+    block_start = 0
+    for idx in range(len(lines) + 1):
+        at_end = idx == len(lines)
+        if at_end or not lines[idx].strip():
+            if idx - block_start >= 5:
+                add("block", f"block@{block_start + 1}", block_start, idx - 1)
+            block_start = idx + 1
+    if chunks:
+        return chunks
+    for start in range(0, len(lines), fallback_window):
+        add("block", f"block@{start + 1}", start, min(start + fallback_window, len(lines)) - 1)
+    return chunks
+
+
+def chunk_source(source: str, file_path: str) -> list[dict]:
+    """按扩展名分派代码切块；不支持的语言返回空列表。"""
+    ext = Path(file_path).suffix.lower()
+    if ext in PYTHON_EXTS:
+        return chunk_python_source(source, file_path)
+    if ext in TSJS_EXTS:
+        return chunk_ts_source(source, file_path)
+    return []
+
+
 def embed_texts(
     texts: list[str],
     model: str | None = None,
     ollama_url: str | None = None,
 ) -> list[list[float]]:
-    """Ollama /api/embed 批量嵌入（首次调用会触发模型加载，超时放宽）。"""
-    payload = {"model": model or DEFAULT_EMBED_MODEL, "input": texts}
-    req = urllib.request.Request(
-        f"{(ollama_url or DEFAULT_OLLAMA_URL).rstrip('/')}/api/embed",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        data = json.load(resp)
-    embeddings = data.get("embeddings") or []
-    if len(embeddings) != len(texts):
-        raise RuntimeError(f"嵌入数量不匹配: 期望 {len(texts)} 实际 {len(embeddings)}")
+    """Ollama /api/embed 批量嵌入（**分批请求**，首次调用会触发模型加载，超时放宽）。
+
+    分批的必要性：接入真实仓库后块数可达数千，单次请求会过大且易超时。
+    批大小由 ``AIOPS_EMBED_BATCH_SIZE`` 控制（默认 64）。
+    """
+    if not texts:
+        return []
+    size = int(os.environ.get("AIOPS_EMBED_BATCH_SIZE", "64"))
+    url = f"{(ollama_url or DEFAULT_OLLAMA_URL).rstrip('/')}/api/embed"
+    embeddings: list[list[float]] = []
+    for start in range(0, len(texts), size):
+        batch = texts[start : start + size]
+        req = urllib.request.Request(
+            url,
+            data=json.dumps({"model": model or DEFAULT_EMBED_MODEL, "input": batch}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.load(resp)
+        part = data.get("embeddings") or []
+        if len(part) != len(batch):
+            raise RuntimeError(f"嵌入数量不匹配: 期望 {len(batch)} 实际 {len(part)}")
+        embeddings.extend(part)
     return embeddings
 
 
@@ -214,14 +361,22 @@ def build_index(
 
     chunks: list[dict] = []
     file_count = 0
-    for py_file in sorted(repo_dir.rglob("*.py")):
-        if "__pycache__" in py_file.parts:
+    skip_dirs = {"__pycache__", "node_modules", "dist", "build", ".venv", "coverage", "backups", "vendor"}
+    for code_file in sorted(p for p in repo_dir.rglob("*") if p.suffix.lower() in CODE_EXTS):
+        # 只按「相对仓库根」的路径判断，跳过依赖/产物/工具与 agent 配置目录（.agents/.claude/.qoder 等）
+        rel_parts = code_file.relative_to(repo_dir).parts
+        if any(part.startswith(".") or part in skip_dirs for part in rel_parts):
             continue
         try:
-            file_chunks = chunk_python_source(
-                py_file.read_text(encoding="utf-8"), str(py_file.relative_to(repo_dir))
-            )
-        except SyntaxError:
+            source = code_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        rel = str(code_file.relative_to(repo_dir))
+        try:
+            file_chunks = chunk_source(source, rel)
+        except SyntaxError:  # Python 解析失败（文件损坏）→ 跳过
+            continue
+        if not file_chunks:
             continue
         chunks.extend(file_chunks)
         file_count += 1
@@ -280,8 +435,13 @@ def search_index(
     model: str | None = None,
 ) -> list[dict]:
     """检索：查询文本嵌入后走生效后端（FAISS 可用且索引存在时）做 top-k，
-    否则回退纯 Python 余弦。索引不存在时抛 FileNotFoundError。"""
-    path = Path(index_path) if index_path else INDEX_PATH
+    否则回退纯 Python 余弦。索引不存在时抛 FileNotFoundError。
+
+    索引路径优先级：显式参数 > 环境变量 ``AIOPS_CODE_INDEX`` > 默认 INDEX_PATH
+    （便于把检索指向「被监控应用」的独立索引）。
+    """
+    env_index = os.environ.get("AIOPS_CODE_INDEX")
+    path = Path(index_path) if index_path else Path(env_index) if env_index else INDEX_PATH
     index = json.loads(path.read_text(encoding="utf-8"))
     query_vec = embed_texts([query], model=model or index.get("model"))[0]
     if resolve_backend() == "faiss":

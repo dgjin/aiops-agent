@@ -39,6 +39,26 @@ def check_stage_allowed(current: str | None, allowed: set[str]) -> str | None:
     return None
 
 
+# 执行状态 → 流程终态分类（仅在 result 不可读、stage 为空时用于补全）
+_FAILED_EXEC_STATUSES = {"FAILED", "TIMED_OUT"}
+_CANCELLED_EXEC_STATUSES = {"CANCELED", "TERMINATED"}
+
+
+def stage_from_exec_status(exec_status: str | None) -> str | None:
+    """把 Temporal 执行状态映射为流程终态（纯函数）。
+
+    「硬失败」流程读不到 result，stage 会为空，导致看板与审计把它显示成「未知」而
+    在统计中消失（缺陷 B3）。这里按执行状态派生可辨识的终态：失败 → ``FAILED``，
+    取消/终止 → ``CANCELLED``；其余返回 None（保持未知，不臆造）。
+    """
+    status = (exec_status or "").upper()
+    if status in _FAILED_EXEC_STATUSES:
+        return "FAILED"
+    if status in _CANCELLED_EXEC_STATUSES:
+        return "CANCELLED"
+    return None
+
+
 def _item_from_status(base: dict, status: dict) -> None:
     base.update(
         stage=status.get("stage"),
@@ -50,6 +70,11 @@ def _item_from_status(base: dict, status: dict) -> None:
         second_approval=status.get("second_approval"),
         deploy_command=status.get("deploy_command"),
         queued_patches=status.get("queued_patches") or [],
+        # 待审批期的判断依据（工作流未结束，result 尚不可读）
+        patch=status.get("patch"),
+        test_report=status.get("test_report"),
+        root_cause=status.get("root_cause"),
+        confidence=(status.get("root_cause") or {}).get("confidence"),
     )
 
 
@@ -61,6 +86,8 @@ def _item_from_result(base: dict, result: dict) -> None:
         confidence=result.get("confidence"),
         model_version=result.get("model_version"),
         patch_id=result.get("patch_id"),
+        patch=result.get("patch"),
+        test_report=result.get("test_report"),
         queued_patches=[
             {"workflow_id": None, "alert_id": alert_id}
             for alert_id in result.get("queued_patches") or []
@@ -140,6 +167,10 @@ class TemporalGateway:
             "confidence": None,
             "model_version": None,
             "patch_id": None,
+            # 审批期证据（status 查询或终态 result 中取得）
+            "patch": None,
+            "test_report": None,
+            "root_cause": None,
             "stage_error": None,
         }
         handle = client.get_workflow_handle(wf.id, run_id=wf.run_id)
@@ -155,6 +186,9 @@ class TemporalGateway:
                 _item_from_result(base, result)
             except Exception as exc:  # noqa: BLE001 - 结果缺失时降级
                 base["stage_error"] = f"result 读取失败: {exc}"
+        # 终态补全：硬失败/取消的流程读不到 result，按执行状态派生终态，避免显示为「未知」
+        if not base["stage"]:
+            base["stage"] = stage_from_exec_status(base["exec_status"])
         return base
 
     # ------------------------------------------------------------------

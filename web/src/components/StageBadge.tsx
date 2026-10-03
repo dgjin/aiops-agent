@@ -19,6 +19,8 @@ const STAGE_META: Record<string, StageMeta> = {
   DONE: { label: '已完成', tone: 'ok' },
   ESCALATED: { label: '已转人工', tone: 'danger' },
   CANCELLED: { label: '已取消', tone: 'idle' },
+  // 硬失败/超时（读不到 result，由执行状态派生；见 bff/temporal_gateway.stage_from_exec_status）
+  FAILED: { label: '执行失败', tone: 'danger' },
 }
 
 const TONE_CLS: Record<StageMeta['tone'], string> = {

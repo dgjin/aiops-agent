@@ -40,6 +40,24 @@ export function fmtRemain(ms: number): string {
   return `${mm}:${ss}`
 }
 
+/** unified diff 摘要：变更文件数与增删行数（审批时快速判断改动规模）。 */
+export function diffStat(diff: string | null | undefined): {
+  files: number
+  added: number
+  removed: number
+} {
+  if (!diff) return { files: 0, added: 0, removed: 0 }
+  let added = 0
+  let removed = 0
+  let files = 0
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('+++ ')) files += 1
+    else if (line.startsWith('+')) added += 1
+    else if (line.startsWith('-') && !line.startsWith('---')) removed += 1
+  }
+  return { files, added, removed }
+}
+
 export function downloadJson(filename: string, data: unknown): void {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
   const url = URL.createObjectURL(blob)

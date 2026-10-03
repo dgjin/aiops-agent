@@ -1,0 +1,101 @@
+# Prometheus Operator 资源（ServiceMonitor 自动发现 + PrometheusRule 告警规则）
+#
+# 适用：集群已安装 kube-prometheus-stack（含 Prometheus Operator）。
+# 未使用 Operator 的集群：删除本文件，改用 deploy/prometheus/ 的静态配置与规则文件。
+#
+# 注意：PrometheusRule 的 6 条规则与 deploy/prometheus/aiops-alerts.yml 保持同步
+#（测试 tests/test_deploy_manifests.py 校验两处告警名称一致）。
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: aiops-worker
+  namespace: aiops-system
+  labels:
+    # 供 Prometheus Operator 的 serviceMonitorSelector 匹配（按集群约定调整）
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: ["aiops-system"]
+  selector:
+    matchLabels:
+      app: aiops-worker
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: aiops-bff
+  namespace: aiops-system
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: ["aiops-system"]
+  selector:
+    matchLabels:
+      app: aiops-bff
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: aiops-self-health
+  namespace: aiops-system
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: aiops-self-health
+      rules:
+        - alert: AIOpsWorkerDown
+          expr: up{job=~".*aiops-worker.*"} == 0
+          for: 2m
+          labels: { severity: critical, component: aiops-worker }
+          annotations:
+            summary: "AIOps worker 指标端点不可达（:9090/metrics）"
+            description: "worker 可能已下线或指标服务未启动（AIOPS_METRICS_PORT=0），修复流程将停止推进。"
+        - alert: AIOpsBffDown
+          expr: up{job=~".*aiops-bff.*"} == 0
+          for: 2m
+          labels: { severity: critical, component: aiops-bff }
+          annotations:
+            summary: "AIOps 控制台 BFF 指标端点不可达（:8600/metrics）"
+            description: "控制台或 BFF 进程不可用，运维无法审批/查看流程。"
+        - alert: AIOpsBffHighErrorRate
+          expr: |
+            (
+              sum(rate(aiops_bff_requests_total{status=~"5.."}[5m]))
+                / clamp_min(sum(rate(aiops_bff_requests_total[5m])), 0.001)
+            ) > 0.05
+          for: 5m
+          labels: { severity: warning, component: aiops-bff }
+          annotations:
+            summary: "BFF 5xx 错误率超过 5%"
+            description: "近 5 分钟服务端错误占比过高，检查 MySQL / Temporal 连通性与 kill switch 状态。"
+        - alert: AIOpsWorkflowEscalationSpike
+          expr: increase(aiops_workflow_completed_total{stage="ESCALATED"}[30m]) > 3
+          for: 5m
+          labels: { severity: warning, component: aiops-workflow }
+          annotations:
+            summary: "近 30 分钟转人工流程超过 3 个"
+            description: "可能是 LLM/沙箱环境异常导致修复链路整体降级，优先检查 Ollama/Qoder 与沙箱运行时。"
+        - alert: AIOpsCanaryUnhealthy
+          expr: increase(aiops_canary_deploys_total{healthy="false"}[30m]) > 0
+          for: 1m
+          labels: { severity: critical, component: aiops-canary }
+          annotations:
+            summary: "出现金丝雀劣化（自动回滚已触发）"
+            description: "金丝雀观测错误率超阈值并回滚；复核补丁与发布批次，必要时停用自动修复。"
+        - alert: AIOpsSandboxFailureSpike
+          expr: increase(aiops_sandbox_runs_total{passed="false"}[1h]) > 5
+          for: 10m
+          labels: { severity: warning, component: aiops-sandbox }
+          annotations:
+            summary: "近 1 小时沙箱测试失败超过 5 次"
+            description: "补丁通过率下降，检查修复模型输出质量与沙箱运行时状态（docker/K8s Job）。"

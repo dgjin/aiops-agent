@@ -1,4 +1,4 @@
-"""data/ 产物只读聚合：索引 stats / 留痕关联 / 发布记录 / stable 探测（设计方案 6.1）。
+"""data/ 产物只读聚合：索引 stats / 留痕关联 / 发布记录 / stable 与被监控应用探测（设计方案 6.1）。
 
 数据源约定（与主工程一致）：
 - data/code_index.json     代码索引 stats（chunks/dim/model/backend）
@@ -6,18 +6,30 @@
 - data/notify/*.json       通知留痕（审批/公告/升级卡片）
 - data/argocd/*.json       ArgoCD Application manifest 留痕
 - data/sandbox/<patch_id>/ 沙箱工作区
+
+探测约定：
+- probe_stable：本系统发布出的稳定版服务（/health，解析 JSON）
+- probe_monitored_app：**被监控应用**根地址（AIOPS_MONITOR_URL，默认 http://localhost:3000/），
+  根路径通常返回 HTML，故不解析 JSON，只回报可达性与 HTTP 状态码
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 _VERSION_RE = re.compile(r"v[\d.]+")
+
+# 被监控应用根地址默认值（AIOPS_MONITOR_URL 可覆盖）
+DEFAULT_MONITOR_URL = "http://localhost:3000/"
 
 
 def index_stats() -> dict | None:
@@ -122,3 +134,92 @@ def probe_stable(port: str, timeout: float = 1.5) -> dict:
         return {"running": True, "port": port, "target": url, "body": body}
     except Exception as exc:  # noqa: BLE001 - 探测类接口允许失败返回
         return {"running": False, "port": port, "target": url, "error": str(exc)}
+
+
+def _http_reachable(url: str, timeout: float = 2.0) -> tuple[bool, str]:
+    """HTTP 可达性：有响应（含 4xx/5xx）即视为可达。返回 (ok, detail)。"""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 - 本机依赖地址
+            status = getattr(resp, "status", None) or resp.getcode()
+        return True, f"HTTP {status}"
+    except urllib.error.HTTPError as exc:
+        return True, f"HTTP {exc.code}"
+    except Exception as exc:  # noqa: BLE001 - 探测类允许失败返回
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def probe_docker(timeout: float = 3.0) -> tuple[bool, str]:
+    """Docker 守护进程可用性（沙箱测试与发布依赖）。"""
+    try:
+        proc = subprocess.run(
+            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return False, "未安装 docker CLI"
+    except subprocess.TimeoutExpired:
+        return False, f"docker info 超时（>{timeout}s）"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
+    if proc.returncode == 0:
+        return True, (proc.stdout or "").strip() or "ok"
+    tail = (proc.stderr or "").strip().splitlines()
+    return False, (tail[-1][:100] if tail else "docker info 失败")
+
+
+def probe_dependencies() -> dict:
+    """修复链路依赖自检（供全局「降级模式」横幅）。
+
+    这些依赖任一不可用，修复链路都会**静默降级**（日志证据缺失 → 置信度不足；
+    沙箱不可用 → 测试失败 → 转人工），但控制台此前毫无提示（评估报告 C4）。
+    """
+    loki_url = os.environ.get("AIOPS_LOKI_URL", "http://localhost:3101").rstrip("/")
+    ollama_url = os.environ.get("AIOPS_OLLAMA_URL", "http://localhost:11434").rstrip("/")
+    loki_ok, loki_detail = _http_reachable(f"{loki_url}/ready")
+    ollama_ok, ollama_detail = _http_reachable(f"{ollama_url}/api/tags")
+    docker_ok, docker_detail = probe_docker()
+    return {
+        "loki": {"ok": loki_ok, "detail": loki_detail},
+        "ollama": {"ok": ollama_ok, "detail": ollama_detail},
+        "docker": {"ok": docker_ok, "detail": docker_detail},
+    }
+
+
+def probe_monitored_app(url: str | None = None, timeout: float = 2.0) -> dict:
+    """探测**被监控应用**根地址的可用性（同步函数，调用方用 asyncio.to_thread 包装）。
+
+    地址优先级：显式 url > 环境变量 AIOPS_MONITOR_URL > DEFAULT_MONITOR_URL。
+    与 probe_stable 的差异：被监控应用是外部系统，根路径通常返回 HTML，故**不解析 JSON**，
+    只回报可达性、HTTP 状态码与延迟。
+
+    说明：能收到任何 HTTP 响应（含 4xx/5xx）都视为「在线」——那表示端口确实有服务在响应；
+    只有连接失败/超时才判定为不可达。
+    """
+    target = url or os.environ.get("AIOPS_MONITOR_URL") or DEFAULT_MONITOR_URL
+    started = time.monotonic()
+
+    def _elapsed_ms() -> float:
+        return round((time.monotonic() - started) * 1000, 1)
+
+    try:
+        with urllib.request.urlopen(target, timeout=timeout) as resp:  # noqa: S310 - 用户配置的监控地址
+            status = getattr(resp, "status", None) or resp.getcode()
+        return {"running": True, "target": target, "status_code": status, "latency_ms": _elapsed_ms()}
+    except urllib.error.HTTPError as exc:
+        # 有 HTTP 响应即在线（如根路径 404 也说明服务在跑）
+        return {
+            "running": True,
+            "target": target,
+            "status_code": exc.code,
+            "latency_ms": _elapsed_ms(),
+            "note": f"服务在线但根路径返回 HTTP {exc.code}",
+        }
+    except Exception as exc:  # noqa: BLE001 - 探测类接口允许失败返回
+        return {
+            "running": False,
+            "target": target,
+            "error": f"{type(exc).__name__}: {exc}",
+            "latency_ms": _elapsed_ms(),
+        }

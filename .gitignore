@@ -14,6 +14,9 @@ venv/
 # 环境配置（含本地密钥/地址，.env.example 除外）
 .env
 
+# K8s 部署密钥（从 secret.example.yaml 复制填写；含明文口令，禁止提交）
+deploy/k8s/secret.yaml
+
 # 前端依赖与缓存（web/dist 保留以便 BFF 开箱即用）
 web/node_modules/
 web/.vite/

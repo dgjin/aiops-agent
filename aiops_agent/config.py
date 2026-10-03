@@ -200,12 +200,29 @@ class ReleaseGatePolicy(BaseModel):
     canary: CanaryConfig = Field(default_factory=CanaryConfig)
 
 
+class GitConfig(BaseModel):
+    """Git 平台接入（优化方案 3.7 / GAP-14）：MR 真实创建的可选配置段。
+
+    缺省不启用（repo_url 为空 → MR 活动返回 ``recorded`` 桩，演示行为不变）；
+    真实令牌运行时从环境变量 ``AIOPS_GIT_TOKEN`` 读取（生产经 K8s Secret 注入），
+    ``token_secret`` 仅作为部署侧 Secret 名称的引用说明。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    repo_url: str = ""
+    token_secret: str = ""
+    default_branch: str = "main"
+    mr_labels: list[str] = Field(default_factory=lambda: ["aiops", "auto-fix"])
+
+
 class Policy(BaseModel):
     """策略根模型：强校验入口，任何未知键 / 非法值都会在启动阶段抛错。"""
 
     model_config = ConfigDict(extra="forbid")
 
     release_gate: ReleaseGatePolicy = Field(default_factory=ReleaseGatePolicy)
+    git: GitConfig = Field(default_factory=GitConfig)
 
     def summary(self) -> str:
         gate = self.release_gate

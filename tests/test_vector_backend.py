@@ -151,6 +151,17 @@ ROOT_CAUSE = RootCause(
 
 
 class TestFixModelSelection(unittest.TestCase):
+    """模型选择单测：**必须钉死 Ollama 提供者**。
+
+    环境若配置 AIOPS_FIX_PROVIDER=qoder（.env 会被自动加载），run_fix 会走 Qoder 分支，
+    绕过被 mock 的 call_ollama —— 既断言失败，又会真的调用 Qoder CLI（慢且消耗额度）。
+    """
+
+    def setUp(self) -> None:
+        patcher = mock.patch.dict(os.environ, {"AIOPS_FIX_PROVIDER": "ollama"}, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_default_fix_model_used_when_no_explicit_model(self) -> None:
         with mock.patch.object(fix_agent, "DEFAULT_FIX_MODEL", "big-model"), mock.patch(
             "aiops_agent.fix_agent.call_ollama", return_value="not-json"

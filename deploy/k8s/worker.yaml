@@ -1,0 +1,133 @@
+# AIOps Worker（Temporal 消费者：优化方案 P4-03 多副本 + HPA）
+#
+# 说明：
+#   - Temporal 任务队列天然支持多 worker 竞争消费，replicas: 2 起；
+#   - 共享数据卷 aiops-data（沙箱工作区 / Qoder 工作区跨 activity 复用，需 RWX 存储类；
+#     演示集群仅支持 RWO 时，请将 replicas 降为 1）；
+#   - 指标端口 9090 由 Service aiops-worker 暴露（ServiceMonitor / Prometheus 抓取）。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aiops-worker
+  namespace: aiops-system
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: aiops-data
+  namespace: aiops-system
+spec:
+  accessModes: ["ReadWriteMany"]
+  # storageClassName: <RWX 存储类：NFS / CephFS / 支持 RWX 的云盘>
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiops-worker
+  namespace: aiops-system
+  labels:
+    app: aiops-worker
+spec:
+  type: ClusterIP
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+  selector:
+    app: aiops-worker
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiops-worker
+  namespace: aiops-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: aiops-worker
+  template:
+    metadata:
+      labels:
+        app: aiops-worker
+    spec:
+      serviceAccountName: aiops-worker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        # PVC 挂载目录写权限（镜像内 uid 10001，见 deploy/Dockerfile）
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: worker
+          image: aiops-agent:1.0.0
+          # 生产：推送到集群可达 registry 后改为 <registry>/aiops-agent:1.0.0
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "aiops_agent.worker"]
+          ports:
+            - name: metrics
+              containerPort: 9090
+          envFrom:
+            - configMapRef:
+                name: aiops-config
+            - secretRef:
+                name: aiops-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/aiops
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet: { path: /metrics, port: 9090 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /metrics, port: 9090 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 500m, memory: 512Mi }
+            limits: { cpu: "2", memory: 2Gi }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: aiops-data
+        - name: tmp
+          emptyDir: {}
+---
+# 滚动更新 / 节点维护时至少保留 1 个消费副本（优化方案 3.2 关键配置）
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: aiops-worker
+  namespace: aiops-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: aiops-worker
+---
+# CPU 驱动扩容（优化方案 P4-03 验收：CPU >70% 自动扩容；
+# 更精细的基于 Temporal 任务积压的自定义指标可后接 KEDA）
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: aiops-worker
+  namespace: aiops-system
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: aiops-worker
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

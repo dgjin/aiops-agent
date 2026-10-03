@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import tempfile
@@ -203,6 +204,91 @@ class TestPrepareWorkspaceAndRunTests(unittest.TestCase):
         self.assertFalse(report.passed)
         self.assertIn("SAST", report.unit_tests)
         runner.run.assert_not_called()
+
+    def test_run_patch_tests_includes_bandit_detail(self) -> None:
+        """真实端到端：sast 字段合并正则与 Bandit 两道结论（bandit 缺失时降级说明）。"""
+        patch = _patch_for("wp6-bandit-e2e")
+        fake = mock.Mock()
+        fake.run.return_value = sandbox.SandboxOutcome(
+            exit_code=0,
+            passed=True,
+            tests_run=6,
+            duration_seconds=0.5,
+            runner="fake",
+            image="python:3.12-slim",
+        )
+        report = sandbox.run_patch_tests(patch, 0, sandbox_root=self.tmp, runner=fake)
+        self.assertTrue(report.passed, report.details)
+        self.assertIn("Bandit", report.sast)
+
+
+class TestBanditIntegration(unittest.TestCase):
+    """Bandit 深度扫描（P2-04）：delta 拦截 / 既有问题豁免 / LOW 记录 / 降级放行。"""
+
+    MEDIUM_ISSUE = {
+        "test_id": "B602",
+        "issue_severity": "MEDIUM",
+        "issue_confidence": "HIGH",
+        "issue_text": "subprocess call with shell=True",
+        "line_number": 3,
+    }
+
+    def _scan_result(self, issues: list[dict]) -> mock.Mock:
+        return mock.Mock(
+            returncode=1 if issues else 0,
+            stdout=json.dumps({"results": issues}).encode("utf-8"),
+            stderr=b"",
+        )
+
+    def test_blocks_new_medium_issue(self) -> None:
+        ws_issue = {**self.MEDIUM_ISSUE, "filename": "/ws/x.py"}
+        with mock.patch("aiops_agent.sandbox.subprocess.run") as run:
+            run.side_effect = [self._scan_result([ws_issue]), self._scan_result([])]
+            ok, detail = sandbox.run_bandit(Path("/ws"), Path("/base"))
+        self.assertFalse(ok)
+        self.assertIn("Bandit 拦截", detail)
+        self.assertIn("B602", detail)
+
+    def test_existing_baseline_issue_not_blocked(self) -> None:
+        base_issue = {**self.MEDIUM_ISSUE, "filename": "/base/a.py"}
+        ws_issue = {**self.MEDIUM_ISSUE, "filename": "/ws/a.py"}
+        with mock.patch("aiops_agent.sandbox.subprocess.run") as run:
+            run.side_effect = [self._scan_result([ws_issue]), self._scan_result([base_issue])]
+            ok, detail = sandbox.run_bandit(Path("/ws"), Path("/base"))
+        self.assertTrue(ok, detail)
+        self.assertIn("0 新增问题", detail)
+
+    def test_new_low_issue_recorded_but_not_blocked(self) -> None:
+        ws_issue = {
+            **self.MEDIUM_ISSUE,
+            "filename": "/ws/b.py",
+            "test_id": "B101",
+            "issue_severity": "LOW",
+        }
+        with mock.patch("aiops_agent.sandbox.subprocess.run") as run:
+            run.side_effect = [self._scan_result([ws_issue]), self._scan_result([])]
+            ok, detail = sandbox.run_bandit(Path("/ws"), Path("/base"))
+        self.assertTrue(ok, detail)
+        self.assertIn("LOW", detail)
+
+    def test_unavailable_degrades_open(self) -> None:
+        with mock.patch(
+            "aiops_agent.sandbox.subprocess.run", side_effect=OSError("no bandit")
+        ):
+            ok, detail = sandbox.run_bandit(Path("/ws"), Path("/base"))
+        self.assertTrue(ok)
+        self.assertIn("未执行", detail)
+
+    def test_baseline_unavailable_skips_blocking(self) -> None:
+        ws_issue = {**self.MEDIUM_ISSUE, "filename": "/ws/x.py"}
+        with mock.patch("aiops_agent.sandbox.subprocess.run") as run:
+            run.side_effect = [
+                self._scan_result([ws_issue]),
+                subprocess.TimeoutExpired(cmd="bandit", timeout=30),
+            ]
+            ok, detail = sandbox.run_bandit(Path("/ws"), Path("/base"))
+        self.assertTrue(ok, detail)
+        self.assertIn("基线不可比", detail)
 
 
 def _docker_available() -> bool:

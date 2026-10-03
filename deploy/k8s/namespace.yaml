@@ -1,0 +1,8 @@
+# AIOps 系统命名空间（优化方案 P4-01；`kubectl apply -f deploy/k8s/` 一键部署的第一步）
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aiops-system
+  labels:
+    app.kubernetes.io/part-of: aiops-agent
+    # 便于 NetworkPolicy 白名单按命名空间选择（kubernetes.io/metadata.name 由 K8s 自动打标）

@@ -156,8 +156,18 @@ class DockerRolloutRunner:
 
     name = "docker-rollout"
 
-    def __init__(self, docker: str = "docker") -> None:
+    def __init__(
+        self,
+        docker: str = "docker",
+        *,
+        stable_container: str | None = None,
+        stable_port: int | None = None,
+    ) -> None:
         self.docker = docker
+        # 稳定容器名/端口可注入：**测试必须使用独立命名与端口**，否则会停掉/删除在跑的真实发布
+        # （曾出现：跑全量单测时把已发布的 aiops-stable-order 容器 rm -f 掉）。
+        self.stable_container = stable_container or STABLE_CONTAINER
+        self.stable_port = stable_port if stable_port is not None else STABLE_PORT
 
     def _run(self, cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
         return subprocess.run(cmd, capture_output=True, timeout=timeout)
@@ -246,12 +256,12 @@ class DockerRolloutRunner:
 
         就绪校验通过前金丝雀保持运行（作为可用回退）；新稳定未就绪则清理并抛错（交由重试）。
         """
-        self.stop(STABLE_CONTAINER)
+        self.stop(self.stable_container)
         proc = self._run(
             [
-                self.docker, "run", "-d", "--name", STABLE_CONTAINER,
+                self.docker, "run", "-d", "--name", self.stable_container,
                 "-e", f"APP_VERSION={version}",
-                "-p", f"127.0.0.1:{STABLE_PORT}:{APP_PORT}",
+                "-p", f"127.0.0.1:{self.stable_port}:{APP_PORT}",
                 image,
             ],
             timeout=60,
@@ -260,9 +270,9 @@ class DockerRolloutRunner:
             tail = proc.stderr.decode("utf-8", "replace")[-400:]
             raise RuntimeError(f"稳定版滚动失败：{tail}")
         try:
-            self.wait_ready(f"http://127.0.0.1:{STABLE_PORT}")
+            self.wait_ready(f"http://127.0.0.1:{self.stable_port}")
         except Exception:
-            self.stop(STABLE_CONTAINER)
+            self.stop(self.stable_container)
             raise
         self.stop(canary_container)
 
@@ -357,7 +367,7 @@ def run_finalize(
             version=version,
             rolled_back=False,
             reason=(
-                f"金丝雀达标，已全量发布（{STABLE_CONTAINER} 运行于 :{STABLE_PORT}，"
+                f"金丝雀达标，已全量发布（{runner.stable_container} 运行于 :{runner.stable_port}，"
                 f"镜像 {CANARY_IMAGE_PREFIX}:{canary.patch_id}）"
             ),
         )

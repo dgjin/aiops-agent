@@ -1,0 +1,67 @@
+# Alertmanager Webhook 入口（优化方案 3.2：replicas: 2，Alertmanager 侧配置多个 webhook URL）
+#
+# 说明：
+#   - 无固定 HTTP 健康端点（webhook 接收器），探针用 tcpSocket；
+#   - Alertmanager 路由建议（matcher: aiops_demo="true"）：
+#       - webhook_configs:
+#           - url: http://aiops-webhook.aiops-system.svc.cluster.local:8099/webhook
+#   - K8s 内接收地址：http://aiops-webhook.aiops-system:8099/webhook
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiops-webhook
+  namespace: aiops-system
+  labels:
+    app: aiops-webhook
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8099
+      targetPort: 8099
+  selector:
+    app: aiops-webhook
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiops-webhook
+  namespace: aiops-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: aiops-webhook
+  template:
+    metadata:
+      labels:
+        app: aiops-webhook
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: webhook
+          image: aiops-agent:1.0.0
+          # 生产：推送到集群可达 registry 后改为 <registry>/aiops-agent:1.0.0
+          imagePullPolicy: IfNotPresent
+          command: ["python", "alert_webhook.py", "--host", "0.0.0.0", "--port", "8099"]
+          ports:
+            - name: http
+              containerPort: 8099
+          envFrom:
+            - configMapRef:
+                name: aiops-config
+            - secretRef:
+                name: aiops-secrets
+          readinessProbe:
+            tcpSocket: { port: 8099 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: 8099 }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }

@@ -17,8 +17,13 @@
       - 其余分支（protected / canary-bad / low-conf）：语义正确的最小修复版（沙箱通过）。
 
 环境变量：
-    AIOPS_FIX_MODEL  生成模型（默认复用 triage 默认模型；可指向更大模型提升 diff 语义正确率，
-                     如 AIOPS_FIX_MODEL=qwen3.8:27b-mlx）
+    AIOPS_FIX_PROVIDER  修复提供者：ollama（默认，本地 LLM 单次生成）|
+                        qoder（Qoder CLI 无头调用，仓库级自主修复；见 qoder_fix.py）
+    AIOPS_FIX_MODEL     生成模型（仅 ollama 提供者使用；默认复用 triage 默认模型，
+                        可指向更大模型提升 diff 语义正确率，如 qwen3.8:27b-mlx）
+
+提供者抽象：两个实现产出同构的最小化 diff（下游应用/编译校验/沙箱/审批完全无感知）；
+qoder 提供者的变更由隔离工作区的 ``git diff`` 确定性采集，失败一律回落确定性兜底补丁。
 """
 
 from __future__ import annotations
@@ -37,6 +42,15 @@ from .triage import DEFAULT_MODEL, call_ollama, strip_code_fence
 
 # 修复生成模型：AIOPS_FIX_MODEL 未设置时复用 triage 默认模型
 DEFAULT_FIX_MODEL = os.environ.get("AIOPS_FIX_MODEL") or DEFAULT_MODEL
+
+# 修复提供者：ollama（默认，本地 LLM）/ qoder（Qoder CLI 无头调用）
+DEFAULT_FIX_PROVIDER = "ollama"
+
+
+def resolve_provider() -> str:
+    """解析修复提供者（调用时求值，便于运行期/测试切换）。未知取值回退 ollama（安全默认）。"""
+    value = (os.environ.get("AIOPS_FIX_PROVIDER") or DEFAULT_FIX_PROVIDER).strip().lower()
+    return value if value in ("ollama", "qoder") else DEFAULT_FIX_PROVIDER
 
 # 演示分支关键词：命中即走确定性补丁，避免破坏演示矩阵
 _DEMO_STUB_MARKERS = ("low-conf", "protected", "test-fail", "test-always-fail", "canary-bad")
@@ -267,6 +281,34 @@ def apply_unified_diff(original: str, diff_text: str) -> str | None:
     return result + "\n" if original.endswith("\n") else result
 
 
+def split_unified_diff(diff_text: str) -> dict[str, str]:
+    """把（可能多文件的）unified diff 切分为 ``{仓库相对路径: 该文件 diff 文本}``。
+
+    用途：受保护目录场景的补丁会同时改动多个文件，沙箱需按文件分别应用。
+    只认标准的 ``--- a/<path>`` / ``+++ b/<path>`` 文件头；无文件头（如占位补丁）返回空 dict。
+    """
+    text = strip_code_fence(diff_text)
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    header: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("--- "):
+            header = [line]
+            current = None
+            continue
+        if line.startswith("+++ ") and header:
+            header.append(line)
+            path = line[4:].strip()
+            if path.startswith("b/"):
+                path = path[2:]
+            current = path
+            sections.setdefault(current, header.copy())
+            continue
+        if current is not None:
+            sections[current].append(line)
+    return {path: "\n".join(lines) + "\n" for path, lines in sections.items()}
+
+
 def validate_source(new_text: str, filename: str) -> tuple[bool, str]:
     """编译校验（对应验收「建议 diff 可编译」）。"""
     try:
@@ -381,9 +423,24 @@ def fallback_patch(
     repo_dir = Path(repo_dir) if repo_dir else code_rag.DEFAULT_REPO_DIR
     diff: str | None = None
     description = ""
+    files = [target_rel]
     target = repo_dir / target_rel
     if target.is_file():
         diff, description = _fallback_diff_for(target_rel, target.read_text(encoding="utf-8"), bad)
+        # 受保护目录场景：只改 auth/** 无法让演示应用全绿（应用侧既有缺陷仍在），
+        # 沙箱必然 5/6 → 三次重试耗尽 → 走不到二级审批。这里补充修复应用侧缺陷，
+        # 形成**真实的两文件补丁**：既改动 auth/** （触发二级审批），又让套件全绿。
+        if diff and not bad and target_rel.split("/")[0] == "auth":
+            side_rel = "order_service.py"
+            side = repo_dir / side_rel
+            if side.is_file():
+                side_diff, _ = _fallback_diff_for(
+                    side_rel, side.read_text(encoding="utf-8"), False
+                )
+                if side_diff:
+                    diff = side_diff + diff
+                    files = [side_rel, target_rel]
+                    description = f"{description} 同时修复 {side_rel} 的既有缺陷（两文件最小补丁）。"
     if not diff:
         diff = (
             f"--- a/{target_rel}\n"
@@ -396,7 +453,7 @@ def fallback_patch(
     return Patch(
         patch_id=f"p-{alert.alert_id}-r{attempt}",
         alert_id=alert.alert_id,
-        files=[target_rel],
+        files=files,
         diff=diff,
         description=description,
         risk="低：仅新增防御分支，不改动既有逻辑。",
@@ -414,15 +471,21 @@ def run_fix(
     model: str | None = None,
     timeout: int = 45,
 ) -> tuple[Patch, dict]:
-    """执行一次修复生成：返回 (Patch, meta)。meta 含 degraded/validated/elapsed 等留痕信息。
+    """执行一次修复生成：返回 (Patch, meta)。meta 含 provider/degraded/validated/elapsed 等留痕信息。
 
-    模型优先级：显式 model 参数 > AIOPS_FIX_MODEL（DEFAULT_FIX_MODEL）> triage 默认模型。
-    timeout 为大模型推理预留（默认 45s；大模型评估可上调）。
+    提供者（AIOPS_FIX_PROVIDER）：
+        ollama —— 本地 LLM 单次生成 diff（默认）；
+        qoder  —— Qoder CLI 无头调用，隔离工作区自主修复，改动经 git diff 采集。
+    模型优先级（仅 ollama）：显式 model 参数 > AIOPS_FIX_MODEL > triage 默认模型；
+    timeout 对大模型/Qoder 多轮探索预留（默认 45s；Qoder 提供者默认 180s，见 qoder_fix）。
     """
     repo_dir = Path(repo_dir) if repo_dir else code_rag.DEFAULT_REPO_DIR
     used_model = model or DEFAULT_FIX_MODEL
+    provider = resolve_provider()
     meta: dict = {
         "model": used_model,
+        "model_version": "",
+        "provider": provider,
         "degraded": False,
         "stub": False,
         "validated": False,
@@ -456,17 +519,28 @@ def run_fix(
 
     content = target.read_text(encoding="utf-8")
     try:
-        prompt = build_fix_prompt(
-            alert,
-            root_cause,
-            references,
-            target_rel,
-            content,
-            retry_hint=_RETRY_HINT if attempt > 0 else "",
-        )
-        raw = call_ollama(prompt, model=used_model, timeout=timeout)
-        meta["generations"] = 1
-        parsed = PatchOutput.model_validate_json(strip_code_fence(raw))
+        if provider == "qoder":
+            # Qoder CLI 无头调用：隔离工作区自主修复 → git diff 确定性采集改动
+            from . import qoder_fix
+
+            diff, description, risk, gen_meta = qoder_fix.propose_patch(
+                alert, root_cause, references, attempt, target_rel, repo_dir=repo_dir
+            )
+            meta.update({k: v for k, v in gen_meta.items() if k != "reason"})
+            meta["reason"] = gen_meta.get("reason", "")
+            parsed = PatchOutput(diff=diff, description=description, risk=risk)
+        else:
+            prompt = build_fix_prompt(
+                alert,
+                root_cause,
+                references,
+                target_rel,
+                content,
+                retry_hint=_RETRY_HINT if attempt > 0 else "",
+            )
+            raw = call_ollama(prompt, model=used_model, timeout=timeout)
+            meta["generations"] = 1
+            parsed = PatchOutput.model_validate_json(strip_code_fence(raw))
         new_text = apply_unified_diff(content, parsed.diff)
         if new_text is None:
             raise ValueError("diff 无法应用到目标文件（上下文不匹配）")
@@ -480,7 +554,7 @@ def run_fix(
             diff=parsed.diff,
             description=parsed.description,
             risk=parsed.risk,
-            model_version=used_model,
+            model_version=meta.get("model_version") or used_model,
             confidence=root_cause.confidence,
         )
         meta["validated"] = True

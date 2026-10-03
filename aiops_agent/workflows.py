@@ -28,6 +28,11 @@ with workflow.unsafe.imports_passed_through():
 _ACTIVITY_TIMEOUT = timedelta(seconds=60)
 # 金丝雀发布为长时活动：含镜像构建、容器滚动与真实观测窗口（生产 observe 可达 5m），单独放宽
 _CANARY_ACTIVITY_TIMEOUT = timedelta(seconds=600)
+# 修复活动超时：Qoder 提供者为仓库级多轮自主修复（实测约 50s 起），显著长于本地 LLM 单次生成。
+# 约束：必须 **大于** 提供者自身的子进程超时（qoder_fix.DEFAULT_TIMEOUT=180s），
+# 这样超时会在活动内部触发优雅降级（QoderFixError → 兜底补丁），而不是被 Temporal 取消
+# ——被取消会一路冒泡为活动失败并触发重试，最终无法降级。
+_FIX_ACTIVITY_TIMEOUT = timedelta(seconds=300)
 _RETRY_POLICY = RetryPolicy(
     maximum_attempts=3,
     initial_interval=timedelta(seconds=1),
@@ -46,6 +51,10 @@ class AIOpsFixWorkflow:
         self._needs_second: bool = False
         self._test_report: TestReport | None = None
         self._patch_id: str | None = None
+        # 保留补丁对象本身：审批发生在工作流结束前，此时 result 尚不可读，
+        # 控制台只能通过 status 查询拿到 diff（评估报告 B4：审批点缺判断依据）。
+        self._patch: Patch | None = None
+        self._root_cause: RootCause | None = None
         self._approval: str | None = None
         self._second_approval: str | None = None
         self._deploy_command: str | None = None
@@ -91,6 +100,11 @@ class AIOpsFixWorkflow:
             "deadline": self._deadline,
             "needs_second": self._needs_second,
             "patch_id": self._patch_id,
+            # 审批发生在工作流结束前（result 尚不可读），故在此透出补丁与测试报告，
+            # 供控制台在待审批时展示 diff / 测试结论（评估报告 B4）。
+            "patch": dataclasses.asdict(self._patch) if self._patch else None,
+            "test_report": dataclasses.asdict(self._test_report) if self._test_report else None,
+            "root_cause": dataclasses.asdict(self._root_cause) if self._root_cause else None,
             "approval": self._approval,
             "second_approval": self._second_approval,
             "deploy_command": self._deploy_command,
@@ -121,6 +135,7 @@ class AIOpsFixWorkflow:
         root_cause: RootCause = await self._call(
             activities.analyze_root_cause, alert, clustered, evidence["trace_ids"]
         )
+        self._root_cause = root_cause  # 供审批期展示（status 查询）
 
         # 闸门 1（策略闸门）：置信度不足，转人工，不进入自动修复
         threshold = triage_cfg["confidence_threshold"]
@@ -143,9 +158,15 @@ class AIOpsFixWorkflow:
         for attempt in range(max_retries + 1):
             self.stage = "FIXING"
             patch = await self._call(
-                activities.generate_patch, alert, root_cause, references, attempt
+                activities.generate_patch,
+                alert,
+                root_cause,
+                references,
+                attempt,
+                timeout=_FIX_ACTIVITY_TIMEOUT,
             )
             self._patch_id = patch.patch_id
+            self._patch = patch
             self.stage = "TESTING"
             test_report = await self._call(activities.run_tests_in_sandbox, patch, attempt)
             self._test_report = test_report

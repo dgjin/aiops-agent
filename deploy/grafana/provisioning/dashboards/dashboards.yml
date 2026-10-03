@@ -1,0 +1,18 @@
+# Grafana 面板自动加载（docker compose --profile obs 挂载到
+# /etc/grafana/provisioning/dashboards/dashboards.yml）
+#
+# 面板 JSON 由 compose 单独挂载到 /var/lib/grafana/dashboards/aiops-overview.json；
+# K8s 环境可将本目录整体挂入同一路径。
+apiVersion: 1
+
+providers:
+  - name: aiops
+    orgId: 1
+    folder: AIOps
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

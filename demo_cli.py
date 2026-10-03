@@ -16,6 +16,7 @@
         --new-wf-id aiops-fix-order-a-1002 --service order --alert-id a-1002
     python demo_cli.py deploy-now --wf-id aiops-fix-order-a-1001    # 或 cancel
     python demo_cli.py result --wf-id aiops-fix-order-a-1001
+    python demo_cli.py cleanup --dry-run                          # 数据清理预演（TTL）
 
 演示分支（start/queue-patch 的 --description 关键词）：
     low-conf         闸门 1：置信度不足转人工
@@ -136,6 +137,21 @@ async def cmd_status(args: argparse.Namespace) -> None:
     handle = client.get_workflow_handle(args.wf_id)
     result = await handle.query(AIOpsFixWorkflow.status)
     print(_dump(result))
+
+
+async def cmd_cleanup(args: argparse.Namespace) -> None:
+    """数据清理（优化方案 3.6 / P5-03）：按 TTL 清理审计/沙箱/通知/Qoder/ArgoCD/流程记录。"""
+    from aiops_agent import cleanup
+
+    report = cleanup.run_cleanup(dry_run=args.dry_run)
+    label = "（预演，未实际删除）" if report["dry_run"] else ""
+    print(f"数据清理完成{label}：mode={report['mode']}")
+    for key, value in report["deleted"].items():
+        print(f"  - {key}: {value}")
+    if report["errors"]:
+        print("错误：")
+        for message in report["errors"]:
+            print(f"  - {message}")
 
 
 async def cmd_result(args: argparse.Namespace) -> None:
@@ -337,6 +353,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("doctor", help="环境自检：Temporal/Loki/Ollama/Docker/策略/前端/控制台")
     p.add_argument("--service", default="order", help="检查日志新鲜度的服务名（默认 order）")
     p.set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser("cleanup", help="数据清理：按 TTL 清理审计/沙箱/通知/Qoder/ArgoCD/流程记录")
+    p.add_argument("--dry-run", action="store_true", help="预演：只统计不删除")
+    p.set_defaults(func=cmd_cleanup)
 
     return parser
 

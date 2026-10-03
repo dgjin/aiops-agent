@@ -1,0 +1,143 @@
+# AIOps BFF 控制台（FastAPI：优化方案 P4-04 多副本 + PDB + Ingress TLS）
+#
+# 说明：
+#   - 无状态服务（会话走 Bearer Token），replicas: 2 起，滚动更新由 PDB 保底；
+#   - uvicorn --proxy-headers：Ingress 层 TLS 终止后，透传 X-Forwarded-Proto 供安全头
+#     （HSTS）与审计真实客户端 IP 使用；
+#   - 静态控制台（web/dist）已打入镜像，无需额外挂载。
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiops-bff
+  namespace: aiops-system
+  labels:
+    app: aiops-bff
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8600
+      targetPort: 8600
+  selector:
+    app: aiops-bff
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiops-bff
+  namespace: aiops-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: aiops-bff
+  template:
+    metadata:
+      labels:
+        app: aiops-bff
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: bff
+          image: aiops-agent:1.0.0
+          # 生产：推送到集群可达 registry 后改为 <registry>/aiops-agent:1.0.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -m
+            - uvicorn
+            - bff.app:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8600"
+            - --proxy-headers
+            - --forwarded-allow-ips=*
+          ports:
+            - name: http
+              containerPort: 8600
+          envFrom:
+            - configMapRef:
+                name: aiops-config
+            - secretRef:
+                name: aiops-secrets
+          # 探针用无鉴权的 /metrics（/api 前缀全部要求 Bearer 凭证，httpGet 无法携带）
+          readinessProbe:
+            httpGet: { path: /metrics, port: 8600 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /metrics, port: 8600 }
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { cpu: "1", memory: 1Gi }
+---
+# 滚动更新期间至少 1 个副本在线（优化方案 P4-04 验收：滚动更新不中断服务）
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: aiops-bff
+  namespace: aiops-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: aiops-bff
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: aiops-bff
+  namespace: aiops-system
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: aiops-bff
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+# Ingress（nginx）+ cert-manager 自动签发 TLS（优化方案 P2-02 验收：HTTPS 正常，HTTP 跳转）
+#
+# 部署前准备：
+#   1. 改 host 为实际域名；
+#   2. 按需修改 cluster-issuer（默认 letsencrypt-prod，需集群已装 cert-manager）；
+#   3. HTTP→HTTPS 跳转由 ingress-nginx 的 ssl-redirect 默认行为提供。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: aiops-bff
+  namespace: aiops-system
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # 审计报表 / 批量查询响应可能较大，放宽代理缓冲
+    nginx.ingress.kubernetes.io/proxy-body-size: 8m
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - aiops.example.com
+      secretName: aiops-bff-tls
+  rules:
+    - host: aiops.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: aiops-bff
+                port:
+                  name: http

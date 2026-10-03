@@ -29,3 +29,11 @@ release_gate:
     observe_duration: 5m
     health_metrics: [error_rate, p99_latency]
     auto_rollback: true
+
+# Git 平台接入（可选，MR 真实创建；缺省不启用 → MR 活动返回 recorded 桩）
+# 令牌经环境变量 AIOPS_GIT_TOKEN 注入（生产对应 K8s Secret 名称 token_secret）
+# git:
+#   repo_url: "https://gitlab.example.com/ops/demo-app"   # 支持 GitLab / GitHub / Gitee
+#   token_secret: "aiops-git-token"
+#   default_branch: "main"
+#   mr_labels: [aiops, auto-fix]

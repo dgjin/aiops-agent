@@ -1,0 +1,55 @@
+# Redis 7（副本间共享：控制台速率限制滑动窗口；BFF 多副本必须使用）
+#
+# 说明：内存缓存，不做持久化（速率窗口丢失仅导致限流瞬时放宽，不丢业务数据）；
+#       生产可替换为云 Redis（仅需修改 configmap.yaml 的 AIOPS_REDIS_URL）。
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiops-redis
+  namespace: aiops-system
+  labels:
+    app: aiops-redis
+spec:
+  type: ClusterIP
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+  selector:
+    app: aiops-redis
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiops-redis
+  namespace: aiops-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aiops-redis
+  template:
+    metadata:
+      labels:
+        app: aiops-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru", "--save", ""]
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 384Mi }

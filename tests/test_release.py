@@ -214,6 +214,49 @@ class TestRunFinalize(unittest.TestCase):
         runner.stop.assert_called_once()
 
 
+class TestRunnerIsolation(unittest.TestCase):
+    """回归防护：稳定容器名/端口必须可注入，且默认沿用生产常量。
+
+    背景：`promote` 会「停旧稳定 → 起新稳定」，结尾还有清理；若测试复用默认的
+    `aiops-stable-order:18080`，跑单测就会把**在跑的真实发布**打掉。
+    """
+
+    def test_defaults_match_module_constants(self) -> None:
+        runner = release.DockerRolloutRunner()
+        self.assertEqual(runner.stable_container, release.STABLE_CONTAINER)
+        self.assertEqual(runner.stable_port, release.STABLE_PORT)
+
+    def test_injected_target(self) -> None:
+        runner = release.DockerRolloutRunner(
+            stable_container="aiops-test-stable", stable_port=18099
+        )
+        self.assertEqual(runner.stable_container, "aiops-test-stable")
+        self.assertEqual(runner.stable_port, 18099)
+
+    def test_promote_uses_instance_target_not_module_constant(self) -> None:
+        """promote 必须用实例的容器名/端口，绝不回落到模块常量（否则会误伤真实发布）。"""
+        runner = release.DockerRolloutRunner(
+            stable_container="aiops-test-stable", stable_port=18099
+        )
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, timeout=120):
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, b"cid\n", b"")
+
+        with mock.patch.object(runner, "_run", side_effect=fake_run), mock.patch.object(
+            runner, "wait_ready"
+        ), mock.patch.object(runner, "stop") as stop:
+            runner.promote("aiops-canary-p-x", "img:tag", "v1.0.1")
+
+        run_cmd = next(c for c in calls if c[1:2] == ["run"])
+        self.assertIn("aiops-test-stable", run_cmd)
+        self.assertIn("127.0.0.1:18099:8000", run_cmd)
+        self.assertNotIn(release.STABLE_CONTAINER, run_cmd)
+        self.assertNotIn(f":{release.STABLE_PORT}:", " ".join(run_cmd))
+        stop.assert_any_call("aiops-canary-p-x")  # 金丝雀正常回收
+
+
 def _docker_available() -> bool:
     if not shutil.which("docker"):
         return False
@@ -228,32 +271,60 @@ def _docker_available() -> bool:
     return probe.returncode == 0
 
 
+# 真实发布集成专用容器名/端口：**必须**与生产默认（aiops-stable-order:18080）区分，
+# 否则测试的 promote（停旧稳定）与结尾清理（rm -f）会把在跑的真实发布打掉。
+_TEST_STABLE_CONTAINER = "aiops-test-stable"
+_TEST_STABLE_PORT = 18099
+
+
+def _test_runner() -> release.DockerRolloutRunner:
+    return release.DockerRolloutRunner(
+        stable_container=_TEST_STABLE_CONTAINER, stable_port=_TEST_STABLE_PORT
+    )
+
+
 @unittest.skipUnless(_docker_available(), "docker/镜像不可用，跳过真实发布集成")
 class TestRealCanaryIntegration(unittest.TestCase):
-    """真实发布集成：镜像构建 → 金丝雀容器 → 真实探活 → 晋级 / 回滚。"""
+    """真实发布集成：镜像构建 → 金丝雀容器 → 真实探活 → 晋级 / 回滚。
+
+    隔离约定：只用 `aiops-test-stable:18099`，**绝不触碰**真实发布的 `aiops-stable-order:18080`。
+    """
+
+    def setUp(self) -> None:
+        self.runner = _test_runner()
+        # 兜底清理：即使断言失败也回收测试容器（只回收测试命名）
+        self.addCleanup(self.runner.stop, _TEST_STABLE_CONTAINER)
 
     def test_healthy_canary_promotes_to_stable(self) -> None:
         alert = Alert(alert_id="wp7-int-good", service="order", description="发布集成（健康）")
         patch = _patch("wp7-int-good")
-        result = release.run_canary(alert, patch, 5, observe_seconds=4)
+        result = release.run_canary(alert, patch, 5, observe_seconds=4, runner=self.runner)
         self.assertTrue(result.healthy, result.observation)
         self.assertLessEqual(result.error_rate, release.SLO_MAX_ERROR_RATE)
 
-        final = release.run_finalize(result, True)
+        final = release.run_finalize(result, True, runner=self.runner)
         self.assertFalse(final.rolled_back)
-        code, body = release._http_json(f"http://127.0.0.1:{release.STABLE_PORT}/health")
+        self.assertIn(_TEST_STABLE_CONTAINER, final.reason)  # 报告的是隔离容器，非生产容器
+        code, body = release._http_json(f"http://127.0.0.1:{_TEST_STABLE_PORT}/health")
         self.assertEqual(code, 200)
         self.assertEqual(body.get("version"), final.version)
-        release.DockerRolloutRunner().stop(release.STABLE_CONTAINER)  # 清理
+        # 只清理测试容器；真实 aiops-stable-order 始终不受影响
+        self.runner.stop(_TEST_STABLE_CONTAINER)
 
     def test_bad_canary_detected_and_rolled_back(self) -> None:
         alert = Alert(alert_id="wp7-int-bad", service="order", description="canary-bad 发布集成")
         patch = _patch("wp7-int-bad")
-        result = release.run_canary(alert, patch, 5, observe_seconds=4)
+        result = release.run_canary(alert, patch, 5, observe_seconds=4, runner=self.runner)
         self.assertFalse(result.healthy, result.observation)
-        self.assertGreater(result.error_rate, release.SLO_MAX_ERROR_RATE)
+        # 劣化判定必须至少有一项 SLO 越线。注意：BAD_CANARY 注入 500ms 延迟后，4s 窗口内仅有
+        # 数个请求，小样本下错误率可能采到 0.0（约 6% 概率）——故不断言单个指标，避免 flaky。
+        self.assertTrue(
+            result.error_rate > release.SLO_MAX_ERROR_RATE
+            or result.p99_latency_ms > release.SLO_MAX_P99_LATENCY_MS,
+            result.observation,
+        )
 
-        final = release.run_finalize(result, True)
+        final = release.run_finalize(result, True, runner=self.runner)
         self.assertTrue(final.rolled_back)
         proc = subprocess.run(
             ["docker", "ps", "-a", "--filter", f"name=aiops-canary-{patch.patch_id}"],
