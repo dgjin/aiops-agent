@@ -398,6 +398,31 @@ class MonitoredAppProbeTest(unittest.TestCase):
         self.assertEqual(result["status_code"], 404)
         self.assertIn("note", result)
 
+    def test_keyword_match_means_online(self):
+        """配置页面关键字且响应内容包含 → 在线（正常页面）。"""
+        with mock.patch("bff.aggregator.urllib.request.urlopen") as urlopen:
+            resp = mock.MagicMock()
+            resp.status = 200
+            resp.read.return_value = b'<div id="root"></div>'
+            resp.__enter__.return_value = resp
+            urlopen.return_value = resp
+            result = aggregator.probe_monitored_app("http://x/", keyword='<div id="root"')
+        self.assertTrue(result["running"])
+        self.assertEqual(result["status_code"], 200)
+
+    def test_keyword_missing_marks_down(self):
+        """HTTP 200 但内容缺少关键字（白屏类故障）→ 判失败，交由巡检计数/告警。"""
+        with mock.patch("bff.aggregator.urllib.request.urlopen") as urlopen:
+            resp = mock.MagicMock()
+            resp.status = 200
+            resp.read.return_value = b'<div id="rroot"></div>'
+            resp.__enter__.return_value = resp
+            urlopen.return_value = resp
+            result = aggregator.probe_monitored_app("http://x/", keyword='<div id="root"')
+        self.assertFalse(result["running"])
+        self.assertEqual(result["status_code"], 200)
+        self.assertIn("关键字", result["error"])
+
     def test_unreachable_reports_error(self):
         with mock.patch("bff.aggregator.urllib.request.urlopen",
                         side_effect=ConnectionRefusedError("connection refused")):

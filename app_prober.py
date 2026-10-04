@@ -1,7 +1,8 @@
 """被监控应用可用性巡检（控制塔主动巡检）：探测 → 连续失败 → 注入标准告警 → 自动修复流程。
 
 巡检逻辑（每 interval 秒一轮，对 monitored_apps 清单中 enabled 的每一项）：
-    探测根地址（判定与控制台实时探测一致：收到任何 HTTP 响应即在线的；连接失败/超时才不可达）
+    探测根地址（判定与控制台实时探测一致：收到任何 HTTP 响应即在线的；连接失败/超时才不可达；
+    配置了页面关键字的条目还要求响应内容包含该关键字，否则同样判失败——覆盖「端口活着但页面白屏」）
     - 连续失败达到 threshold 次 → 向 Alertmanager 注入标准告警：
         POST <alertmanager>/api/v2/alerts
         labels: {alertname: AppUnreachable, severity: critical, service: <svc>,
@@ -151,7 +152,11 @@ def run_round(
         _resolve_pending(state.pop(stale_id), alertmanager)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        results = [pool.submit(probe_fn, app.get("url"), timeout=timeout) for app in apps]
+        # keyword 透传（未配置为空串 → 纯连接级探测，与旧行为一致）
+        results = [
+            pool.submit(probe_fn, app.get("url"), timeout=timeout, keyword=str(app.get("probe_keyword") or ""))
+            for app in apps
+        ]
         probes = [future.result() for future in results]
 
     for app, result in zip(apps, probes):
@@ -197,7 +202,7 @@ def run_round(
             (
                 f"在线 {record.get('status_code')}（{record.get('latency_ms')}ms）"
                 if result.get("running")
-                else f"不可达（连续 {record['failures']} 次，阈值 {threshold}）"
+                else f"失败（连续 {record['failures']} 次，阈值 {threshold}）：{record['last_error']}"
             ),
         )
     return state

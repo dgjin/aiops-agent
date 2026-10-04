@@ -91,6 +91,9 @@ monitored_apps = Table(
     Column("url", String(512), nullable=False),
     Column("service", String(128), nullable=False, server_default=""),
     Column("log_path", String(512), nullable=False, server_default=""),
+    # 页面健康关键字（可选，空=仅连接级探测）：响应内容须包含该关键字才算在线；
+    # 旧生产库升级需迁移：ALTER TABLE monitored_apps ADD COLUMN probe_keyword VARCHAR(256) NOT NULL DEFAULT '';
+    Column("probe_keyword", String(256), nullable=False, server_default=""),
     Column("enabled", Boolean, nullable=False, server_default=text("1")),
     # 注意：MySQL 8 严格模式下 TEXT 列不允许 DEFAULT（''）——不设 server_default，
     # 由写入路径显式提供空串（bff/monitored_apps.py 的 _insert_apps 恒赋值）

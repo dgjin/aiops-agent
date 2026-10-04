@@ -21,6 +21,7 @@ const EMPTY_FORM: MonitoredAppInput = {
   url: '',
   service: 'nl2sql',
   log_path: '',
+  probe_keyword: '',
   enabled: true,
   note: '',
 }
@@ -163,6 +164,7 @@ function AppFormDialog({
             url: initial.url,
             service: initial.service,
             log_path: initial.log_path,
+            probe_keyword: initial.probe_keyword,
             enabled: initial.enabled,
             note: initial.note,
           }
@@ -249,6 +251,17 @@ function AppFormDialog({
             value={form.log_path ?? ''}
             onChange={(e) => patch({ log_path: e.target.value })}
             placeholder="/path/to/app/logs/app_server*.log"
+            className={cn(INPUT_CLS, 'font-mono text-xs')}
+          />
+        </Field>
+        <Field
+          label="页面关键字（可选）"
+          hint={'留空则仅探测连接与状态码；配置后响应内容须包含该关键字才算在线（如 <div id="root"），可发现「端口活着但页面白屏」类故障'}
+        >
+          <input
+            value={form.probe_keyword ?? ''}
+            onChange={(e) => patch({ probe_keyword: e.target.value })}
+            placeholder={'例如 <div id="root"'}
             className={cn(INPUT_CLS, 'font-mono text-xs')}
           />
         </Field>
@@ -530,6 +543,14 @@ export function MonitoredApps() {
                       </span>
                     ) : (
                       <span className="text-xs text-idle">未配置（仅探测）</span>
+                    )}
+                    {app.probe_keyword && (
+                      <span
+                        className="mt-0.5 block max-w-[18rem] truncate font-mono text-xs text-muted"
+                        title={`页面关键字：${app.probe_keyword}`}
+                      >
+                        关键字：{app.probe_keyword}
+                      </span>
                     )}
                   </td>
                   <td className="px-4 py-3">

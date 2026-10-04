@@ -129,6 +129,19 @@ class MonitorStoreTest(unittest.TestCase):
     def test_log_path_defaults_empty(self) -> None:
         self.assertEqual(store.add(name="A", url="http://a.test/")["log_path"], "")
 
+    # ---------- probe_keyword（页面健康关键字） ----------
+
+    def test_probe_keyword_roundtrip_and_default(self) -> None:
+        self.assertEqual(store.add(name="A", url="http://a.test/")["probe_keyword"], "")
+        app = store.add(name="B", url="http://b.test/", probe_keyword='  <div id="root"  ')
+        self.assertEqual(app["probe_keyword"], '<div id="root"')  # 写入即 trim
+        _before, updated = store.update(app["id"], probe_keyword="")
+        self.assertEqual(updated["probe_keyword"], "")
+
+    def test_duplicate_copies_probe_keyword(self) -> None:
+        src = store.add(name="A", url="http://a.test/", probe_keyword='<div id="root"')
+        self.assertEqual(store.duplicate(src["id"])["probe_keyword"], '<div id="root"')
+
     def test_log_targets_filters_enabled_and_path(self) -> None:
         store.add(name="A", url="http://a.test/", service="svc-a", log_path="/tmp/a.log")
         second = store.add(name="B", url="http://b.test/", service="svc-b", log_path="/tmp/b.log")

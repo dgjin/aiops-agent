@@ -72,6 +72,7 @@ def _seed() -> list[dict]:
             "url": url,
             "service": service,
             "log_path": os.environ.get("AIOPS_MONITOR_LOG_PATH", ""),
+            "probe_keyword": "",
             "enabled": True,
             "note": "由 AIOPS_MONITOR_URL 初始化，可在控制台维护",
             "created_at": now,
@@ -101,6 +102,8 @@ def _row_to_app(row) -> dict:
         "url": row["url"],
         "service": row["service"],
         "log_path": row["log_path"],
+        # 旧库（未做 ALTER 迁移）无此列：读侧容错为空串
+        "probe_keyword": row.get("probe_keyword") or "",
         "enabled": bool(row["enabled"]),
         "note": row["note"],
         "created_at": _dt_str(row["created_at"]),
@@ -121,6 +124,7 @@ def _insert_apps(conn, apps: list[dict]) -> None:
                 "url": app.get("url"),
                 "service": app.get("service") or "",
                 "log_path": app.get("log_path") or "",
+                "probe_keyword": (app.get("probe_keyword") or "").strip(),
                 "enabled": bool(app.get("enabled", True)),
                 "note": app.get("note") or "",
                 "created_at": db_layer.to_dt(app.get("created_at")) or fallback,
@@ -239,6 +243,7 @@ def add(
     url: str,
     service: str = DEFAULT_SERVICE,
     log_path: str = "",
+    probe_keyword: str = "",
     enabled: bool = True,
     note: str = "",
 ) -> dict:
@@ -255,6 +260,7 @@ def add(
         "url": _normalize_url(url),
         "service": (service or DEFAULT_SERVICE).strip(),
         "log_path": (log_path or "").strip(),
+        "probe_keyword": (probe_keyword or "").strip(),
         "enabled": bool(enabled),
         "note": (note or "").strip(),
         "created_at": now,
@@ -272,6 +278,7 @@ def update(
     url: str | None = None,
     service: str | None = None,
     log_path: str | None = None,
+    probe_keyword: str | None = None,
     enabled: bool | None = None,
     note: str | None = None,
 ) -> tuple[dict, dict]:
@@ -294,6 +301,8 @@ def update(
         target["service"] = service.strip()
     if log_path is not None:
         target["log_path"] = log_path.strip()
+    if probe_keyword is not None:
+        target["probe_keyword"] = probe_keyword.strip()
     if enabled is not None:
         target["enabled"] = bool(enabled)
     if note is not None:
@@ -313,7 +322,7 @@ def remove(app_id: str) -> dict | None:
     return dict(target)
 
 
-_IMPORTABLE = ("service", "log_path", "enabled", "note")
+_IMPORTABLE = ("service", "log_path", "probe_keyword", "enabled", "note")
 
 
 def import_many(items: list[dict], *, mode: str = "merge") -> dict:
@@ -397,6 +406,7 @@ def duplicate(app_id: str, *, new_name: str | None = None) -> dict:
         url=source["url"],
         service=source["service"],
         log_path=source["log_path"],
+        probe_keyword=source.get("probe_keyword") or "",
         enabled=source["enabled"],
         note=source["note"],
     )

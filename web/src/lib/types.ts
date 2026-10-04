@@ -273,6 +273,8 @@ export interface MonitoredApp {
   service: string
   /** 应用落盘日志路径（供采集器按清单采集；支持通配） */
   log_path: string
+  /** 页面健康关键字（可选；空=仅连接级探测）：响应内容须包含该关键字才算在线 */
+  probe_keyword: string
   enabled: boolean
   note: string
   created_at: string
@@ -288,6 +290,7 @@ export interface MonitoredAppInput {
   url: string
   service: string
   log_path?: string
+  probe_keyword?: string
   enabled: boolean
   note?: string
 }

@@ -138,8 +138,8 @@ class RunRoundTest(unittest.TestCase):
         queue = list(results)
         calls: list[tuple] = []
 
-        def probe(url, *, timeout=2.0):
-            calls.append((url, timeout))
+        def probe(url, *, timeout=2.0, keyword=""):
+            calls.append((url, timeout, keyword))
             return queue.pop(0) if len(queue) > 1 else queue[0]
 
         probe.calls = calls
@@ -159,7 +159,7 @@ class RunRoundTest(unittest.TestCase):
         self.assertEqual(alert_payload[0]["labels"]["alert_id"], "probe-app-1-1000")  # fail_since 首败时刻
         self.assertEqual(resolved_payload[0]["labels"], alert_payload[0]["labels"])
         self.assertIn("endsAt", resolved_payload[0])
-        self.assertTrue(all(c == (app["url"], 1.5) for c in probe.calls))  # 探测超时透传
+        self.assertTrue(all(c == (app["url"], 1.5, "") for c in probe.calls))  # 探测超时/关键字透传
 
         record = self.state["app-1"]
         self.assertTrue(record["ok"])
@@ -188,6 +188,14 @@ class RunRoundTest(unittest.TestCase):
         self.assertEqual(len(self.injected), 2)
         self.assertEqual(self.injected[1][0]["labels"], self.injected[0][0]["labels"])
         self.assertNotIn("app-1", self.state)
+
+    def test_probe_keyword_passed_through(self) -> None:
+        """条目的页面关键字透传给探测函数（未配置为空串 → 纯连接级探测）。"""
+        app = _app("app-1", probe_keyword='<div id="root"')
+        probe = self._fake_probe([_ok()])
+        with mock.patch.object(prober.store, "list_all", return_value=[app]):
+            prober.run_round(self.state, probe_fn=probe, threshold=3, ts=1000.0)
+        self.assertEqual(probe.calls, [(app["url"], 2.0, '<div id="root"')])
 
 
 class WriteStatusAndReadTest(unittest.TestCase):

@@ -24,6 +24,8 @@ class MonitoredAppBody(BaseModel):
     service: str = Field(default=store.DEFAULT_SERVICE, max_length=64)
     # 应用落盘日志路径（供 ship_app_logs.py 按清单采集；支持通配，如 app_server*.log）
     log_path: str = Field(default="", max_length=512)
+    # 页面健康关键字（可选；空=仅连接级探测）：响应内容须包含该关键字才算在线
+    probe_keyword: str = Field(default="", max_length=256)
     enabled: bool = True
     note: str = Field(default="", max_length=200)
 
@@ -43,7 +45,14 @@ async def apps_with_probe() -> list[dict]:
     enabled = [app for app in apps if app.get("enabled")]
     probes = (
         await asyncio.gather(
-            *[asyncio.to_thread(aggregator.probe_monitored_app, app.get("url")) for app in enabled]
+            *[
+                asyncio.to_thread(
+                    aggregator.probe_monitored_app,
+                    app.get("url"),
+                    keyword=app.get("probe_keyword") or "",
+                )
+                for app in enabled
+            ]
         )
         if enabled
         else []
@@ -124,7 +133,11 @@ async def api_monitored_app_delete(request: Request, app_id: str) -> dict:
         actor=request.state.identity.user,
         action="monitored-app:delete",
         target=app_id,
-        params={"removed": {k: removed.get(k) for k in ("name", "url", "service", "log_path", "enabled")}},
+        params={
+            "removed": {
+                k: removed.get(k) for k in ("name", "url", "service", "log_path", "probe_keyword", "enabled")
+            }
+        },
     )
     return ok({"ok": True, "id": app_id})
 
@@ -147,7 +160,10 @@ class DuplicateBody(BaseModel):
 async def api_monitored_apps_export() -> dict:
     """导出清单（不含探测结果，便于跨环境搬运）。"""
     items = [
-        {key: app.get(key) for key in ("name", "url", "service", "log_path", "enabled", "note")}
+        {
+            key: app.get(key)
+            for key in ("name", "url", "service", "log_path", "probe_keyword", "enabled", "note")
+        }
         for app in store.list_all()
     ]
     return ok({"version": 1, "items": items})
@@ -205,7 +221,7 @@ class RollbackBody(BaseModel):
 
 
 # 可回滚（可编辑）字段白名单
-_ROLLBACK_FIELDS = {"name", "url", "service", "log_path", "enabled", "note"}
+_ROLLBACK_FIELDS = {"name", "url", "service", "log_path", "probe_keyword", "enabled", "note"}
 
 
 def _find_rollback_source(app_id: str, ts: str | None) -> dict | None:
