@@ -29,6 +29,7 @@ from aiops_agent import mode
 
 DATA_DIR = mode.data_root()  # 演示为 <repo>/data（既有数据零迁移）
 DATA_PATH = DATA_DIR / "monitored_apps.json"
+PROBE_STATUS_PATH = DATA_DIR / "probe_status.json"  # app_prober.py 巡检状态（BFF 只读展示）
 _KV_SEEDED = "monitored_apps:seeded"  # DB 后端播种标记（区分「未初始化」与「全删空」）
 
 DEFAULT_URL = "http://localhost:3000/"
@@ -194,6 +195,15 @@ def _write_raw(apps: list[dict]) -> None:
 def list_all() -> list[dict]:
     """全量清单（每次读盘 → 热生效）。"""
     return _read_raw()
+
+
+def read_probe_status() -> dict:
+    """可用性巡检状态（app_prober.py 落盘；文件缺失/损坏时返回空对象，绝不阻断清单展示）。"""
+    try:
+        data = json.loads(PROBE_STATUS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def get(app_id: str) -> dict | None:

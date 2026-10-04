@@ -33,9 +33,11 @@ def _monitor_error_code(message: str) -> int:
 
 
 async def apps_with_probe() -> list[dict]:
-    """被监控应用清单 + 实时探测。
+    """被监控应用清单 + 实时探测 + 主动巡检状态。
 
     仅探测启用项（并发），停用项直接标记为未探测；system 域与本域共用。
+    ``watcher`` 来自 app_prober.py 落盘的状态（未运行巡检时为 None），
+    用于在状态列展示「连续失败 N 次 / 已自动触发修复流程」。
     """
     apps = store.list_all()
     enabled = [app for app in apps if app.get("enabled")]
@@ -47,11 +49,13 @@ async def apps_with_probe() -> list[dict]:
         else []
     )
     probed = {app["id"]: probe for app, probe in zip(enabled, probes)}
+    watchers = store.read_probe_status().get("apps") or {}
     return [
         {
             **app,
             "probe": probed.get(app["id"])
             or {"running": False, "target": app.get("url"), "error": "已停用（未探测）"},
+            "watcher": watchers.get(app["id"]),
         }
         for app in apps
     ]

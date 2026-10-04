@@ -10,7 +10,7 @@ import { ActionButton } from '../components/ActionButton'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { EmptyState } from '../components/EmptyState'
 import { Toast } from '../components/Toast'
-import type { MonitoredApp, MonitoredAppInput } from '../lib/types'
+import type { MonitoredApp, MonitoredAppInput, MonitoredAppWatcher } from '../lib/types'
 
 const INPUT_CLS =
   'w-full rounded-lg border border-line bg-canvas px-3 py-2 text-sm text-ink placeholder:text-idle focus:border-accent/50 focus:outline-none'
@@ -97,6 +97,40 @@ function ProbeBadge({ app }: { app: MonitoredApp }) {
       <span className={cn('h-1.5 w-1.5 rounded-full', running ? 'bg-ok' : 'bg-danger animate-pulse')} />
       {running ? `在线 ${status_code ?? ''}${latency_ms != null ? ` · ${latency_ms}ms` : ''}` : '不可达'}
     </span>
+  )
+}
+
+/** 巡检时间仅取 HH:MM（本地时区显示）。 */
+function fmtHM(iso?: string): string {
+  if (!iso) return ''
+  const t = new Date(iso)
+  if (Number.isNaN(t.getTime())) return ''
+  return `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`
+}
+
+/** 主动巡检状态行：连续失败计数 / 已自动触发修复流程（app_prober.py 落盘数据）。 */
+function WatcherLine({ watcher }: { watcher: MonitoredAppWatcher }) {
+  if (watcher.alerted) {
+    return (
+      <div
+        className="mt-0.5 text-[10px] text-danger"
+        title={`告警 ID：${watcher.alert_id ?? '-'}${watcher.last_error ? `；最近错误：${watcher.last_error}` : ''}`}
+      >
+        巡检：连续失败 {watcher.failures} 次 · 已自动触发修复流程
+      </div>
+    )
+  }
+  if (!watcher.ok) {
+    return (
+      <div className="mt-0.5 text-[10px] text-muted" title={watcher.last_error ?? ''}>
+        巡检：连续失败 {watcher.failures} 次，达到阈值后自动触发修复
+      </div>
+    )
+  }
+  return (
+    <div className="mt-0.5 text-[10px] text-idle">
+      巡检正常{watcher.last_check_at ? ` · ${fmtHM(watcher.last_check_at)}` : ''}
+    </div>
   )
 }
 
@@ -500,6 +534,7 @@ export function MonitoredApps() {
                   </td>
                   <td className="px-4 py-3">
                     <ProbeBadge app={app} />
+                    {app.enabled && app.watcher && <WatcherLine watcher={app.watcher} />}
                     {!app.probe.running && app.probe.error && app.enabled && (
                       <div className="mt-0.5 max-w-[22rem] truncate text-[10px] text-idle" title={app.probe.error}>
                         {app.probe.error}

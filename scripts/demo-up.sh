@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AIOps 一键启动脚本：环境准备（Colima/依赖容器）→ 自检 → 启动 worker+BFF → 灌日志 → 起流程
+# AIOps 一键启动脚本：环境准备（Colima/依赖容器）→ 自检 → 启动 worker/BFF/告警接入/可用性巡检 → 灌日志 → 起流程
 # 用法：
 #   bash scripts/demo-up.sh           一键启动（幂等，已运行则跳过重启）
 #   bash scripts/demo-up.sh env       仅环境准备（Colima + Temporal/Loki 容器 + 等就绪）
@@ -17,6 +17,8 @@ SERVICE="${AIOPS_DEMO_SERVICE:-order}"
 ALERT_ID="demo-$(date +%H%M%S)"
 WORKER_LOG="$ROOT/worker.log"
 BFF_LOG="$ROOT/bff.log"
+WEBHOOK_LOG="$ROOT/alert_webhook.log"
+PROBER_LOG="$ROOT/app_prober.log"
 TEMPORAL_ADDR="127.0.0.1:7233"
 LOKI_URL="http://localhost:3101"
 
@@ -58,6 +60,8 @@ wait_http() { # url timeout_s
 cmd_down() {
   pkill -f "aiops_agent.worker" 2>/dev/null && info "worker 已停止" || warn "worker 本未运行"
   pkill -f "uvicorn bff.app:app" 2>/dev/null && info "BFF 已停止" || warn "BFF 本未运行"
+  pkill -f "alert_webhook.py" 2>/dev/null && info "告警接入服务已停止" || warn "告警接入服务本未运行"
+  pkill -f "app_prober.py" 2>/dev/null && info "可用性巡检已停止" || warn "可用性巡检本未运行"
 }
 
 # 停止应用 + 依赖容器（stop 而非 down：保留容器与数据卷，下次启动更快）
@@ -77,6 +81,8 @@ cmd_status() {
   local ok=0
   running "aiops_agent.worker" && info "worker 运行中" || { warn "worker 未运行"; ok=1; }
   running "uvicorn bff.app:app" && info "BFF 运行中（http://127.0.0.1:8600）" || { warn "BFF 未运行"; ok=1; }
+  running "alert_webhook.py" && info "告警接入服务运行中（127.0.0.1:8099）" || { warn "告警接入服务未运行"; ok=1; }
+  running "app_prober.py" && info "可用性巡检运行中（被监控应用 → 自动修复流程）" || { warn "可用性巡检未运行"; ok=1; }
   if docker info >/dev/null 2>&1; then
     docker ps --format '{{.Names}}' | grep -qx aiops-temporal && info "Temporal 运行中（127.0.0.1:7233）" || { warn "Temporal 未运行"; ok=1; }
     docker ps --format '{{.Names}}' | grep -qx aiops-loki && info "Loki 运行中（http://localhost:3101）" || { warn "Loki 未运行"; ok=1; }
@@ -144,12 +150,28 @@ cmd_up() {
     wait_up "uvicorn bff.app:app" && info "BFF 已启动（http://127.0.0.1:8600，日志 ${BFF_LOG}）" || { err "BFF 启动失败，见 ${BFF_LOG}"; exit 1; }
   fi
 
-  echo "${c_dim}== 4/5 灌入演示日志 ==${c_reset}"
+  echo "${c_dim}== 4/7 启动告警接入服务 ==${c_reset}"
+  if running "alert_webhook.py"; then
+    info "告警接入服务已在运行，跳过"
+  else
+    nohup "$PY" alert_webhook.py --port 8099 >>"$WEBHOOK_LOG" 2>&1 &
+    wait_up "alert_webhook.py" && info "告警接入服务已启动（http://127.0.0.1:8099，日志 ${WEBHOOK_LOG}）" || { err "告警接入服务启动失败，见 ${WEBHOOK_LOG}"; exit 1; }
+  fi
+
+  echo "${c_dim}== 5/7 启动可用性巡检 ==${c_reset}"
+  if running "app_prober.py"; then
+    info "可用性巡检已在运行，跳过"
+  else
+    nohup "$PY" app_prober.py >>"$PROBER_LOG" 2>&1 &
+    wait_up "app_prober.py" && info "可用性巡检已启动（连续 3 次失败自动触发修复流程，日志 ${PROBER_LOG}）" || { err "可用性巡检启动失败，见 ${PROBER_LOG}"; exit 1; }
+  fi
+
+  echo "${c_dim}== 6/7 灌入演示日志 ==${c_reset}"
   "$PY" demo_log_generator.py --service "$SERVICE" --mode surge --count 800
   "$PY" demo_log_generator.py --service "$SERVICE" --mode normal --count 60
   info "已灌入 $SERVICE 故障日志（落在近 10 分钟窗口内）"
 
-  echo "${c_dim}== 5/5 启动修复流程 ==${c_reset}"
+  echo "${c_dim}== 7/7 启动修复流程 ==${c_reset}"
   "$PY" demo_cli.py start --service "$SERVICE" --alert-id "$ALERT_ID" --description "一键演示"
 
   cat <<EOF
@@ -157,6 +179,7 @@ cmd_up() {
 ${c_green}启动完成${c_reset}
   控制台：  http://127.0.0.1:8600
   工作流：  aiops-fix-$SERVICE-$ALERT_ID
+  巡检：    每 15 秒探测「被监控应用」，连续 3 次不可达自动触发修复流程
 
 接下来到控制台操作：
   1. 「审批中心」→ 找到该流程 → 点「批准」

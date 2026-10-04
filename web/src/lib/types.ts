@@ -251,6 +251,20 @@ export interface MonitoredAppProbe {
   error?: string
 }
 
+/** 主动巡检状态（app_prober.py 落盘；未运行巡检器时为 null）。 */
+export interface MonitoredAppWatcher {
+  ok: boolean
+  failures: number
+  last_check_at?: string
+  last_ok_at?: string
+  last_error?: string
+  status_code?: number
+  latency_ms?: number
+  alerted: boolean
+  alerted_at?: string | null
+  alert_id?: string | null
+}
+
 /** 被监控应用（控制台可维护；改动热生效，无需重启）。 */
 export interface MonitoredApp {
   id: string
@@ -264,6 +278,8 @@ export interface MonitoredApp {
   created_at: string
   updated_at: string
   probe: MonitoredAppProbe
+  /** 主动巡检状态（连续失败计数 / 是否已自动触发修复流程） */
+  watcher?: MonitoredAppWatcher | null
 }
 
 /** 新增/编辑入参。 */
