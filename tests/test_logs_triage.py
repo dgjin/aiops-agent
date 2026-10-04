@@ -9,7 +9,7 @@
     - resolve_services：显式参数解析 / 清单动态去重 / 清单不可读容错。
 
 运行：
-    .venv/bin/python -m unittest discover -s tests -v
+    .venv/bin/python -m unittest discover -s tests -t . -v
 """
 
 from __future__ import annotations

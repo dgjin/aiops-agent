@@ -1,7 +1,7 @@
 """通知层单测（WP8）：卡片渲染 / 真实投递与降级 / 加签 / 回调解析 / 活动集成。
 
 运行：
-    .venv/bin/python -m unittest discover -s tests -v
+    .venv/bin/python -m unittest discover -s tests -t . -v
 """
 
 from __future__ import annotations

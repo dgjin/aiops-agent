@@ -1,7 +1,7 @@
 """告警接入服务单测（WP1）：Alertmanager 载荷解析与幂等键一致性。
 
 运行：
-    .venv/bin/python -m unittest discover -s tests -v
+    .venv/bin/python -m unittest discover -s tests -t . -v
 
 零外部依赖（不需要 Temporal 服务端）：仅覆盖纯函数解析逻辑。
 """

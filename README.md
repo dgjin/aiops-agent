@@ -220,8 +220,10 @@ aiops-agent/
 
 ```bash
 cd aiops-agent
-.venv/bin/python -m unittest discover -s tests
+.venv/bin/python -m unittest discover -s tests -t .
 ```
+
+> `-t .`（顶层目录=仓库根）让测试以 `tests.*` 包方式导入，先执行 `tests/__init__.py` 隔离钩子（强制 demo 模式，测试**永不**连生产库）；省略 `-t .` 会按顶层模块导入并跳过该钩子（曾实测把测试数据写进生产 MySQL）。pytest 方式由 `tests/conftest.py` 同款覆盖。
 
 ---
 

@@ -10,7 +10,7 @@
     - activities 集成：test-fail 短路、RAG 检索降级与命中。
 
 运行：
-    .venv/bin/python -m unittest discover -s tests -v
+    .venv/bin/python -m unittest discover -s tests -t . -v
 """
 
 from __future__ import annotations

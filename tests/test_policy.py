@@ -1,7 +1,7 @@
 """策略强校验单测：锁定策略的回归保护（设计方案第 5 节决策表）。
 
 运行：
-    .venv/bin/python -m unittest discover -s tests -v
+    .venv/bin/python -m unittest discover -s tests -t . -v
 
 说明：本测试零外部依赖（不需要 Temporal 服务端），验证
 1. 生产/演示策略可正常加载；

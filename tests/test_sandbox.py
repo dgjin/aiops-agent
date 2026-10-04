@@ -1,7 +1,7 @@
 """沙箱执行器单测（WP6）：隔离语义 / 输出解析 / 工作区准备 / K8s manifest / 真实容器集成。
 
 运行：
-    .venv/bin/python -m unittest discover -s tests -v
+    .venv/bin/python -m unittest discover -s tests -t . -v
 
 说明：真实容器集成类需要本机 docker 与 python:3.12-slim 镜像，不可用时自动跳过。
 """

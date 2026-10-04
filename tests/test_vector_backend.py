@@ -8,7 +8,7 @@
     - run_fix 模型优先级：显式 model > DEFAULT_FIX_MODEL；timeout 透传。
 
 运行：
-    .venv/bin/python -m unittest discover -s tests -v
+    .venv/bin/python -m unittest discover -s tests -t . -v
 """
 
 from __future__ import annotations
