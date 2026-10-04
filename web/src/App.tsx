@@ -105,9 +105,14 @@ function humanSeconds(seconds: number): string {
 
 /** 访问令牌（BFF 鉴权）：本机保存；展示**自动轮换**状态与自身令牌有效期。 */
 function TokenControl() {
-  const [token, setTokenState] = useState(() => getToken())
+  // 输入框草稿与「已保存值」分离：状态行只反映已落库的令牌。
+  // 此前状态行直接基于输入框内容——输入后未点「保存」就显示「已设置」，
+  // 用户误以为设置成功、实际所有请求仍 401（2026-10-04 实测复现的误导缺陷）。
+  const [draft, setDraft] = useState(() => getToken())
+  const [savedToken, setSavedToken] = useState(() => getToken())
   const [saved, setSaved] = useState(false)
-  const masked = token ? `${token.slice(0, 4)}••••${token.slice(-2)}` : ''
+  const savedMasked = savedToken ? `${savedToken.slice(0, 4)}••••${savedToken.slice(-2)}` : ''
+  const dirty = draft !== savedToken
 
   const { data } = useQuery({
     queryKey: ['auth-status'],
@@ -118,9 +123,10 @@ function TokenControl() {
   const write = useWriteAction()
 
   const save = () => {
-    const normalized = normalizeToken(token)
+    const normalized = normalizeToken(draft)
     setToken(normalized) // 自动去掉 Bearer 前缀 / 首尾引号与空白
-    setTokenState(normalized)
+    setDraft(normalized)
+    setSavedToken(normalized)
     setSaved(true)
     setTimeout(() => setSaved(false), 2500)
     // 令牌变化后重新拉取全部数据（原请求均为未授权状态）
@@ -134,17 +140,18 @@ function TokenControl() {
     <div className="space-y-1.5">
       <div className="text-[10px] text-idle">
         访问令牌{' '}
-        {token ? (
-          <span className="font-mono text-ok">已设置 {masked}</span>
+        {savedToken ? (
+          <span className="font-mono text-ok">已设置 {savedMasked}</span>
         ) : (
           <span className="text-danger">未设置</span>
         )}
+        {dirty && <span className="text-warn">（有未保存的修改，请点「保存」）</span>}
       </div>
       <div className="flex gap-1.5">
         <input
           type="password"
-          value={token}
-          onChange={(e) => setTokenState(e.target.value)}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && save()}
           placeholder="Bearer token"
           className="min-w-0 flex-1 rounded-md border border-line bg-canvas px-2 py-1 font-mono text-[11px] text-ink placeholder:text-idle focus:border-accent/50 focus:outline-none"

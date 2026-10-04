@@ -39,6 +39,7 @@ export function getToken(): string {
  */
 export function normalizeToken(raw: string): string {
   return raw
+    .replace(/[\u200b-\u200d\ufeff]/g, '') // 零宽字符：从聊天工具/网页复制最常见，肉眼不可见
     .trim()
     .replace(/^bearer\s+/i, '')
     .trim()
