@@ -6,7 +6,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { api, describeError } from '../lib/api'
 import { fmtDateTime, fmtDuration } from '../lib/format'
 import { EmptyState } from '../components/EmptyState'
-import { StageBadge } from '../components/StageBadge'
+import { STAGE_META, StageBadge } from '../components/StageBadge'
 
 const STAGE_OPTIONS = [
   'DETECTED',
@@ -54,7 +54,7 @@ export function Flows() {
           <option value="">全部阶段</option>
           {STAGE_OPTIONS.map((s) => (
             <option key={s} value={s}>
-              {s}
+              {STAGE_META[s]?.label ?? s}
             </option>
           ))}
         </select>

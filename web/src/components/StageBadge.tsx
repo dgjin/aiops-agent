@@ -6,8 +6,8 @@ interface StageMeta {
   pulse?: boolean
 }
 
-/** stage → 视觉映射（设计方案 7.2）。 */
-const STAGE_META: Record<string, StageMeta> = {
+/** stage → 视觉与中文标签映射（设计方案 7.2）；中文标签亦供流程列表筛选项复用。 */
+export const STAGE_META: Record<string, StageMeta> = {
   DETECTED: { label: '已接入', tone: 'info' },
   TRIAGING: { label: '分析中', tone: 'info', pulse: true },
   FIXING: { label: '修复中', tone: 'info', pulse: true },
@@ -65,7 +65,6 @@ export function StageBadge({ stage, className }: { stage: string | null; classNa
         className={cn('h-1.5 w-1.5 rounded-full', DOT_CLS[meta.tone], meta.pulse && 'animate-pulse')}
       />
       {meta.label}
-      <span className="font-mono text-[10px] opacity-60">{stage}</span>
     </span>
   )
 }
