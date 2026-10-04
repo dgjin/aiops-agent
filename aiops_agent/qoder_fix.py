@@ -17,6 +17,8 @@
     - 只在 data/qoder/<patch_id>/ 副本内改动，绝不触碰真实代码目录；
     - --permission-mode accept_edits（非 bypass_permissions），配合工具白/黑名单；
     - --max-turns + 子进程超时双限；--no-session-persistence 保证无状态可复现；
+    - 子进程以新会话 + /dev/null stdin 运行（脱离控制终端）：后台作业启动的 worker
+      场景下，防 qodercli 读终端被 SIGTTIN 停止而永不退出（详见 run_qoder_cli 注释）；
     - 子进程环境经 sanitize_env() 清洗，剔除继承自 Qoder 进程的 Agent-SDK 变量
       （否则 qodercli 误入 SDK 模式，见文末 _ENV_DENY_PREFIXES 注释）。
 """
@@ -326,8 +328,20 @@ def run_qoder_cli(
     start = time.monotonic()
     timed_out = False
     try:
+        # stdin=DEVNULL + start_new_session（新会话，脱离控制终端）：qodercli 为交互式 CLI，
+        # 启动期会探测/读取终端。worker 由后台作业（nohup … &）启动时进程组非前台，子进程读
+        # 控制终端会收到 SIGTTIN 被内核停止（ps STAT=T）且永不退出 → generate_patch 挂死、
+        # 子进程超时保护失效、Temporal 活动超时后重试也无法执行（实测教训 2026-10-04）。
+        # 新会话无控制终端：终端访问只会失败并回退到无头模式，不再被挂起。
         proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout, cwd=str(workspace), env=env
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(workspace),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
         )
         exit_code: int | None = proc.returncode
         stdout, stderr = proc.stdout or "", proc.stderr or ""

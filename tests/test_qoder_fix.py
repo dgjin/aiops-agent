@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -364,6 +365,19 @@ class TestRunQoderCli(QoderTestBase):
         # 绝不使用 bypass/yolo
         self.assertNotIn("--yolo", cmd)
         self.assertNotIn("bypass_permissions", cmd)
+
+    def test_subprocess_detached_from_controlling_tty(self) -> None:
+        """回归：无头调用必须脱离控制终端与终端 stdin（防 SIGTTIN 挂起）。
+
+        实测教训：worker 由后台作业启动（nohup … &，进程组非前台）时，qodercli 启动期
+        读取控制终端会收到 SIGTTIN 被内核停止（ps STAT=T）且永不退出，generate_patch
+        活动挂死；start_new_session + DEVNULL stdin 使子进程无控制终端可读，消除该状态。
+        """
+        with mock.patch("subprocess.run", wraps=subprocess.run) as run:
+            qoder_fix.run_qoder_cli(self.root, "x", exe=str(FAKE_CLI), timeout=10)
+        kwargs = run.call_args.kwargs
+        self.assertIs(kwargs.get("stdin"), subprocess.DEVNULL)
+        self.assertTrue(kwargs.get("start_new_session"))
 
 
 def _real_diff_for_order_service() -> str:
