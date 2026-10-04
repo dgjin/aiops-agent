@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import code_rag, metrics
-from .fix_agent import apply_unified_diff, split_unified_diff
+from .fix_agent import _normalize_rel, apply_unified_diff, split_unified_diff
 from .models import Patch, TestReport
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -59,7 +59,10 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"(?i)\b(?:password|passwd|api_key|apikey|secret|token)\s*=\s*[\"'][^\"']+[\"']"), "硬编码敏感信息"),
 ]
 
-_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".venv", ".git", "data")
+_IGNORE = shutil.ignore_patterns(
+    "__pycache__", "*.pyc", ".venv", ".git", "data",
+    "node_modules", "dist", "build", "coverage", ".next", "out", "logs",
+)
 
 
 @dataclass
@@ -200,6 +203,7 @@ def prepare_workspace(
     sections = split_unified_diff(patch.diff)
     if len(sections) > 1:
         for rel, file_diff in sections.items():
+            rel = _normalize_rel(rel)
             target = workspace / rel
             if not target.is_file():
                 return None, f"工作区中目标文件不存在: {rel}"
@@ -210,7 +214,7 @@ def prepare_workspace(
             target.write_text(new_text, encoding="utf-8")
         return workspace, ""
 
-    target_rel = patch.files[0] if patch.files else ""
+    target_rel = _normalize_rel(patch.files[0]) if patch.files else ""
     target = workspace / target_rel
     if not target.is_file():
         return None, f"工作区中目标文件不存在: {target_rel}"
@@ -373,6 +377,57 @@ class K8sJobSandboxRunner:
         )
 
 
+def _contract_report(
+    patch: Patch, attempt: int, workspace: Path, contract: dict, sast_detail: str
+) -> TestReport:
+    """静态契约校验（前端/非 Python 仓库）：补丁应用后，探针关键词必须恢复。
+
+    该类仓库无 Python 测试套件可执行（不运行 runner / Bandit）；以「探针关键词
+    重新出现于补丁触碰的文件」作为沙箱验收证据（与 app_prober 的在线判据一致）。
+    """
+    keyword = str(contract.get("keyword") or "").strip()
+    if not keyword:
+        return TestReport(
+            patch_id=patch.patch_id,
+            passed=False,
+            unit_tests="未执行（契约缺少 keyword）",
+            regression_tests="未执行",
+            sast=sast_detail,
+            details=f"契约校验配置无效：未提供探针关键词（attempt={attempt}）",
+        )
+    hit_files: list[str] = []
+    for rel in patch.files:
+        rel = _normalize_rel(rel)
+        target = workspace / rel
+        if not target.is_file():
+            continue
+        try:
+            if keyword in target.read_text(encoding="utf-8", errors="replace"):
+                hit_files.append(rel)
+        except OSError:
+            continue
+    if hit_files:
+        return TestReport(
+            patch_id=patch.patch_id,
+            passed=True,
+            unit_tests=f"契约校验通过（探针关键词已恢复：{keyword}）",
+            regression_tests="未执行（静态契约模式）",
+            sast=sast_detail,
+            details=f"契约校验：{'、'.join(hit_files)} 已包含探针关键词（attempt={attempt}）",
+        )
+    return TestReport(
+        patch_id=patch.patch_id,
+        passed=False,
+        unit_tests="契约校验失败（探针关键词未恢复）",
+        regression_tests="未执行（静态契约模式）",
+        sast=sast_detail,
+        details=(
+            f"契约校验失败：补丁文件 {patch.files} 中均未出现探针关键词 {keyword!r}"
+            f"（attempt={attempt}）"
+        ),
+    )
+
+
 def run_patch_tests(
     patch: Patch,
     attempt: int,
@@ -380,8 +435,14 @@ def run_patch_tests(
     repo_dir: Path | None = None,
     sandbox_root: Path | None = None,
     runner: DockerSandboxRunner | K8sJobSandboxRunner | None = None,
+    contract: dict | None = None,
 ) -> TestReport:
-    """编排一次沙箱验证：SAST → 工作区准备 → 隔离执行 → TestReport。"""
+    """编排一次沙箱验证：SAST → 工作区准备 → 隔离执行 → TestReport。
+
+    contract：被监控前端应用的静态契约校验（形如 {"keyword": "探针页面关键字"}）。
+        非空时启用契约模式——不执行 Python 测试套件与 Bandit，以「探针关键词
+        在补丁触碰的文件中恢复」作为通过判据；None 时保持既有 unittest 沙箱路径。
+    """
     repo_dir = Path(repo_dir) if repo_dir else code_rag.DEFAULT_REPO_DIR
     sandbox_root = Path(sandbox_root) if sandbox_root else DEFAULT_SANDBOX_ROOT
 
@@ -406,6 +467,10 @@ def run_patch_tests(
             sast=sast_detail,
             details=f"{prep_error}（attempt={attempt}）",
         )
+
+    # 契约模式（前端仓库）：静态校验探针关键词恢复，不执行 Python 套件与 Bandit
+    if contract:
+        return _contract_report(patch, attempt, workspace, contract, sast_detail)
 
     # 第二道 SAST：Bandit AST 深度扫描（仅拦截补丁新引入的 HIGH/MEDIUM 问题）
     bandit_ok, bandit_detail = run_bandit(workspace, repo_dir)

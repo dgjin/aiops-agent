@@ -20,6 +20,7 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from temporalio import activity
 
@@ -49,6 +50,26 @@ def _stable_id(text: str, mod: int) -> int:
 async def _tiny_delay() -> None:
     """模拟真实调用耗时，便于观察阶段流转。"""
     await asyncio.sleep(0.5)
+
+
+def _resolve_repo_dir(service: str) -> Path | None:
+    """解析被监控应用对应的修复目标仓库（未注册/未配置返回 None → 走 demo-app 默认行为）。"""
+    from . import app_registry
+
+    try:
+        entry = app_registry.resolve(service)
+    except Exception as exc:  # noqa: BLE001 - 注册表不可用不阻断修复
+        log.warning("[registry] 应用注册表不可用，使用默认仓库: %s", exc)
+        return None
+    if entry:
+        log.info(
+            "[registry] 服务 %s → 修复仓库 %s（契约关键词=%s）",
+            service,
+            entry["repo"],
+            (entry.get("contract") or {}).get("keyword") or "无",
+        )
+        return entry["repo"]
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -206,16 +227,18 @@ async def generate_patch(
 
     started = time.monotonic()
     await _tiny_delay()
+    repo_dir = _resolve_repo_dir(alert.service)
     patch, meta = await asyncio.to_thread(
-        fix_agent.run_fix, alert, root_cause, references, attempt
+        fix_agent.run_fix, alert, root_cause, references, attempt, repo_dir
     )
     duration = time.monotonic() - started
     reason_note = f"，原因={meta['reason']}" if meta["reason"] else ""
     log.info(
-        "[fix] 补丁 %s（attempt=%d，provider=%s，文件=%s，model=%s，validated=%s，degraded=%s%s）",
+        "[fix] 补丁 %s（attempt=%d，provider=%s，仓库=%s，文件=%s，model=%s，validated=%s，degraded=%s%s）",
         patch.patch_id,
         attempt,
         meta.get("provider", "ollama"),
+        repo_dir or "-",
         patch.files,
         patch.model_version,
         meta["validated"],
@@ -231,14 +254,26 @@ async def generate_patch(
 # --------------------------------------------------------------------------
 
 @activity.defn
-async def run_tests_in_sandbox(patch: Patch, attempt: int) -> TestReport:
+async def run_tests_in_sandbox(alert: Alert, patch: Patch, attempt: int) -> TestReport:
     """真实实现（WP6）：工作区准备 + 应用补丁 → 隔离运行时内执行单测（禁网/限额/只读）。
 
     隔离形态：本机 docker 容器（--network none 等）；生产以 K8s Job + gVisor 渲染（sandbox.py）。
+    被监控应用场景：经应用注册表解析修复仓库；前端仓库走静态契约校验（不执行 Python 套件）。
     """
-    from . import sandbox
+    from . import app_registry, sandbox
 
-    report = await asyncio.to_thread(sandbox.run_patch_tests, patch, attempt)
+    repo_dir = None
+    contract = None
+    try:
+        entry = app_registry.resolve(alert.service)
+        if entry:
+            repo_dir = entry["repo"]
+            contract = entry.get("contract")
+    except Exception as exc:  # noqa: BLE001 - 注册表不可用不阻断验证
+        log.warning("[sandbox] 应用注册表不可用，使用默认仓库: %s", exc)
+    report = await asyncio.to_thread(
+        sandbox.run_patch_tests, patch, attempt, repo_dir=repo_dir, contract=contract
+    )
     log.info(
         "[sandbox] 补丁 %s 测试结果：%s（单测=%s，回归=%s）",
         patch.patch_id,
@@ -367,15 +402,39 @@ async def notify_users(alert: Alert, patch: Patch) -> dict:
 async def deploy_canary(
     alert: Alert, patch: Patch, traffic_percent: int, observe_seconds: int = 10
 ) -> CanaryResult:
-    """真实实现（WP7）：ArgoCD 风格金丝雀——镜像构建 + 容器启动 + 真实探活观测。"""
-    from . import metrics, release
+    """真实实现（WP7）：ArgoCD 风格金丝雀——镜像构建 + 容器启动 + 真实探活观测。
 
-    result = await asyncio.to_thread(
-        release.run_canary, alert, patch, traffic_percent, observe_seconds
-    )
+    契约应用（注册表同时配置 url 与 probe_keyword，如本机 vite dev 前端）走「直连发布」：
+    补丁直接应用到真实仓库（落盘即生效），以真实页面探针观测；其余应用走默认容器金丝雀。
+    """
+    from . import app_registry, metrics, release
+
+    resolved = None
+    try:
+        resolved = app_registry.resolve(alert.service)
+    except Exception as exc:  # noqa: BLE001 - 注册表不可用回退默认容器金丝雀
+        log.warning("[registry] 应用注册表不可用，金丝雀走默认容器模式: %s", exc)
+
+    if resolved and resolved.get("contract") and resolved.get("url"):
+        result = await asyncio.to_thread(
+            release.run_canary_direct,
+            patch,
+            resolved["repo"],
+            resolved["url"],
+            resolved["contract"]["keyword"],
+            traffic_percent,
+            observe_seconds,
+        )
+        mode_label = "直连发布"
+    else:
+        result = await asyncio.to_thread(
+            release.run_canary, alert, patch, traffic_percent, observe_seconds
+        )
+        mode_label = "容器金丝雀"
     log.info(
-        "[canary] %s：观测窗口实测 错误率=%.2f%% P99=%.0fms → %s",
+        "[canary] %s（%s）：错误率=%.2f%% P99=%.0fms → %s",
         patch.patch_id,
+        mode_label,
         result.error_rate,
         result.p99_latency_ms,
         result.observation,
@@ -386,9 +445,15 @@ async def deploy_canary(
 
 @activity.defn
 async def finalize_release(canary: CanaryResult, auto_rollback: bool) -> ReleaseResult:
-    """真实实现（WP7）：达标真实滚动到稳定版；劣化回收金丝雀并保留稳定版本。"""
+    """真实实现（WP7）：达标真实滚动到稳定版；劣化回收金丝雀并保留稳定版本。
+
+    mode=direct（直连发布）：健康 = 补丁已生效保持上线；劣化还原已在金丝雀阶段完成。
+    """
     from . import release
 
-    result = await asyncio.to_thread(release.run_finalize, canary, auto_rollback)
+    if canary.mode == "direct":
+        result = await asyncio.to_thread(release.run_finalize_direct, canary, auto_rollback)
+    else:
+        result = await asyncio.to_thread(release.run_finalize, canary, auto_rollback)
     log.info("[release] %s（%s）", result.reason, result.version)
     return result

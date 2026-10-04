@@ -64,6 +64,8 @@ class CanaryResult:
     error_rate: float
     p99_latency_ms: float
     observation: str = ""
+    # 发布模式：container=镜像+容器滚动（demo-app）；direct=补丁直连真实仓库（契约应用）
+    mode: str = "container"
 
 
 @dataclass

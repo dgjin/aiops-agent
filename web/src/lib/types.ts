@@ -275,6 +275,8 @@ export interface MonitoredApp {
   log_path: string
   /** 页面健康关键字（可选；空=仅连接级探测）：响应内容须包含该关键字才算在线 */
   probe_keyword: string
+  /** 修复目标仓库路径（AIOps 修复引擎据此定位并生成补丁；空=不参与自动修复） */
+  repo: string
   enabled: boolean
   note: string
   created_at: string
@@ -291,6 +293,7 @@ export interface MonitoredAppInput {
   service: string
   log_path?: string
   probe_keyword?: string
+  repo?: string
   enabled: boolean
   note?: string
 }

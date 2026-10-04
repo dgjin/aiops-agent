@@ -73,6 +73,7 @@ def _seed() -> list[dict]:
             "service": service,
             "log_path": os.environ.get("AIOPS_MONITOR_LOG_PATH", ""),
             "probe_keyword": "",
+            "repo": os.environ.get("AIOPS_MONITOR_REPO", ""),
             "enabled": True,
             "note": "由 AIOPS_MONITOR_URL 初始化，可在控制台维护",
             "created_at": now,
@@ -104,6 +105,8 @@ def _row_to_app(row) -> dict:
         "log_path": row["log_path"],
         # 旧库（未做 ALTER 迁移）无此列：读侧容错为空串
         "probe_keyword": row.get("probe_keyword") or "",
+        # 同上：旧库无 repo 列（写侧暂不落库，生产启用前需先 ALTER 加列）
+        "repo": row.get("repo") or "",
         "enabled": bool(row["enabled"]),
         "note": row["note"],
         "created_at": _dt_str(row["created_at"]),
@@ -244,6 +247,7 @@ def add(
     service: str = DEFAULT_SERVICE,
     log_path: str = "",
     probe_keyword: str = "",
+    repo: str = "",
     enabled: bool = True,
     note: str = "",
 ) -> dict:
@@ -261,6 +265,7 @@ def add(
         "service": (service or DEFAULT_SERVICE).strip(),
         "log_path": (log_path or "").strip(),
         "probe_keyword": (probe_keyword or "").strip(),
+        "repo": (repo or "").strip(),
         "enabled": bool(enabled),
         "note": (note or "").strip(),
         "created_at": now,
@@ -279,6 +284,7 @@ def update(
     service: str | None = None,
     log_path: str | None = None,
     probe_keyword: str | None = None,
+    repo: str | None = None,
     enabled: bool | None = None,
     note: str | None = None,
 ) -> tuple[dict, dict]:
@@ -303,6 +309,8 @@ def update(
         target["log_path"] = log_path.strip()
     if probe_keyword is not None:
         target["probe_keyword"] = probe_keyword.strip()
+    if repo is not None:
+        target["repo"] = repo.strip()
     if enabled is not None:
         target["enabled"] = bool(enabled)
     if note is not None:
@@ -322,7 +330,7 @@ def remove(app_id: str) -> dict | None:
     return dict(target)
 
 
-_IMPORTABLE = ("service", "log_path", "probe_keyword", "enabled", "note")
+_IMPORTABLE = ("service", "log_path", "probe_keyword", "repo", "enabled", "note")
 
 
 def import_many(items: list[dict], *, mode: str = "merge") -> dict:
@@ -407,6 +415,7 @@ def duplicate(app_id: str, *, new_name: str | None = None) -> dict:
         service=source["service"],
         log_path=source["log_path"],
         probe_keyword=source.get("probe_keyword") or "",
+        repo=source.get("repo") or "",
         enabled=source["enabled"],
         note=source["note"],
     )

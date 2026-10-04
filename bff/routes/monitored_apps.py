@@ -26,6 +26,8 @@ class MonitoredAppBody(BaseModel):
     log_path: str = Field(default="", max_length=512)
     # 页面健康关键字（可选；空=仅连接级探测）：响应内容须包含该关键字才算在线
     probe_keyword: str = Field(default="", max_length=256)
+    # 修复目标仓库路径（AIOps 修复引擎据此定位并生成补丁）；None=请求未携带该字段时保留原值，防漏字段清空
+    repo: str | None = Field(default=None, max_length=1024)
     enabled: bool = True
     note: str = Field(default="", max_length=200)
 
@@ -135,7 +137,8 @@ async def api_monitored_app_delete(request: Request, app_id: str) -> dict:
         target=app_id,
         params={
             "removed": {
-                k: removed.get(k) for k in ("name", "url", "service", "log_path", "probe_keyword", "enabled")
+                k: removed.get(k)
+                for k in ("name", "url", "service", "log_path", "probe_keyword", "repo", "enabled")
             }
         },
     )
@@ -162,7 +165,7 @@ async def api_monitored_apps_export() -> dict:
     items = [
         {
             key: app.get(key)
-            for key in ("name", "url", "service", "log_path", "probe_keyword", "enabled", "note")
+            for key in ("name", "url", "service", "log_path", "probe_keyword", "repo", "enabled", "note")
         }
         for app in store.list_all()
     ]
@@ -221,7 +224,7 @@ class RollbackBody(BaseModel):
 
 
 # 可回滚（可编辑）字段白名单
-_ROLLBACK_FIELDS = {"name", "url", "service", "log_path", "probe_keyword", "enabled", "note"}
+_ROLLBACK_FIELDS = {"name", "url", "service", "log_path", "probe_keyword", "repo", "enabled", "note"}
 
 
 def _find_rollback_source(app_id: str, ts: str | None) -> dict | None:

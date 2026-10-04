@@ -46,8 +46,14 @@ DEFAULT_DISALLOWED_TOOLS = "Bash"
 DEFAULT_TIMEOUT = 180
 DEFAULT_MAX_TURNS = 20
 
-# 工作区复制过滤（与 sandbox 一致：排除缓存/虚拟环境/外层仓库数据）
-_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".venv", ".git", "data")
+# 工作区复制过滤（与 sandbox 一致：排除缓存/虚拟环境/外层仓库数据/前端依赖与产物目录）
+_IGNORE = shutil.ignore_patterns(
+    "__pycache__", "*.pyc", ".venv", ".git", "data",
+    "node_modules", "dist", "build", "coverage", ".next", "out", "logs",
+    # skill 目录：工作区携带多来源同名 skill（如 archify）会让 qodercli 无头会话以
+    # "skill name conflict" 中断（exit=1、零改动）；排除后仅剩用户级源，与 demo-app 行为一致。
+    ".agents", ".claude", ".qoder",
+)
 
 # git 全局参数：固定身份、禁用签名、固定默认分支，保证在 CI 无配置环境下可用
 _GIT_BASE = [
@@ -179,6 +185,24 @@ def build_qoder_prompt(
     retry_section = (
         f"\n## 重试强化提示（上一轮候选修复未通过沙箱测试）\n{retry_hint}\n" if retry_hint else ""
     )
+    if target_rel:
+        target_block = (
+            f"## 目标文件\n{target_rel}\n"
+            "（请自行读取该文件，必要时读取其调用方与既有测试以确认修复位置）"
+        )
+        scope_rule = (
+            f"- 只修改 `{target_rel}` 这一个文件；"
+            "禁止新增文件、禁止改动测试、禁止重命名、禁止格式化或重构无关代码；"
+        )
+    else:
+        # 自主定位模式：目标文件未能预先确定（如前端仓库），交由 Qoder 在仓库内自行定位
+        target_block = (
+            "## 目标文件\n（未预先定位）请根据嫌疑文件与仓库结构，自行定位缺陷所在的最小文件集合。"
+        )
+        scope_rule = (
+            "- 只修改与缺陷直接相关的最小文件集合；"
+            "禁止新增文件、禁止改动测试、禁止重命名、禁止格式化或重构无关代码；"
+        )
     return f"""你是资深修复工程师。请修复下面这个线上缺陷，直接修改仓库中的代码文件。
 
 ## 告警
@@ -194,12 +218,10 @@ def build_qoder_prompt(
 ## 相似历史修复（Code RAG 检索）
 {refs_text}
 
-## 目标文件
-{target_rel}
-（请自行读取该文件，必要时读取其调用方与既有测试以确认修复位置）
+{target_block}
 
 ## 修复要求
-- 只修改 `{target_rel}` 这一个文件；禁止新增文件、禁止改动测试、禁止重命名、禁止格式化或重构无关代码；
+{scope_rule}
 - 做最小化单点修复，保持既有代码风格与类型标注；
 - 空指针类缺陷（对象可能为 None，随后被下标/属性访问）：空值校验必须插入到该访问语句**之前**，或直接把访问行改为带条件的安全写法；
 - 修改后请运行仓库既有单测确认目标用例转绿（若环境允许），再结束任务；
@@ -283,6 +305,9 @@ def run_qoder_cli(
         "--max-turns",
         str(max_turns),
         "--no-session-persistence",
+        # 仅加载用户级设置源：项目级 skill 源不参与加载，从加载层消除同名 skill 冲突（与 _IGNORE 双保险）
+        "--setting-sources",
+        "user",
     ]
     if allowed:
         argv += ["--allowed-tools", allowed]
@@ -365,6 +390,7 @@ def propose_patch(
     """
     repo_dir = Path(repo_dir) if repo_dir else code_rag.DEFAULT_REPO_DIR
     patch_id = f"p-{alert.alert_id}-r{attempt}"
+    target_display = target_rel or "（仓库级自主定位）"
     meta: dict = {
         "provider": "qoder",
         "stub": False,
@@ -444,11 +470,11 @@ def propose_patch(
         raise QoderFixError(f"Qoder CLI 超时（>{timeout if timeout is not None else _env('AIOPS_QODER_TIMEOUT', str(DEFAULT_TIMEOUT))}s）")
     if not diff.strip():
         raise QoderFixError(
-            f"Qoder 未对 {target_rel} 产生改动（exit={run['exit_code']}）；"
+            f"Qoder 未对 {target_display} 产生改动（exit={run['exit_code']}）；"
             f"输出摘要: {(run['stderr'] or run['stdout'] or '').strip()[:160]}"
         )
 
-    description = f"Qoder 自主修复 {root_cause.error_type}（目标文件 {target_rel}）。"
+    description = f"Qoder 自主修复 {root_cause.error_type}（目标文件 {target_display}）。"
     risk = "中：由 Qoder CLI 自主生成，已通过 diff 应用与编译校验，仍须经沙箱测试与三道闸门。"
     meta["reason"] = (
         f"Qoder CLI {version}/{meta['model']} 自主修复完成（changed={_diff_stat(diff)}）"

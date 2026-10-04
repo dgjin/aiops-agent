@@ -22,6 +22,7 @@ const EMPTY_FORM: MonitoredAppInput = {
   service: 'nl2sql',
   log_path: '',
   probe_keyword: '',
+  repo: '',
   enabled: true,
   note: '',
 }
@@ -165,6 +166,7 @@ function AppFormDialog({
             service: initial.service,
             log_path: initial.log_path,
             probe_keyword: initial.probe_keyword,
+            repo: initial.repo ?? '',
             enabled: initial.enabled,
             note: initial.note,
           }
@@ -262,6 +264,17 @@ function AppFormDialog({
             value={form.probe_keyword ?? ''}
             onChange={(e) => patch({ probe_keyword: e.target.value })}
             placeholder={'例如 <div id="root"'}
+            className={cn(INPUT_CLS, 'font-mono text-xs')}
+          />
+        </Field>
+        <Field
+          label="修复仓库路径（可选）"
+          hint="供 AIOps 修复引擎定位并生成补丁（如白屏/坏页面自动修复）；留空则不参与自动修复"
+        >
+          <input
+            value={form.repo ?? ''}
+            onChange={(e) => patch({ repo: e.target.value })}
+            placeholder="/path/to/app/repo"
             className={cn(INPUT_CLS, 'font-mono text-xs')}
           />
         </Field>
@@ -550,6 +563,14 @@ export function MonitoredApps() {
                         title={`页面关键字：${app.probe_keyword}`}
                       >
                         关键字：{app.probe_keyword}
+                      </span>
+                    )}
+                    {app.repo && (
+                      <span
+                        className="mt-0.5 block max-w-[18rem] truncate font-mono text-xs text-muted"
+                        title={`修复仓库：${app.repo}`}
+                      >
+                        仓库：{app.repo}
                       </span>
                     )}
                   </td>

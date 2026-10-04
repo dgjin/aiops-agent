@@ -168,7 +168,9 @@ class AIOpsFixWorkflow:
             self._patch_id = patch.patch_id
             self._patch = patch
             self.stage = "TESTING"
-            test_report = await self._call(activities.run_tests_in_sandbox, patch, attempt)
+            test_report = await self._call(
+                activities.run_tests_in_sandbox, alert, patch, attempt
+            )
             self._test_report = test_report
             if test_report.passed:
                 self._gate_events.append(f"tests:passed:attempt={attempt}")

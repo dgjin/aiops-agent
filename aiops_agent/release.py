@@ -35,6 +35,7 @@ import urllib.request
 from pathlib import Path
 
 from . import code_rag, sandbox
+from .fix_agent import _normalize_rel, apply_unified_diff, split_unified_diff
 from .models import Alert, CanaryResult, Patch, ReleaseResult
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -376,4 +377,114 @@ def run_finalize(
         reason = "金丝雀劣化，自动回滚：金丝雀已回收，稳定版本保持不变"
     else:
         reason = "金丝雀劣化（自动回滚未开启）：金丝雀已回收，等待人工处理"
+    return ReleaseResult(version=version, rolled_back=True, reason=reason)
+
+
+def _page_probe_once(url: str, keyword: str) -> bool:
+    """对真实页面请求一次：HTTP 200 且响应体包含契约关键词 → 健康。"""
+    request = urllib.request.Request(url, headers={"User-Agent": "aiops-canary/1.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=3) as resp:
+            body = resp.read(256 * 1024).decode("utf-8", "replace")
+            return resp.status == 200 and (not keyword or keyword in body)
+    except (OSError, urllib.error.URLError):
+        return False
+
+
+def run_canary_direct(
+    patch: Patch,
+    repo_dir: Path | str,
+    url: str,
+    keyword: str,
+    traffic_percent: int,
+    observe_seconds: int = 10,
+) -> CanaryResult:
+    """直连发布金丝雀（契约应用专用）：补丁直接应用到真实仓库，以真实页面探针观测。
+
+    适用于本机开发态前端（vite dev 落盘即生效）等无容器交付面的应用：
+    备份补丁涉及文件 → 按 diff 改写真实仓库 → 探针 URL（HTTP 200 且含契约关键词）
+    → 健康：保持生效（=已全量发布）；劣化：还原补丁前文件（=真实回滚）。
+    应用阶段任一文件失败：还原已写文件后抛错（不留半成品，交由 Temporal 重试）。
+    """
+    repo_dir = Path(repo_dir)
+    backups: dict[Path, str] = {}
+    try:
+        sections = split_unified_diff(patch.diff)
+        if len(sections) > 1:
+            items = [(_normalize_rel(rel), file_diff) for rel, file_diff in sections.items()]
+        else:
+            items = [(_normalize_rel(patch.files[0]) if patch.files else "", patch.diff)]
+        for rel, file_diff in items:
+            target = repo_dir / rel
+            if not target.is_file():
+                raise RuntimeError(f"直连发布失败：仓库中目标文件不存在: {rel}")
+            original = target.read_text(encoding="utf-8")
+            new_text = apply_unified_diff(original, file_diff)
+            if new_text is None:
+                raise RuntimeError(f"直连发布失败：补丁 diff 无法应用（上下文不匹配）: {rel}")
+            backups[target] = original
+            target.write_text(new_text, encoding="utf-8")
+    except Exception:
+        for path, content in backups.items():
+            path.write_text(content, encoding="utf-8")
+        raise
+
+    _page_probe_once(url, keyword)  # 预热一次（不计入统计）：热更新场景首个请求可能仍在重编译
+
+    deadline = time.monotonic() + observe_seconds
+    total = errors = 0
+    latencies: list[float] = []
+    while time.monotonic() < deadline:
+        total += 1
+        started = time.perf_counter()
+        if not _page_probe_once(url, keyword):
+            errors += 1
+        latencies.append((time.perf_counter() - started) * 1000)
+        time.sleep(OBSERVE_INTERVAL_SECONDS)
+    latencies.sort()
+    p99 = latencies[min(len(latencies) - 1, int(len(latencies) * 0.99))] if latencies else 0.0
+    error_rate = (errors / total * 100) if total else 100.0
+
+    healthy = error_rate <= SLO_MAX_ERROR_RATE and p99 <= SLO_MAX_P99_LATENCY_MS
+    if healthy:
+        observation = (
+            f"直连发布健康：错误率 {error_rate:.1f}%、P99 {p99:.0f}ms"
+            f"（{total} 次真实页面探针，补丁已应用至真实仓库并生效）"
+        )
+    else:
+        reasons: list[str] = []
+        if error_rate > SLO_MAX_ERROR_RATE:
+            reasons.append(f"错误率 {error_rate:.1f}% > SLO {SLO_MAX_ERROR_RATE:.0f}%")
+        if p99 > SLO_MAX_P99_LATENCY_MS:
+            reasons.append(f"P99 {p99:.0f}ms > SLO {SLO_MAX_P99_LATENCY_MS:.0f}ms")
+        observation = (
+            f"直连发布劣化：{'；'.join(reasons)}（{total} 次真实页面探针，已还原补丁前文件）"
+        )
+        for path, content in backups.items():
+            path.write_text(content, encoding="utf-8")
+    return CanaryResult(
+        patch_id=patch.patch_id,
+        traffic_percent=traffic_percent,
+        healthy=healthy,
+        error_rate=round(error_rate, 2),
+        p99_latency_ms=round(p99, 1),
+        observation=observation,
+        mode="direct",
+    )
+
+
+def run_finalize_direct(canary: CanaryResult, auto_rollback: bool) -> ReleaseResult:
+    """直连发布终态：健康 = 补丁已生效保持上线；劣化还原已由金丝雀阶段完成。"""
+    version = release_version(canary.patch_id)
+    if canary.healthy:
+        return ReleaseResult(
+            version=version,
+            rolled_back=False,
+            reason=f"直连发布达标，已全量发布（补丁已应用至真实仓库并生效: {canary.observation}）",
+        )
+    reason = (
+        "直连发布劣化，自动回滚：补丁前文件已还原"
+        if auto_rollback
+        else "直连发布劣化（自动回滚未开启）：等待人工处理"
+    )
     return ReleaseResult(version=version, rolled_back=True, reason=reason)

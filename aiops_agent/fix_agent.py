@@ -2,7 +2,8 @@
 
 流程（对齐实施计划 WP4 任务 3）：
     run_fix(alert, root_cause, references, attempt)
-      1. 定位目标文件（suspect_files 模糊匹配 demo-app，如 OrderService.java → order_service.py）；
+      1. 定位目标文件（suspect_files 模糊匹配目标仓库，如 OrderService.java → order_service.py；
+         支持前端文件与内联相对路径，如 src/index.css → <repo>/src/index.css）；
       2. build_fix_prompt：目标文件完整内容（带行号）+ 根因 + Code RAG 引用 → 要求输出 JSON {diff, description, risk}；
          attempt>0 时追加重试强化提示（防护须置于解引用之前，或直接修正问题行）；
       3. PatchOutput pydantic 校验；
@@ -28,9 +29,11 @@ qoder 提供者的变更由隔离工作区的 ``git diff`` 确定性采集，失
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 import time
+from collections.abc import Iterator
 from itertools import chain
 from pathlib import Path
 
@@ -91,30 +94,99 @@ def _suspect_tokens(suspect: str) -> set[str]:
     return tokens
 
 
-def locate_target_file(suspect_files: list[str], repo_dir: Path) -> Path | None:
-    """按 suspect_files 模糊定位目标文件：OrderService.java → order_service.py（类名转蛇形）。
+# 定位目标文件时跳过的目录（被监控前端仓库的依赖/产物目录不参与遍历）
+_SKIP_DIRS = {
+    "__pycache__", ".git", ".venv", "venv", "node_modules",
+    "dist", "build", "coverage", ".next", "out",
+}
 
-    打分：候选文件名与嫌疑路径词元的命中数优先（src/order/service.py → order_service.py
-    优于 token_service.py），其次非 tests 目录、路径字典序，保证确定性。
+# 嫌疑文件无扩展名时兜底尝试的前端源码扩展名
+_FRONTEND_EXTS = (".ts", ".tsx", ".js", ".jsx", ".css", ".html")
+
+
+def _normalize_rel(path: str) -> str:
+    """规范化仓库相对路径：去掉前导 '/' 与 './'。
+
+    防 pathlib 绝对路径重置陷阱：``repo_dir / "/src/index.css"`` 会得到 ``/src/index.css``
+    （宿主根目录），导致后续一律「文件不存在」。
     """
+    cleaned = (path or "").strip().replace("\\", "/")
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    return cleaned.lstrip("/")
+
+
+def _iter_repo_files(repo_dir: Path) -> Iterator[Path]:
+    """遍历仓库文件（剪枝 _SKIP_DIRS：node_modules 等大型目录不进入）。"""
+    for root, dirs, files in os.walk(repo_dir):
+        dirs[:] = [name for name in dirs if name not in _SKIP_DIRS]
+        for name in files:
+            yield Path(root) / name
+
+
+def locate_target_file(suspect_files: list[str], repo_dir: Path) -> Path | None:
+    """按 suspect_files 定位目标文件（兼容 Python 与前端仓库）。
+
+    逐级降级（确定性）：
+      1. 规范化后的相对路径直接命中（/src/index.css → src/index.css，任意扩展名）；
+      2. 同名文件精确匹配（index.html / App.tsx / order_service.py 这类最终文件名）；
+      3. 蛇形模糊匹配：OrderService.java → order_service.py（保留既有行为），
+         并覆盖嫌疑文件自带扩展名的蛇形变体（QueryPanel.tsx → query_panel.tsx）。
+    打分：精确同名 > 候选文件名与嫌疑路径词元命中数（src/order/service.py → order_service.py
+    优于 token_service.py）> 非 tests 目录 > 路径字典序。
+    """
+    repo_dir = Path(repo_dir)
+    rels = [rel for rel in (_normalize_rel(suspect) for suspect in suspect_files or []) if rel]
+    if not rels:
+        return None
+
+    # 1) 直接路径命中（显式仓库内相对路径；排除 node_modules 等目录内的伪命中）
+    for rel in rels:
+        direct = repo_dir / rel
+        if direct.is_file() and not set(Path(rel).parts) & _SKIP_DIRS:
+            return direct
+
+    # 2) 收集候选：同名精确 + 蛇形模糊（.py 与前端扩展名）
     tokens: set[str] = set()
-    candidates: list[Path] = []
-    for suspect in suspect_files or []:
-        tokens |= _suspect_tokens(suspect)
-        stem = re.sub(r"\.[A-Za-z0-9]+$", "", Path(suspect).name)
+    exact_names: set[str] = set()
+    patterns: set[str] = set()
+    for rel in rels:
+        tokens |= _suspect_tokens(rel)
+        name = Path(rel).name
+        if not name:
+            continue
+        exact_names.add(name)
+        stem = re.sub(r"\.[A-Za-z0-9]+$", "", name)
         snake = re.sub(r"(?<!^)(?=[A-Z])", "_", stem).lower()
-        for pattern in (f"{snake}.py", f"*{snake}*.py"):
-            for path in sorted(repo_dir.rglob(pattern)):
-                if "__pycache__" in path.parts or path in candidates:
-                    continue
-                candidates.append(path)
+        if not snake:
+            continue
+        ext = Path(name).suffix.lower()
+        patterns.update((f"{snake}.py", f"*{snake}*.py"))
+        if not ext:
+            for alt in _FRONTEND_EXTS:
+                patterns.update((f"{snake}{alt}", f"*{snake}*{alt}"))
+        elif ext != ".py":
+            patterns.update((f"{snake}{ext}", f"*{snake}*{ext}"))
+
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for path in _iter_repo_files(repo_dir):
+        if path in seen:
+            continue
+        if path.name in exact_names or any(
+            fnmatch.fnmatch(path.name, pattern) for pattern in patterns
+        ):
+            seen.add(path)
+            candidates.append(path)
+    if not candidates:
+        return None
 
     def sort_key(path: Path) -> tuple:
         hits = len(set(path.stem.split("_")) & tokens)
-        return (-hits, "tests" in path.parts, str(path))
+        return (0 if path.name in exact_names else 1, -hits, "tests" in path.parts, str(path))
 
     candidates.sort(key=sort_key)
-    return candidates[0] if candidates else None
+    return candidates[0]
 
 
 def _line_numbered(text: str) -> str:
@@ -318,6 +390,45 @@ def validate_source(new_text: str, filename: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _validate_patch_diff(
+    diff: str, repo_dir: Path, target_rel: str, original_content: str
+) -> tuple[list[str], str]:
+    """校验补丁 diff：逐文件应用 + Python 文件编译校验。返回 (files, error)，error 为空即通过。
+
+    多文件 diff 按标准文件头切分逐文件校验（被监控应用场景可能出现多文件改动）；
+    无文件头（LLM 偶发 hunk-only 输出）时退化为按已定位目标文件单文件校验（兼容既有行为）。
+    非 Python 文件（前端 .ts/.html 等）无法用 compile() 校验，仅做应用校验。
+    """
+    sections = split_unified_diff(diff)
+    if sections:
+        files: list[str] = []
+        for rel, file_diff in sections.items():
+            rel = _normalize_rel(rel)
+            target = repo_dir / rel
+            if not target.is_file():
+                return [], f"补丁指向仓库中不存在的文件: {rel}（禁止新增文件）"
+            new_text = apply_unified_diff(target.read_text(encoding="utf-8"), file_diff)
+            if new_text is None:
+                return [], f"diff 无法应用到目标文件（上下文不匹配）: {rel}"
+            if rel.endswith(".py"):
+                ok, error = validate_source(new_text, rel)
+                if not ok:
+                    return [], f"补丁编译校验失败: {error}"
+            files.append(rel)
+        return files, ""
+
+    if not target_rel:
+        return [], "diff 缺少标准文件头且未定位到目标文件，无法校验"
+    new_text = apply_unified_diff(original_content, diff)
+    if new_text is None:
+        return [], "diff 无法应用到目标文件（上下文不匹配）"
+    if target_rel.endswith(".py"):
+        ok, error = validate_source(new_text, target_rel)
+        if not ok:
+            return [], f"补丁编译校验失败: {error}"
+    return [target_rel], ""
+
+
 def _replace_lines_diff(
     target_rel: str,
     content: str,
@@ -421,6 +532,7 @@ def fallback_patch(
     目标文件不可读或形态未知时退回占位 diff（沙箱将报告「无法应用」）。
     """
     repo_dir = Path(repo_dir) if repo_dir else code_rag.DEFAULT_REPO_DIR
+    target_rel = _normalize_rel(target_rel)
     diff: str | None = None
     description = ""
     files = [target_rel]
@@ -478,6 +590,8 @@ def run_fix(
         qoder  —— Qoder CLI 无头调用，隔离工作区自主修复，改动经 git diff 采集。
     模型优先级（仅 ollama）：显式 model 参数 > AIOPS_FIX_MODEL > triage 默认模型；
     timeout 对大模型/Qoder 多轮探索预留（默认 45s；Qoder 提供者默认 180s，见 qoder_fix）。
+    repo_dir 可指向「被监控应用」仓库（由 app_registry 解析）；qoder 提供者在未定位到
+    目标文件时不直接降级，而是以仓库级自主定位模式交由 Qoder 处理。
     """
     repo_dir = Path(repo_dir) if repo_dir else code_rag.DEFAULT_REPO_DIR
     used_model = model or DEFAULT_FIX_MODEL
@@ -497,30 +611,38 @@ def run_fix(
     desc = alert.description.lower()
 
     target = locate_target_file(root_cause.suspect_files, repo_dir)
-    target_rel = (
-        str(target.relative_to(repo_dir))
-        if target
-        else (root_cause.suspect_files[0] if root_cause.suspect_files else "src/unknown.py")
+    target_rel = str(target.relative_to(repo_dir)) if target else ""
+    fallback_rel = (
+        target_rel
+        or (_normalize_rel(root_cause.suspect_files[0]) if root_cause.suspect_files else "")
+        or "src/unknown.py"
     )
+    if provider == "qoder" and attempt > 0:
+        # 重试切换自主定位：预定位目标已被上一轮沙箱否定，回炉仍从同一文件出发会陷入死循环；
+        # 改为仓库级自主定位，让 Qoder 依据根因在仓库内重新搜索最小修复文件集合。
+        target = None
+        target_rel = ""
 
     if any(marker in desc for marker in _DEMO_STUB_MARKERS):
         bad = "test-always-fail" in desc or ("test-fail" in desc and attempt == 0)
-        patch = fallback_patch(alert, root_cause, attempt, target_rel, bad=bad, repo_dir=repo_dir)
+        patch = fallback_patch(alert, root_cause, attempt, fallback_rel, bad=bad, repo_dir=repo_dir)
         kind = "沙箱将拦截的错误候选" if bad else "修复候选"
         meta.update({"stub": True, "reason": f"演示分支：确定性补丁（{kind}）"})
         meta["elapsed_seconds"] = round(time.monotonic() - start, 2)
         return patch, meta
 
-    if target is None:
-        patch = fallback_patch(alert, root_cause, attempt, target_rel, repo_dir=repo_dir)
+    # 未定位到目标文件：qoder 走仓库级自主定位模式（不直接降级）；其余提供者安全侧兜底
+    if target is None and provider != "qoder":
+        patch = fallback_patch(alert, root_cause, attempt, fallback_rel, repo_dir=repo_dir)
         meta.update({"degraded": True, "reason": f"未定位到目标文件: {root_cause.suspect_files}"})
         meta["elapsed_seconds"] = round(time.monotonic() - start, 2)
         return patch, meta
 
-    content = target.read_text(encoding="utf-8")
+    content = target.read_text(encoding="utf-8") if target else ""
     try:
         if provider == "qoder":
-            # Qoder CLI 无头调用：隔离工作区自主修复 → git diff 确定性采集改动
+            # Qoder CLI 无头调用：隔离工作区自主修复 → git diff 确定性采集改动；
+            # target_rel 为空（目标文件未预先定位，如前端仓库）时进入仓库级自主定位模式。
             from . import qoder_fix
 
             diff, description, risk, gen_meta = qoder_fix.propose_patch(
@@ -541,16 +663,14 @@ def run_fix(
             raw = call_ollama(prompt, model=used_model, timeout=timeout)
             meta["generations"] = 1
             parsed = PatchOutput.model_validate_json(strip_code_fence(raw))
-        new_text = apply_unified_diff(content, parsed.diff)
-        if new_text is None:
-            raise ValueError("diff 无法应用到目标文件（上下文不匹配）")
-        ok, error = validate_source(new_text, target_rel)
-        if not ok:
-            raise ValueError(f"补丁编译校验失败: {error}")
+        # 校验：多文件 diff 逐文件应用；Python 文件追加编译校验；无文件头时按已定位目标文件校验
+        files, error = _validate_patch_diff(parsed.diff, repo_dir, target_rel, content)
+        if error:
+            raise ValueError(error)
         patch = Patch(
             patch_id=f"p-{alert.alert_id}-r{attempt}",
             alert_id=alert.alert_id,
-            files=[target_rel],
+            files=files,
             diff=parsed.diff,
             description=parsed.description,
             risk=parsed.risk,
@@ -560,7 +680,7 @@ def run_fix(
         meta["validated"] = True
     except Exception as exc:  # noqa: BLE001 - 一切异常走安全侧兜底，不阻断流程
         meta.update({"degraded": True, "reason": f"{type(exc).__name__}: {exc}"})
-        patch = fallback_patch(alert, root_cause, attempt, target_rel, repo_dir=repo_dir)
+        patch = fallback_patch(alert, root_cause, attempt, fallback_rel, repo_dir=repo_dir)
 
     meta["elapsed_seconds"] = round(time.monotonic() - start, 2)
     return patch, meta
