@@ -10,9 +10,15 @@
         （aiops_demo 标签经 Alertmanager 子路由自动转发至 AIOps 接入服务）
     防抖：同 service 在 cooldown 秒内仅告警一次。
 
+service 来源（每轮解析 → 热生效）：
+    --services 显式指定时按逗号分隔解析；缺省时从「被监控应用」清单
+    （bff.monitored_apps.log_targets()：enabled 且配置了 log_path 的条目）
+    动态提取，控制台新增/停用被监控应用无需重启本检测器。
+
 用法：
-    python log_surge_detector.py --services nl2sql --once    # 单轮（调试/验证）
-    python log_surge_detector.py --services nl2sql           # 守护运行（默认 15s 间隔）
+    python log_surge_detector.py --once              # 单轮（调试/验证）
+    python log_surge_detector.py                     # 守护运行（默认 15s 间隔）
+    python log_surge_detector.py --services nl2sql   # 显式指定（调试用）
 """
 
 from __future__ import annotations
@@ -28,6 +34,24 @@ from aiops_agent import logs
 logger = logging.getLogger("aiops.surge")
 
 DEFAULT_ALERTMANAGER = "http://localhost:9093"
+
+
+def resolve_services(explicit: str | None = None) -> list[str]:
+    """解析本轮待检测的 service 列表（每轮调用 → 清单改动热生效）。
+
+    显式传入（--services）时按逗号分隔解析；缺省时从「被监控应用」清单
+    （bff.monitored_apps.log_targets()）动态提取 service 并去重排序。
+    清单不可读时不中断守护循环，返回空列表等待下一轮。
+    """
+    if explicit:
+        return [s.strip() for s in explicit.split(",") if s.strip()]
+    try:
+        from bff import monitored_apps
+
+        return sorted({app["service"] for app in monitored_apps.log_targets() if app.get("service")})
+    except Exception as exc:  # noqa: BLE001 - 清单不可读时本轮跳过，不中断检测循环
+        logger.warning("读取被监控应用清单失败（本轮跳过）：%s", exc)
+        return []
 
 
 def build_surge_alert(service: str, recent: float, baseline: float) -> list[dict]:
@@ -110,7 +134,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     parser = argparse.ArgumentParser(description="错误日志突增检测器（→ Alertmanager）")
-    parser.add_argument("--services", default="nl2sql", help="服务列表，逗号分隔")
+    parser.add_argument("--services", default=None, help="服务列表，逗号分隔（缺省：按「被监控应用」清单动态取）")
     parser.add_argument("--interval", type=int, default=15, help="轮询间隔秒（默认 15）")
     parser.add_argument("--window", type=int, default=1, help="统计窗口分钟（默认 1）")
     parser.add_argument("--min-lines", type=int, default=100, help="绝对门槛行数（默认 100）")
@@ -120,21 +144,24 @@ def main() -> None:
     parser.add_argument("--once", action="store_true", help="只跑一轮后退出（调试/验证）")
     args = parser.parse_args()
 
-    services = [s.strip() for s in args.services.split(",") if s.strip()]
     last_alert: dict[str, float] = {}
     logger.info("突增检测器启动：services=%s interval=%ds window=%dm min_lines=%d factor=%.1f",
-                services, args.interval, args.window, args.min_lines, args.factor)
+                args.services or "（清单动态）", args.interval, args.window, args.min_lines, args.factor)
     try:
         while True:
-            check_once(
-                services,
-                args.window,
-                args.min_lines,
-                args.factor,
-                args.alertmanager,
-                cooldown=args.cooldown,
-                last_alert=last_alert,
-            )
+            services = resolve_services(args.services)  # 每轮解析 → 清单改动热生效
+            if not services:
+                logger.info("本轮无待检测服务（清单为空或不可读），等待下一轮 ...")
+            else:
+                check_once(
+                    services,
+                    args.window,
+                    args.min_lines,
+                    args.factor,
+                    args.alertmanager,
+                    cooldown=args.cooldown,
+                    last_alert=last_alert,
+                )
             if args.once:
                 break
             time.sleep(args.interval)

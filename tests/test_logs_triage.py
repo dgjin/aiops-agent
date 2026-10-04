@@ -5,7 +5,8 @@
     - is_surge：突增判定（绝对门槛、环比倍数、基线为 0）；
     - triage schema：pydantic 强校验（合法/越界/缺字段/extra 忽略）；
     - strip_code_fence / build_triage_prompt / fallback / run_triage 降级与成功路径（mock Ollama）；
-    - build_surge_alert：Alertmanager 载荷标签完整性。
+    - build_surge_alert：Alertmanager 载荷标签完整性；
+    - resolve_services：显式参数解析 / 清单动态去重 / 清单不可读容错。
 
 运行：
     .venv/bin/python -m unittest discover -s tests -v
@@ -21,7 +22,7 @@ from pydantic import ValidationError
 
 from aiops_agent import logs, triage
 from aiops_agent.models import Alert
-from log_surge_detector import build_surge_alert
+from log_surge_detector import build_surge_alert, resolve_services
 
 ALERT = Alert(alert_id="test-001", service="nl2sql", description="错误日志突增")
 
@@ -169,6 +170,26 @@ class TestBuildSurgeAlert(unittest.TestCase):
         description = payload[0]["annotations"]["description"]
         self.assertIn("800", description)
         self.assertIn("40", description)
+
+
+class TestResolveServices(unittest.TestCase):
+    def test_explicit_list_parsed(self) -> None:
+        self.assertEqual(resolve_services("a, b ,c"), ["a", "b", "c"])
+        self.assertEqual(resolve_services(" , ,"), [])
+
+    def test_manifest_mode_dedups_and_sorts(self) -> None:
+        apps = [
+            {"service": "nl2sql", "log_path": "x.log"},
+            {"service": "order", "log_path": "y.log"},
+            {"service": "nl2sql", "log_path": "z.log"},
+            {"log_path": "no-service.log"},  # 无 service 的条目跳过
+        ]
+        with mock.patch("bff.monitored_apps.log_targets", return_value=apps):
+            self.assertEqual(resolve_services(None), ["nl2sql", "order"])
+
+    def test_manifest_unavailable_returns_empty(self) -> None:
+        with mock.patch("bff.monitored_apps.log_targets", side_effect=RuntimeError("boom")):
+            self.assertEqual(resolve_services(None), [])
 
 
 class TestHistoricalTickets(unittest.TestCase):

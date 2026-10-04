@@ -72,11 +72,11 @@ AIOPS_POLICY_PATH=./demo-policy.yaml .venv/bin/python demo_cli.py start \
 
 ```bash
 cd aiops-agent
-bash scripts/demo-up.sh        # 探活依赖 → 启动 worker+BFF → 灌日志 → 起流程
-bash scripts/demo-up.sh down   # 停止 worker 与 BFF
+bash scripts/demo-up.sh        # 探活依赖 → 启动 6 个常驻组件 → 灌日志 → 起流程
+bash scripts/demo-up.sh down   # 停止全部常驻组件（含日志采集与突增检测）
 ```
 
-脚本会自动完成依赖探活、后台启动 worker 与 BFF、灌入演示日志、启动一个修复流程，并打印控制台地址与后续操作提示。
+脚本会自动完成依赖探活，后台常驻启动 worker / BFF / 告警接入 / 可用性巡检 / **日志采集（ship_app_logs --follow）** / **错误日志突增检测（log_surge_detector）**，再灌入演示日志、启动一个修复流程，并打印控制台地址与后续操作提示。
 
 ---
 
@@ -105,6 +105,7 @@ cd aiops-agent
 | 取消公告 | `demo_cli.py cancel --wf-id <wf_id>` |
 | 窗口排队补丁 | `demo_cli.py queue-patch --wf-id <wf_id> --new-wf-id <id> --service <svc> --alert-id <aid>` |
 | 环境自检 | `demo_cli.py doctor` |
+| 突增检测（单轮） | `log_surge_detector.py --once` |
 | 灌演示日志 | `demo_log_generator.py --service order --mode surge --count 800` |
 
 演示分支（`start --description` 带关键词）：`low-conf`（置信度不足转人工）、`protected`（受保护目录需二级审批）、`test-fail`（测试首败回炉）、`test-always-fail`（重试耗尽转人工）、`canary-bad`（金丝雀劣化自动回滚）。
@@ -146,17 +147,24 @@ cd aiops-agent
 #    兼容：单文件模式（显式指定文件与 service）
 .venv/bin/python ship_app_logs.py --file <app>/logs/app_server.log --service nl2sql --once
 
-# 2. 为目标应用建代码索引（TS/JS 与 Python 均可）
+# 2. 错误日志突增实时检测（ERROR 突增 → Alertmanager → 自动发起修复流程；冷却 300s 防抖）
+#    缺省同样按「被监控应用」清单动态取 service，每轮重读 → 热生效
+.venv/bin/python log_surge_detector.py --once           # 单轮（调试/验证）
+.venv/bin/python log_surge_detector.py                  # 守护运行（默认 15s 间隔）
+
+# 3. 为目标应用建代码索引（TS/JS 与 Python 均可）
 .venv/bin/python index_codebase.py \
     --repo "/Users/dgjin/dgjinapp/智能问数据分析系统" \
     --index data/code_index_nl2sql.json \
     --tickets data/tickets_nl2sql.json          # 不存在的工单路径 → 排除演示工单
 
-# 3. 让检索指向该索引（worker 进程生效）
+# 4. 让检索指向该索引（worker 进程生效）
 export AIOPS_CODE_INDEX=data/code_index_nl2sql.json
 ```
 
 采集器会规范化应用日志：JSON 行取 `level`、把 `requestId` 注入为 `trace_id=<id>`、正文带 `module` 前缀；非 JSON 行按正则识别级别。因此既有 `logs.query_lines()`、Drain3 聚类与突增检测**无需改动**即可工作。
+
+一键脚本已常驻拉起上述两件套：**被监控应用日志 → Loki → 突增检测 → 自动发起修复流程** 全链路无需人工干预。演示突增灵敏度为 `--min-lines 5 --factor 2`，生产建议 `--min-lines 100 --factor 3`。
 
 ### Qoder 修复引擎（可选）
 
