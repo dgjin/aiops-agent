@@ -283,5 +283,41 @@ class TestLoadAppsHotRead(unittest.TestCase):
             self.assertEqual(ship_app_logs.load_apps(), [])
 
 
+class TestFollowResilience(unittest.TestCase):
+    """采集循环容错：单轮推送故障（如 Loki 瞬态 5xx）不中断守护循环。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.log = Path(self._tmp.name) / "app_server.log"
+        self.positions = Path(self._tmp.name) / "positions.json"
+        self.log.write_text(
+            json.dumps({"level": "error", "msg": "boom", "requestId": "r1"}) + "\n",
+            encoding="utf-8",
+        )
+
+    def test_follow_survives_push_failure(self):
+        calls = []
+
+        def flaky(service, level, lines, **kw):
+            calls.append(lines)
+            if len(calls) == 1:
+                raise RuntimeError("HTTP Error 502: Bad Gateway")
+            raise KeyboardInterrupt()  # 第二轮触发终止，验证首轮失败未击穿循环
+
+        with mock.patch("ship_app_logs.logs.push_lines", side_effect=flaky):
+            with self.assertRaises(KeyboardInterrupt):
+                ship_app_logs.follow(self.log, "nl2sql", self.positions, interval=0)
+        self.assertEqual(len(calls), 2)  # 首轮失败后仍进入第二轮
+
+    def test_follow_poll_once_propagates_failure(self):
+        """poll_once（测试模式）保留异常传播，调用方可感知失败。"""
+        with mock.patch(
+            "ship_app_logs.logs.push_lines", side_effect=RuntimeError("HTTP Error 502: Bad Gateway")
+        ):
+            with self.assertRaises(RuntimeError):
+                ship_app_logs.follow(self.log, "nl2sql", self.positions, poll_once=True)
+
+
 if __name__ == "__main__":
     unittest.main()

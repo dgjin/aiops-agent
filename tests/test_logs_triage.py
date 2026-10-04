@@ -22,7 +22,7 @@ from pydantic import ValidationError
 
 from aiops_agent import logs, triage
 from aiops_agent.models import Alert
-from log_surge_detector import build_surge_alert, resolve_services
+from log_surge_detector import build_surge_alert, main as surge_main, resolve_services
 
 ALERT = Alert(alert_id="test-001", service="nl2sql", description="错误日志突增")
 
@@ -190,6 +190,27 @@ class TestResolveServices(unittest.TestCase):
     def test_manifest_unavailable_returns_empty(self) -> None:
         with mock.patch("bff.monitored_apps.log_targets", side_effect=RuntimeError("boom")):
             self.assertEqual(resolve_services(None), [])
+
+
+class TestSurgeLoopResilience(unittest.TestCase):
+    """守护循环容错：单轮检测故障（如 Loki/Alertmanager 瞬态 5xx）不退出循环。"""
+
+    def test_transient_failure_does_not_stop_loop(self) -> None:
+        side_effect = [RuntimeError("HTTP Error 502: Bad Gateway"), KeyboardInterrupt()]
+        with mock.patch("sys.argv", ["log_surge_detector.py"]):
+            with mock.patch("log_surge_detector.resolve_services", return_value=["nl2sql"]):
+                with mock.patch("log_surge_detector.check_once", side_effect=side_effect) as check:
+                    with mock.patch("log_surge_detector.time.sleep"):
+                        surge_main()  # 第二轮 KeyboardInterrupt 被主循环捕获 → 正常返回
+        self.assertEqual(check.call_count, 2)  # 首轮失败后仍进入第二轮
+
+    def test_once_mode_propagates_failure(self) -> None:
+        """--once 调试模式保留异常传播（非零退出码可被脚本感知）。"""
+        with mock.patch("sys.argv", ["log_surge_detector.py", "--once"]):
+            with mock.patch("log_surge_detector.resolve_services", return_value=["nl2sql"]):
+                with mock.patch("log_surge_detector.check_once", side_effect=RuntimeError("HTTP Error 502")):
+                    with self.assertRaises(RuntimeError):
+                        surge_main()
 
 
 class TestHistoricalTickets(unittest.TestCase):

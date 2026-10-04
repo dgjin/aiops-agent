@@ -261,18 +261,23 @@ def follow(
     while True:
         use_from_start = from_start and first
         first = False
-        if source is None:
-            apps = load_apps()
-            stats = ship_list(apps, positions_path, loki_url, from_start=use_from_start)
-            if stats["pushed"]:
-                print(f"[ship] 清单采集 {stats['apps']} 个应用 → 推送 {stats['pushed']} 行", flush=True)
-            elif poll_once:
-                print(f"[ship] 清单采集 {stats['apps']} 个应用 → 无新增日志", flush=True)
-        else:
-            used = service or DEFAULT_SERVICE
-            stats = ship_once(source, used, positions_path, loki_url, from_start=use_from_start)
-            if stats["pushed"]:
-                print(f"[ship] {used} 推送 {stats['pushed']} 行 {stats['by_level']}", flush=True)
+        try:
+            if source is None:
+                apps = load_apps()
+                stats = ship_list(apps, positions_path, loki_url, from_start=use_from_start)
+                if stats["pushed"]:
+                    print(f"[ship] 清单采集 {stats['apps']} 个应用 → 推送 {stats['pushed']} 行", flush=True)
+                elif poll_once:
+                    print(f"[ship] 清单采集 {stats['apps']} 个应用 → 无新增日志", flush=True)
+            else:
+                used = service or DEFAULT_SERVICE
+                stats = ship_once(source, used, positions_path, loki_url, from_start=use_from_start)
+                if stats["pushed"]:
+                    print(f"[ship] {used} 推送 {stats['pushed']} 行 {stats['by_level']}", flush=True)
+        except Exception as exc:  # noqa: BLE001 - 单轮推送故障（如 Loki 瞬态 5xx）不中断采集循环
+            if poll_once:
+                raise  # 测试模式保留异常传播，便于调用方感知失败
+            print(f"[ship] 本轮采集失败（{type(exc).__name__}: {exc}），{interval}s 后重试", flush=True)
         if poll_once:
             return
         time.sleep(interval)

@@ -149,19 +149,24 @@ def main() -> None:
                 args.services or "（清单动态）", args.interval, args.window, args.min_lines, args.factor)
     try:
         while True:
-            services = resolve_services(args.services)  # 每轮解析 → 清单改动热生效
-            if not services:
-                logger.info("本轮无待检测服务（清单为空或不可读），等待下一轮 ...")
-            else:
-                check_once(
-                    services,
-                    args.window,
-                    args.min_lines,
-                    args.factor,
-                    args.alertmanager,
-                    cooldown=args.cooldown,
-                    last_alert=last_alert,
-                )
+            try:
+                services = resolve_services(args.services)  # 每轮解析 → 清单改动热生效
+                if not services:
+                    logger.info("本轮无待检测服务（清单为空或不可读），等待下一轮 ...")
+                else:
+                    check_once(
+                        services,
+                        args.window,
+                        args.min_lines,
+                        args.factor,
+                        args.alertmanager,
+                        cooldown=args.cooldown,
+                        last_alert=last_alert,
+                    )
+            except Exception as exc:  # noqa: BLE001 - 单轮故障（Loki/Alertmanager 瞬态 5xx）不中断守护循环
+                if args.once:
+                    raise  # 调试模式保留异常传播，非零退出码可被脚本感知
+                logger.warning("本轮检测失败（%s: %s），%ds 后重试", type(exc).__name__, exc, args.interval)
             if args.once:
                 break
             time.sleep(args.interval)
