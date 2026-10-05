@@ -39,8 +39,10 @@ admin     3                  + 被监控应用 CRUD、令牌轮换（及后续�
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
+import re
 import secrets
 import time
 from dataclasses import dataclass
@@ -597,3 +599,597 @@ def require_role(min_role: str):
         return identity
 
     return _guard
+
+
+# ======================================================================
+# 用户与会话（用户名+密码登录；与静态令牌**并存**，校验顺序：会话 → 静态令牌）
+# ======================================================================
+#
+# 设计说明：
+# - 用户存储双后端：demo=``data/console_users.json``（600，原子写，不存在时播种 admin）；
+#   production=MySQL ``console_users`` 表（空表播种）。
+# - 会话令牌与静态令牌同走 ``Authorization: Bearer``：会话命中则身份以**用户表**为准
+#   （改角色/禁用即时生效）；未命中回落静态令牌（自动化/应急通道）。
+# - 会话仅存 sha256 指纹；滑动续期按节流写盘，避免每次轮询落盘。
+# - 密码：pbkdf2_sha256（stdlib，零新依赖），错误信息不区分"用户不存在/密码错误"。
+#
+# 配置：：
+#
+#     AIOPS_USERS_FILE=data/console_users.json              # demo 用户注册表路径
+#     AIOPS_SESSIONS_FILE=data/console_sessions.json        # demo 会话注册表路径
+#     AIOPS_SESSION_TTL_SECONDS=43200                       # 会话有效期（默认 12 小时）
+#     AIOPS_SESSION_TOUCH_SECONDS=60                        # 滑动续期写盘节流（默认 60s）
+#     AIOPS_BOOTSTRAP_ADMIN_PASSWORD=admin123               # 首启管理员密码（生产必须修改）
+
+ENV_USERS_FILE = "AIOPS_USERS_FILE"
+ENV_SESSIONS_FILE = "AIOPS_SESSIONS_FILE"
+ENV_SESSION_TTL = "AIOPS_SESSION_TTL_SECONDS"
+ENV_SESSION_TOUCH = "AIOPS_SESSION_TOUCH_SECONDS"
+ENV_BOOTSTRAP_PASSWORD = "AIOPS_BOOTSTRAP_ADMIN_PASSWORD"
+
+DEFAULT_USERS_PATH = Path(__file__).resolve().parent.parent / "data" / "console_users.json"
+DEFAULT_SESSIONS_PATH = Path(__file__).resolve().parent.parent / "data" / "console_sessions.json"
+DEFAULT_SESSION_TTL_SECONDS = 12 * 3600
+DEFAULT_SESSION_TOUCH_SECONDS = 60.0
+BOOTSTRAP_ADMIN_USER = "admin"
+DEFAULT_BOOTSTRAP_PASSWORD = "admin123"
+USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{2,32}$")
+PASSWORD_MIN_LENGTH = 8
+PBKDF2_ITERATIONS = 210_000
+
+
+class AuthError(Exception):
+    """用户/会话业务错误（路由层转 HTTP 状态码）。"""
+
+    def __init__(self, message: str, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
+
+def users_path() -> Path:
+    return Path(os.environ.get(ENV_USERS_FILE) or DEFAULT_USERS_PATH)
+
+
+def sessions_path() -> Path:
+    return Path(os.environ.get(ENV_SESSIONS_FILE) or DEFAULT_SESSIONS_PATH)
+
+
+def session_ttl() -> int:
+    """会话有效期（秒）；0/未配置回退默认。"""
+    return _int_env(ENV_SESSION_TTL, DEFAULT_SESSION_TTL_SECONDS) or DEFAULT_SESSION_TTL_SECONDS
+
+
+def session_touch_seconds() -> float:
+    """滑动续期写盘节流（秒）。"""
+    raw = os.environ.get(ENV_SESSION_TOUCH)
+    if not raw or not str(raw).strip():
+        return DEFAULT_SESSION_TOUCH_SECONDS
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return DEFAULT_SESSION_TOUCH_SECONDS
+
+
+# ----------------------------------------------------------------------
+# 密码哈希（pbkdf2_sha256）与输入校验
+# ----------------------------------------------------------------------
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), bytes.fromhex(salt), PBKDF2_ITERATIONS
+    )
+    return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt}${digest.hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    """校验密码；存储格式非法一律 False（绝不抛异常）。"""
+    try:
+        algo, iterations, salt, expected = (stored or "").split("$")
+        if algo != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256", password.encode("utf-8"), bytes.fromhex(salt), int(iterations)
+        )
+    except (ValueError, TypeError):
+        return False
+    return hmac.compare_digest(digest.hex(), expected)
+
+
+def validate_username(username: str) -> str:
+    value = (username or "").strip()
+    if not USERNAME_PATTERN.match(value):
+        raise AuthError("用户名须为 2-32 位字母/数字/._- 组合", 400)
+    return value
+
+
+def validate_password(password: str) -> str:
+    value = password or ""
+    if len(value) < PASSWORD_MIN_LENGTH:
+        raise AuthError(f"密码长度不能少于 {PASSWORD_MIN_LENGTH} 位", 400)
+    return value
+
+
+_DUMMY_HASH: str | None = None
+
+
+def _dummy_hash() -> str:
+    """时序均衡：用户不存在时也执行一次等价哈希，避免用户名枚举。"""
+    global _DUMMY_HASH
+    if _DUMMY_HASH is None:
+        _DUMMY_HASH = hash_password("timing-equalizer-not-a-real-password")
+    return _DUMMY_HASH
+
+
+def _bearer_token(authorization: str | None) -> str:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return ""
+    return authorization.split(" ", 1)[1].strip()
+
+
+# ----------------------------------------------------------------------
+# 用户注册表（双后端）
+# ----------------------------------------------------------------------
+
+
+def _seed_admin_records(moment: datetime) -> list[dict]:
+    """首启播种管理员（密码取 AIOPS_BOOTSTRAP_ADMIN_PASSWORD，默认 admin123）。"""
+    password = os.environ.get(ENV_BOOTSTRAP_PASSWORD) or DEFAULT_BOOTSTRAP_PASSWORD
+    now_iso = _iso(moment)
+    return [
+        {
+            "username": BOOTSTRAP_ADMIN_USER,
+            "password_hash": hash_password(password),
+            "role": "admin",
+            "state": "active",
+            "created_at": now_iso,
+            "updated_at": now_iso,
+        }
+    ]
+
+
+def _user_from_row(row) -> dict:
+    """DB 行 → 文件版同构的用户记录。"""
+    return {
+        "username": row["username"],
+        "password_hash": row["password_hash"],
+        "role": row["role"],
+        "state": row["state"],
+        "created_at": _iso_from_db(row["created_at"]),
+        "updated_at": _iso_from_db(row["updated_at"]),
+    }
+
+
+def _replace_users_db(conn, records: list[dict]) -> None:
+    conn.execute(db_layer.console_users.delete())
+    if not records:
+        return
+    now = db_layer.now_dt()
+    conn.execute(
+        db_layer.console_users.insert(),
+        [
+            {
+                "username": record["username"],
+                "password_hash": record["password_hash"],
+                "role": record["role"],
+                "state": record.get("state") or "active",
+                "created_at": db_layer.to_dt(record.get("created_at")) or now,
+                "updated_at": db_layer.to_dt(record.get("updated_at")) or now,
+            }
+            for record in records
+        ],
+    )
+
+
+def _read_users_db(moment: datetime) -> dict[str, dict]:
+    """DB 用户读取；空表时播种管理员。"""
+    try:
+        engine = db_layer.get_engine()
+        with engine.begin() as conn:
+            rows = conn.execute(select(db_layer.console_users)).mappings().all()
+            if not rows:
+                seeded = _seed_admin_records(moment)
+                _replace_users_db(conn, seeded)
+                return {record["username"]: record for record in seeded}
+    except Exception as exc:  # noqa: BLE001 - 不可用一律 fail-closed
+        raise AuthConfigError(f"用户注册表（数据库）不可用：{exc}") from exc
+    return {row["username"]: _user_from_row(row) for row in rows}
+
+
+def _read_users(moment: datetime | None = None) -> dict[str, dict]:
+    """用户注册表：demo 读文件（不存在则播种 admin）；production 读 DB（空表播种）。"""
+    if mode.is_production():
+        return _read_users_db(moment or _now())
+    path = users_path()
+    if not path.is_file():
+        records = _seed_admin_records(moment or _now())
+        _write_users({record["username"]: record for record in records})
+        return {record["username"]: record for record in records}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AuthConfigError(f"用户注册表不可读或非法（{path}）：{exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("users"), list):
+        raise AuthConfigError(f"用户注册表结构非法：{path}")
+    return {
+        str(record["username"]): record
+        for record in data["users"]
+        if isinstance(record, dict) and record.get("username")
+    }
+
+
+def _write_users(users: dict[str, dict]) -> None:
+    """demo：原子写 + 0600（含密码哈希）；production 转发 DB。"""
+    if mode.is_production():
+        engine = db_layer.get_engine()
+        with engine.begin() as conn:
+            _replace_users_db(conn, list(users.values()))
+        return
+    path = users_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"version": 1, "users": list(users.values())}
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    tmp.replace(path)
+
+
+# ----------------------------------------------------------------------
+# 会话注册表（双后端；仅存 sha256 指纹）
+# ----------------------------------------------------------------------
+
+
+def _session_from_row(row) -> dict:
+    return {
+        "token_hash": row["token_hash"],
+        "user": row["user_name"],
+        "role": row["role"],
+        "created_at": _iso_from_db(row["created_at"]),
+        "expires_at": _iso_from_db(row["expires_at"]),
+        "last_seen_at": _iso_from_db(row["last_seen_at"]),
+        "revoked": bool(row["revoked"]),
+        "revoked_at": _iso_from_db(row["revoked_at"]),
+    }
+
+
+def _replace_sessions_db(conn, sessions: list[dict]) -> None:
+    conn.execute(db_layer.console_sessions.delete())
+    if not sessions:
+        return
+    now = db_layer.now_dt()
+    conn.execute(
+        db_layer.console_sessions.insert(),
+        [
+            {
+                "token_hash": session["token_hash"],
+                "user_name": session["user"],
+                "role": session["role"],
+                "created_at": db_layer.to_dt(session.get("created_at")) or now,
+                "expires_at": db_layer.to_dt(session.get("expires_at")) or now,
+                "last_seen_at": db_layer.to_dt(session.get("last_seen_at")),
+                "revoked": bool(session.get("revoked")),
+                "revoked_at": db_layer.to_dt(session.get("revoked_at")),
+            }
+            for session in sessions
+        ],
+    )
+
+
+def _read_sessions_db() -> list[dict]:
+    try:
+        engine = db_layer.get_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(select(db_layer.console_sessions)).mappings().all()
+    except Exception as exc:  # noqa: BLE001
+        raise AuthConfigError(f"会话注册表（数据库）不可用：{exc}") from exc
+    return [_session_from_row(row) for row in rows]
+
+
+def _read_sessions() -> list[dict]:
+    """会话注册表：demo 读文件（不存在=空，不播种）；production 读 DB。"""
+    if mode.is_production():
+        return _read_sessions_db()
+    path = sessions_path()
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AuthConfigError(f"会话注册表不可读或非法（{path}）：{exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("sessions"), list):
+        raise AuthConfigError(f"会话注册表结构非法：{path}")
+    return [session for session in data["sessions"] if isinstance(session, dict)]
+
+
+def _write_sessions(sessions: list[dict]) -> None:
+    if mode.is_production():
+        engine = db_layer.get_engine()
+        with engine.begin() as conn:
+            _replace_sessions_db(conn, sessions)
+        return
+    path = sessions_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(
+        json.dumps({"version": 1, "sessions": sessions}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.chmod(tmp, 0o600)
+    tmp.replace(path)
+
+
+def _prune_sessions(sessions: list[dict], moment: datetime) -> list[dict]:
+    """剔除已过期会话（被吊销但未过期的保留，供界面查看后自然过期）。"""
+    kept: list[dict] = []
+    for session in sessions:
+        expires = _parse(session.get("expires_at"))
+        if expires is None or expires > moment:
+            kept.append(session)
+    return kept
+
+
+# ----------------------------------------------------------------------
+# 登录 / 登出 / 会话校验
+# ----------------------------------------------------------------------
+
+
+def create_session(username: str, role: str, *, now: datetime | None = None) -> dict:
+    """签发会话令牌（明文仅返回一次；注册表只存 sha256 指纹）。"""
+    moment = now or _now()
+    token = secrets.token_urlsafe(32)
+    ttl = session_ttl()
+    record = {
+        "token_hash": _token_key(token),
+        "user": username,
+        "role": role,
+        "created_at": _iso(moment),
+        "expires_at": _iso(moment + timedelta(seconds=ttl)),
+        "last_seen_at": _iso(moment),
+        "revoked": False,
+    }
+    sessions = _prune_sessions(_read_sessions(), moment)
+    sessions.append(record)
+    _write_sessions(sessions)
+    return {
+        "token": token,
+        "user": username,
+        "role": role,
+        "expires_at": record["expires_at"],
+        "ttl_seconds": ttl,
+    }
+
+
+def login(username: str, password: str, *, now: datetime | None = None) -> dict:
+    """用户名+密码校验并签发会话；失败抛 AuthError（401/403）。"""
+    moment = now or _now()
+    users = _read_users(moment)
+    record = users.get(username)
+    if record is None:
+        verify_password(password, _dummy_hash())  # 时序均衡，防用户名枚举
+        raise AuthError("用户名或密码错误", 401)
+    if record.get("state") != "active":
+        raise AuthError("账户已被禁用，请联系管理员", 403)
+    if not verify_password(password, record.get("password_hash", "")):
+        raise AuthError("用户名或密码错误", 401)
+    return create_session(str(record["username"]), str(record["role"]), now=moment)
+
+
+def resolve_session(
+    authorization: str | None, *, now: datetime | None = None
+) -> tuple[Identity, dict] | None:
+    """解析会话令牌：命中且有效返回 ``(Identity, 记录)``；未命中/过期/吊销返回 None。
+
+    - 角色以**用户表**为准：管理员改角色/禁用后立即生效，无需等会话过期；
+    - 滑动续期：last_seen 更新与 expires 顺延按 ``AIOPS_SESSION_TOUCH_SECONDS``
+      节流写盘，避免每次轮询都落盘。
+    """
+    token = _bearer_token(authorization)
+    if not token:
+        return None
+    moment = now or _now()
+    fingerprint = _token_key(token)
+    sessions = _read_sessions()
+    hit = next((item for item in sessions if item.get("token_hash") == fingerprint), None)
+    if hit is None or hit.get("revoked"):
+        return None
+    expires = _parse(hit.get("expires_at"))
+    if expires is None or moment >= expires:
+        return None
+    users = _read_users(moment)
+    user = users.get(str(hit.get("user")))
+    if user is None or user.get("state") != "active":
+        return None  # 用户被删除/禁用：会话即时失效
+    last_seen = _parse(hit.get("last_seen_at"))
+    if last_seen is None or (moment - last_seen).total_seconds() >= session_touch_seconds():
+        hit["last_seen_at"] = _iso(moment)
+        hit["expires_at"] = _iso(moment + timedelta(seconds=session_ttl()))
+        _write_sessions(sessions)
+    return Identity(user=str(user["username"]), role=str(user["role"])), {
+        **hit,
+        "state": "active",
+        "source": "session",
+    }
+
+
+def revoke_session(authorization: str | None, *, now: datetime | None = None) -> bool:
+    """吊销 Bearer 对应的会话；返回是否命中会话（静态令牌返回 False）。"""
+    token = _bearer_token(authorization)
+    if not token:
+        return False
+    moment = now or _now()
+    fingerprint = _token_key(token)
+    sessions = _read_sessions()
+    changed = False
+    for session in sessions:
+        if session.get("token_hash") == fingerprint and not session.get("revoked"):
+            session["revoked"] = True
+            session["revoked_at"] = _iso(moment)
+            changed = True
+    if changed:
+        _write_sessions(sessions)
+    return changed
+
+
+def revoke_user_sessions(username: str, *, now: datetime | None = None) -> int:
+    """吊销某用户全部有效会话（强制下线）；返回吊销数量。"""
+    moment = now or _now()
+    sessions = _read_sessions()
+    count = 0
+    for session in sessions:
+        if session.get("user") != username or session.get("revoked"):
+            continue
+        expires = _parse(session.get("expires_at"))
+        if expires is None or expires > moment:
+            session["revoked"] = True
+            session["revoked_at"] = _iso(moment)
+            count += 1
+    if count:
+        _write_sessions(sessions)
+    return count
+
+
+def list_sessions(username: str | None = None, *, now: datetime | None = None) -> list[dict]:
+    """在线会话清单（脱敏：仅指纹前 8 位）；可按用户过滤。"""
+    moment = now or _now()
+    sessions = _prune_sessions(_read_sessions(), moment)
+    out: list[dict] = []
+    for session in sessions:
+        if username and session.get("user") != username:
+            continue
+        if session.get("revoked"):
+            continue
+        out.append(
+            {
+                "id": str(session.get("token_hash"))[:8],
+                "user": session.get("user"),
+                "role": session.get("role"),
+                "created_at": session.get("created_at"),
+                "expires_at": session.get("expires_at"),
+                "last_seen_at": session.get("last_seen_at"),
+            }
+        )
+    out.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return out
+
+
+# ----------------------------------------------------------------------
+# 用户管理（管理员操作；规则：不能移除最后一个启用管理员）
+# ----------------------------------------------------------------------
+
+
+def _public_user(record: dict) -> dict:
+    """对外视图：绝不包含 password_hash。"""
+    return {
+        "username": record.get("username"),
+        "role": record.get("role"),
+        "state": record.get("state"),
+        "created_at": record.get("created_at"),
+        "updated_at": record.get("updated_at"),
+    }
+
+
+def _assert_admin_survives(users: dict[str, dict]) -> None:
+    if not any(
+        user.get("role") == "admin" and user.get("state") == "active"
+        for user in users.values()
+    ):
+        raise AuthError("操作被拒绝：系统至少需要保留一个启用状态的管理员", 409)
+
+
+def list_users() -> list[dict]:
+    users = _read_users()
+    return [
+        _public_user(record)
+        for record in sorted(users.values(), key=lambda item: str(item.get("username")))
+    ]
+
+
+def create_user(
+    username: str, password: str, role: str, *, now: datetime | None = None
+) -> dict:
+    moment = now or _now()
+    clean_user = validate_username(username)
+    validate_password(password)
+    if role not in ROLE_ORDER:
+        raise AuthError(f"角色非法：{role!r}（可选 {'/'.join(ROLE_ORDER)}）", 400)
+    users = _read_users(moment)
+    if clean_user in users:
+        raise AuthError(f"用户已存在：{clean_user}", 409)
+    record = {
+        "username": clean_user,
+        "password_hash": hash_password(password),
+        "role": role,
+        "state": "active",
+        "created_at": _iso(moment),
+        "updated_at": _iso(moment),
+    }
+    users[clean_user] = record
+    _write_users(users)
+    return _public_user(record)
+
+
+def update_user(
+    username: str,
+    *,
+    role: str | None = None,
+    state: str | None = None,
+    now: datetime | None = None,
+) -> dict:
+    moment = now or _now()
+    users = _read_users(moment)
+    record = users.get(username)
+    if record is None:
+        raise AuthError(f"用户不存在：{username}", 404)
+    if role is not None:
+        if role not in ROLE_ORDER:
+            raise AuthError(f"角色非法：{role!r}（可选 {'/'.join(ROLE_ORDER)}）", 400)
+        record["role"] = role
+    if state is not None:
+        if state not in ("active", "disabled"):
+            raise AuthError(f"状态非法：{state!r}（可选 active/disabled）", 400)
+        record["state"] = state
+    record["updated_at"] = _iso(moment)
+    _assert_admin_survives(users)
+    _write_users(users)
+    return _public_user(record)
+
+
+def delete_user(username: str, *, now: datetime | None = None) -> None:
+    users = _read_users(now or _now())
+    if username not in users:
+        raise AuthError(f"用户不存在：{username}", 404)
+    del users[username]
+    _assert_admin_survives(users)
+    _write_users(users)
+
+
+def set_password(username: str, password: str, *, now: datetime | None = None) -> None:
+    """管理员重置密码（无需原密码）。"""
+    moment = now or _now()
+    validate_password(password)
+    users = _read_users(moment)
+    record = users.get(username)
+    if record is None:
+        raise AuthError(f"用户不存在：{username}", 404)
+    record["password_hash"] = hash_password(password)
+    record["updated_at"] = _iso(moment)
+    _write_users(users)
+
+
+def change_own_password(
+    username: str, old_password: str, new_password: str, *, now: datetime | None = None
+) -> None:
+    """本人修改密码（必须提供原密码）。"""
+    moment = now or _now()
+    users = _read_users(moment)
+    record = users.get(username)
+    if record is None:
+        raise AuthError(f"用户不存在：{username}", 404)
+    if not verify_password(old_password, record.get("password_hash", "")):
+        raise AuthError("原密码不正确", 401)
+    validate_password(new_password)
+    record["password_hash"] = hash_password(new_password)
+    record["updated_at"] = _iso(moment)
+    _write_users(users)

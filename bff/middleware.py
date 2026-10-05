@@ -1,4 +1,4 @@
-"""BFF 中间件：缓存策略 / 集中式鉴权（限速 + kill switch）/ 安全头 / 指标采集。
+"""BFF 中间件：缓存策略 / 集中式鉴权（会话+静态令牌 / 限速 / kill switch）/ 安全头 / 指标。
 
 ``register_middlewares`` 的注册顺序即洋葱顺序（Starlette：后注册者更外层）：
     metrics → security → auth → cache → 路由
@@ -23,15 +23,26 @@ from .deps import ok
 _WRITE_ROLE_RULES: list[tuple[str, str]] = [
     ("/api/monitored-apps", "admin"),   # 配置维护
     ("/api/flows/", "operator"),        # 审批 / 发布指令 / 排队补丁
+    ("/api/users", "admin"),            # 用户管理（CRUD / 重置密码 / 强制下线）
+    ("/api/auth/logout", "viewer"),     # 登出：任何已认证角色
+    ("/api/auth/password", "viewer"),   # 本人改密：任何已认证角色（需原密码）
 ]
 
-# 读接口里需要更高角色的少数路径（令牌清单属敏感信息）
+# 读接口里需要更高角色的少数路径（令牌清单 / 用户清单属敏感信息）
 _READ_ROLE_OVERRIDES: list[tuple[str, str]] = [
     ("/api/auth/tokens", "admin"),
+    ("/api/users", "admin"),
 ]
 
-# kill switch 激活时仍可调用的写端点（否则激活后无法关闭；角色校验仍生效）
-_KILL_SWITCH_EXEMPT = {"/api/system/kill-switch"}
+# 认证前的唯一合法入口（登录换取会话令牌；失败限速在路由内，防口令爆破）
+_PUBLIC_ENDPOINTS = {"/api/auth/login"}
+
+# kill switch 激活时仍可调用的写端点（否则激活后无法关闭/登出；角色校验仍生效）
+_KILL_SWITCH_EXEMPT = {
+    "/api/system/kill-switch",
+    "/api/auth/logout",
+    "/api/auth/password",
+}
 
 
 def _client_ip(request: Request) -> str:
@@ -78,34 +89,65 @@ async def _cache_policy(request: Request, call_next):
 
 
 async def _auth_guard(request: Request, call_next):
-    """集中式鉴权：/api 全部需 Bearer 凭证；未配置注册表时 fail-closed（503）。"""
+    """集中式鉴权：/api 全部需 Bearer 凭证（登录端点除外）。
+
+    校验链（**会话优先，静态回落**）：
+        1. 会话令牌（用户名密码登录签发；身份以用户表为准，可即时吊销/禁用）；
+        2. 未命中回落静态令牌（自动化/应急通道；注册表缺失不阻断会话通道）。
+    双通道均不可用（注册表/用户表损坏）时 fail-closed：503。
+    """
     path = request.url.path
     if not path.startswith("/api"):
         return await call_next(request)  # 静态资源与 SPA fallback 不鉴权
+    if path in _PUBLIC_ENDPOINTS:
+        return await call_next(request)  # 登录：认证前唯一合法入口
 
+    # 静态令牌通道可用性（不可用不立即 503：会话通道可能仍工作，反之亦然）
     try:
-        tokens = auth_store.registry_tokens()
+        tokens: dict | None = auth_store.registry_tokens()
+        registry_error: str | None = None
     except auth_store.AuthConfigError as exc:
-        return JSONResponse(status_code=503, content=ok({"error": str(exc)}))
+        tokens, registry_error = None, str(exc)
 
+    # 通道 1：会话令牌
     try:
-        identity, token_record = auth_store.resolve_token(
-            request.headers.get("authorization"), tokens=tokens
-        )
-    except HTTPException as exc:  # noqa: PERF203 - 统一转 JSON 信封
-        # 速率限制：带凭证但认证失败 → 按 IP 计数（防令牌暴力破解）；
-        # 无凭证的 401 不计数（前端首次打开页面的正常引导路径）
-        if exc.status_code == 401 and request.headers.get("authorization") and ratelimit.enabled():
-            allowed, retry_after = ratelimit.hit(
-                f"authfail:{_client_ip(request)}", ratelimit.auth_fail_limit()
+        resolved = auth_store.resolve_session(request.headers.get("authorization"))
+        session_error: str | None = None
+    except auth_store.AuthConfigError as exc:
+        resolved, session_error = None, str(exc)
+
+    if resolved is not None:
+        identity, token_record = resolved
+    else:
+        if tokens is None and session_error is not None:
+            # 双通道均不可用：fail-closed（宁可拦住，也不在不可判定时放行）
+            return JSONResponse(
+                status_code=503, content=ok({"error": session_error or registry_error})
             )
-            if not allowed:
-                return _rate_limited(retry_after)
-        return JSONResponse(
-            status_code=exc.status_code,
-            content=ok({"error": exc.detail}),
-            headers=exc.headers or None,
-        )
+        # 通道 2：静态令牌（注册表不可用时按空表校验 → 统一 401）
+        try:
+            identity, token_record = auth_store.resolve_token(
+                request.headers.get("authorization"), tokens=tokens or {}
+            )
+        except HTTPException as exc:  # noqa: PERF203 - 统一转 JSON 信封
+            # 速率限制：带凭证但认证失败 → 按 IP 计数（防令牌/口令暴力破解）；
+            # 无凭证的 401 不计数（前端首次打开页面的正常引导路径）
+            if (
+                exc.status_code == 401
+                and request.headers.get("authorization")
+                and ratelimit.enabled()
+            ):
+                allowed, retry_after = ratelimit.hit(
+                    f"authfail:{_client_ip(request)}", ratelimit.auth_fail_limit()
+                )
+                if not allowed:
+                    return _rate_limited(retry_after)
+            return JSONResponse(
+                status_code=exc.status_code,
+                content=ok({"error": exc.detail}),
+                headers=exc.headers or None,
+            )
+        token_record = {**(token_record or {}), "source": "static"}
 
     # 速率限制：已认证请求按 token 指纹（读 / 写两套配额；写更严）
     if ratelimit.enabled():

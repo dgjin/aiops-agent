@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from . import approvals, audit, flows, health, monitored_apps, system, tokens
+from . import approvals, audit, flows, health, monitored_apps, system, tokens, users
 
 
 def include_routers(app: FastAPI) -> None:
-    for module in (health, flows, approvals, audit, tokens, system, monitored_apps):
+    for module in (health, flows, approvals, audit, tokens, system, monitored_apps, users):
         app.include_router(module.router)

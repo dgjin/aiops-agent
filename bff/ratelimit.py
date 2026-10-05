@@ -138,6 +138,38 @@ def hit(key: str, limit: int, window: float = WINDOW_SECONDS) -> tuple[bool, flo
     return _hit_memory(key, limit, window)
 
 
+def peek(key: str, limit: int, window: float = WINDOW_SECONDS) -> tuple[bool, float]:
+    """只读检查是否已达上限（**不计数**）。
+
+    用于登录等"先检查再执行昂贵操作"的场景：验证前 peek，失败后才 hit，
+    成功尝试不计入失败配额。返回与 ``hit`` 相同语形。
+    """
+    conn = _redis()
+    if conn is not None:
+        now = time.time()
+        try:
+            pipe = conn.pipeline()
+            pipe.zremrangebyscore(f"aiops:rl:{key}", 0, now - window)
+            pipe.zcard(f"aiops:rl:{key}")
+            _, count = pipe.execute()
+            if count is not None and int(count) >= limit:
+                return False, window
+            return True, 0.0
+        except Exception:  # noqa: BLE001 - Redis 抖动降级内存
+            pass
+    now = time.monotonic()
+    with _lock:
+        dq = _windows.get(key)
+        if not dq:
+            return True, 0.0
+        cutoff = now - window
+        while dq and dq[0] <= cutoff:
+            dq.popleft()
+        if len(dq) >= limit:
+            return False, max(0.5, dq[0] + window - now)
+        return True, 0.0
+
+
 def reset() -> None:
     """清空内存窗口（仅测试用）。"""
     with _lock:

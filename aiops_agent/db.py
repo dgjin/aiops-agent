@@ -18,6 +18,8 @@
 =============== ============================================================
 system_kv       系统键值（kill switch / 令牌注册表元数据）
 console_tokens  令牌注册表（production 替代 ``data/console_tokens.json``）
+console_users   控制台用户（密码登录；production 替代 ``data/console_users.json``）
+console_sessions 登录会话（仅存 sha256 指纹；production 替代 ``data/console_sessions.json``）
 monitored_apps  被监控应用清单（production 替代 ``data/monitored_apps.json``）
 audit_events    控制台操作审计（production 替代 JSONL，支持跨实例聚合查询）
 workflow_runs   流程执行速查（BFF 汇总时 upsert，供报表与历史检索）
@@ -143,6 +145,38 @@ workflow_runs = Table(
     Column("updated_at", DateTime, nullable=False),
     Index("idx_runs_stage", "stage"),
     Index("idx_runs_started", "start_time"),
+)
+
+console_users = Table(
+    "console_users",
+    metadata,
+    Column("username", String(64), primary_key=True),
+    Column("password_hash", String(256), nullable=False),
+    Column("role", Enum("viewer", "operator", "admin", name="user_role"), nullable=False),
+    Column(
+        "state",
+        Enum("active", "disabled", name="user_state"),
+        nullable=False,
+        server_default="active",
+    ),
+    Column("created_at", DateTime, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+)
+
+console_sessions = Table(
+    "console_sessions",
+    metadata,
+    Column("id", _BIGINT, primary_key=True, autoincrement=True),
+    Column("token_hash", String(64), nullable=False, unique=True),
+    Column("user_name", String(64), nullable=False),
+    Column("role", Enum("viewer", "operator", "admin", name="session_role"), nullable=False),
+    Column("created_at", DateTime, nullable=False),
+    Column("expires_at", DateTime, nullable=False),
+    Column("last_seen_at", DateTime),
+    Column("revoked", Boolean, nullable=False, server_default=text("0")),
+    Column("revoked_at", DateTime),
+    Index("idx_sessions_user", "user_name"),
+    Index("idx_sessions_expires", "expires_at"),
 )
 
 _engine: Engine | None = None

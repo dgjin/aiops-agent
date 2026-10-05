@@ -27,6 +27,7 @@ async def api_auth_status(request: Request) -> dict:
     except auth_store.AuthConfigError as exc:
         raise ApiError(503, str(exc)) from exc
     record = getattr(request.state, "token_record", None) or {}
+    identity = getattr(request.state, "identity", None)
     status.pop("tokens", None)
     status["self_token"] = {
         "user": record.get("user"),
@@ -34,6 +35,14 @@ async def api_auth_status(request: Request) -> dict:
         "state": record.get("state"),
         "expires_at": record.get("expires_at"),
         "retired_at": record.get("retired_at"),
+    }
+    # self：调用方身份统一视图（会话/静态令牌共用；前端顶栏用户菜单据此渲染）
+    status["self"] = {
+        "user": getattr(identity, "user", None) or record.get("user"),
+        "role": getattr(identity, "role", None) or record.get("role"),
+        "source": record.get("source") or "static",
+        "state": record.get("state"),
+        "expires_at": record.get("expires_at"),
     }
     return ok(status)
 
