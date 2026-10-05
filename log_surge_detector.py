@@ -29,6 +29,7 @@ import logging
 import time
 import urllib.request
 
+from aiops_agent import config as _config  # noqa: F401 - 触发工程根 .env 加载（与其他入口一致）
 from aiops_agent import logs
 
 logger = logging.getLogger("aiops.surge")

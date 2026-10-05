@@ -35,6 +35,7 @@ import re
 import time
 from pathlib import Path
 
+from aiops_agent import config as _config  # noqa: F401 - 触发工程根 .env 加载（与其他入口一致）
 from aiops_agent import logs
 
 BASE_DIR = Path(__file__).resolve().parent
