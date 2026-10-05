@@ -35,6 +35,18 @@ const STAGE_HINT: Record<string, string> = {
 
 const TERMINAL_NEGATIVE = new Set(['ESCALATED', 'CANCELLED'])
 
+/** 节点态 → 色调 + 浅色底透明度：亮色实心块会吞掉文字（对比度不足），
+ *  底色走低透明度、状态区分靠色调描边，文字保持高对比的 fill-ink。 */
+const NODE_STYLE: Record<
+  'done' | 'active' | 'pending' | 'aborted',
+  { tone: string; fillOpacity: number; strokeOpacity: number }
+> = {
+  active: { tone: 'text-accent', fillOpacity: 0.18, strokeOpacity: 0.9 },
+  done: { tone: 'text-ok', fillOpacity: 0.1, strokeOpacity: 0.7 },
+  aborted: { tone: 'text-idle', fillOpacity: 0.08, strokeOpacity: 0.55 },
+  pending: { tone: 'text-muted', fillOpacity: 0.05, strokeOpacity: 0.45 },
+}
+
 export function FlowStateMachine({
   stage,
   onSelectStage,
@@ -65,15 +77,6 @@ export function FlowStateMachine({
   const Y = 62
   const WIDTH = X0 * 2 + PITCH * (MAIN_STAGES.length - 1) + NODE_W
   const HEIGHT = 214
-
-  const fill = (state: string) =>
-    state === 'active'
-      ? 'bg-accent/15 text-accent'
-      : state === 'done'
-        ? 'bg-ok/10 text-ok'
-        : state === 'aborted'
-          ? 'bg-elevated text-idle'
-          : 'bg-panel text-muted'
 
   return (
     <div className={className}>
@@ -129,10 +132,11 @@ export function FlowStateMachine({
             const x = X0 + index * PITCH
             const state = stateOf(index, item.key)
             const isHover = hover === item.key
+            const nodeStyle = NODE_STYLE[state]
             return (
               <g
                 key={item.key}
-                className={`cursor-pointer ${fill(state)}`}
+                className={`cursor-pointer ${nodeStyle.tone}`}
                 onMouseEnter={() => setHover(item.key)}
                 onMouseLeave={() => setHover(null)}
                 onClick={() => onSelectStage?.(item.key)}
@@ -144,15 +148,16 @@ export function FlowStateMachine({
                   height={NODE_H}
                   rx={8}
                   fill="currentColor"
-                  className="opacity-90"
-                  stroke="var(--color-line)"
-                  strokeWidth={isHover ? 2 : 1}
+                  fillOpacity={nodeStyle.fillOpacity}
+                  stroke="currentColor"
+                  strokeOpacity={isHover ? 1 : nodeStyle.strokeOpacity}
+                  strokeWidth={isHover || state === 'active' ? 2 : 1}
                 />
                 <text
                   x={x + NODE_W / 2}
                   y={Y - 2}
                   textAnchor="middle"
-                  className="fill-ink text-[11px]"
+                  className="fill-ink text-[11px] font-medium"
                   style={{ pointerEvents: 'none' }}
                 >
                   {item.label}
@@ -161,7 +166,7 @@ export function FlowStateMachine({
                   x={x + NODE_W / 2}
                   y={Y + 11}
                   textAnchor="middle"
-                  className="fill-muted text-[8px]"
+                  className="fill-muted text-[9px]"
                   style={{ pointerEvents: 'none' }}
                 >
                   {item.key}
