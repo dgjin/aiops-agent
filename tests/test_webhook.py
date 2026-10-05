@@ -20,14 +20,18 @@ def _item(
     labels: dict | None = None,
     annotations: dict | None = None,
     fingerprint: str = "ffffffffffffffff",
+    starts_at: str | None = None,
 ) -> dict:
-    """构造 Alertmanager v4 单条 alert。"""
-    return {
+    """构造 Alertmanager v4 单条 alert（starts_at 缺省不写字段，覆盖旧载荷容错）。"""
+    item = {
         "status": status,
         "labels": labels or {},
         "annotations": annotations or {},
         "fingerprint": fingerprint,
     }
+    if starts_at is not None:
+        item["startsAt"] = starts_at
+    return item
 
 
 def _payload(*items: dict) -> dict:
@@ -73,6 +77,41 @@ class TestParseAlertmanagerPayload(unittest.TestCase):
         )
         (alert,), _ = parse_alertmanager_payload(payload)
         self.assertEqual(alert.alert_id, "0123456789ab")
+
+    def test_fingerprint_with_starts_at_forms_cycle_key(self) -> None:
+        """无 alert_id 标签时幂等键 = fingerprint 前 12 位 + startsAt 秒级时间戳。"""
+        payload = _payload(
+            _item(
+                labels={"alertname": "Nl2sqlAppDown", "service": "nl2sql"},
+                fingerprint="0123456789abcdef",
+                starts_at="2026-10-04T05:30:00Z",
+            )
+        )
+        (alert,), _ = parse_alertmanager_payload(payload)
+        self.assertEqual(alert.alert_id, "0123456789ab-1791091800")
+
+    def test_invalid_starts_at_falls_back_to_fingerprint(self) -> None:
+        payload = _payload(
+            _item(
+                labels={"alertname": "A"},
+                fingerprint="0123456789abcdef",
+                starts_at="not-a-date",
+            )
+        )
+        (alert,), _ = parse_alertmanager_payload(payload)
+        self.assertEqual(alert.alert_id, "0123456789ab")
+
+    def test_same_starts_at_idempotent_new_cycle_new_id(self) -> None:
+        """同一故障周期的重复投递保持幂等；跨周期（startsAt 刷新）产出新幂等键。"""
+        labels = {"alertname": "Nl2sqlAppDown", "service": "nl2sql"}
+        payload = _payload(
+            _item(labels=labels, fingerprint="0123456789abcdef", starts_at="2026-10-04T05:30:00Z"),
+            _item(labels=labels, fingerprint="0123456789abcdef", starts_at="2026-10-04T05:30:00Z"),
+            _item(labels=labels, fingerprint="0123456789abcdef", starts_at="2026-10-04T08:00:00Z"),
+        )
+        alerts, _ = parse_alertmanager_payload(payload)
+        self.assertEqual(alerts[0].alert_id, alerts[1].alert_id)
+        self.assertNotEqual(alerts[0].alert_id, alerts[2].alert_id)
 
     def test_defaults_service_job_severity_summary(self) -> None:
         payload = _payload(

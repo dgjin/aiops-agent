@@ -8,8 +8,9 @@ Alertmanager 侧接入点（本机 nl2sql-monitoring 栈 deploy/alertmanager.yml
 
 设计要点（对齐实施计划 WP1）：
     - 标准化：仅处理 firing 告警 → Alert{alert_id, service, severity, description}；resolved 直接忽略；
-    - alert_id：优先取 labels.alert_id（便于把业务告警 ID 透传），否则取 fingerprint 前 12 位
-      （labelset 稳定哈希，同一告警重复投递时保证幂等键不变）；
+    - alert_id：优先取 labels.alert_id（便于把业务告警 ID 透传），否则取「fingerprint 前 12 位
+      + startsAt 秒级时间戳」——同一告警的重复投递/周期重发保持幂等，跨故障周期
+      （resolved 后再次 firing）startsAt 刷新，避免 REJECT_DUPLICATE 永久拒绝新流程；
     - 幂等：workflow id = aiops-fix-{service}-{alert_id}，REJECT_DUPLICATE + FAIL，
       重复投递仅返回 duplicates，不产生第二个流程实例；
     - kill switch：启动前检查，激活时返回 503 拒绝新流程；状态不可读时 fail-closed；
@@ -24,6 +25,7 @@ import asyncio
 import json
 import logging
 import os
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from temporalio.client import Client
@@ -44,6 +46,22 @@ logger = logging.getLogger("aiops.webhook")
 _POLICY_SNAPSHOT: dict = {}
 
 
+def _starts_at_suffix(item: dict) -> str:
+    """提取 startsAt 的秒级时间戳后缀（缺失/解析失败返回空串，保持旧行为）。
+
+    fingerprint 对同一 labelset 恒定：接入 prometheus-alerts 业务规则后（无 alert_id 标签），
+    若幂等键只用 fingerprint，告警 resolved 后再触发会命中 REJECT_DUPLICATE，永远开不出
+    第二条流程。startsAt 在单次告警生命周期内稳定（重复投递幂等），跨周期刷新（可开新流程）。
+    """
+    raw = item.get("startsAt")
+    if not raw:
+        return ""
+    try:
+        return str(int(datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()))
+    except (TypeError, ValueError):
+        return ""
+
+
 def parse_alertmanager_payload(payload: dict) -> tuple[list[Alert], int]:
     """Alertmanager v4 webhook 载荷 → 标准化 Alert 列表。
 
@@ -62,7 +80,8 @@ def parse_alertmanager_payload(payload: dict) -> tuple[list[Alert], int]:
         if labels.get("alert_id"):
             alert_id = labels["alert_id"]
         elif fingerprint:
-            alert_id = fingerprint[:12]
+            suffix = _starts_at_suffix(item)
+            alert_id = f"{fingerprint[:12]}-{suffix}" if suffix else fingerprint[:12]
         else:  # 兜底：无 fingerprint 时用业务键拼装（保持确定性）
             alert_id = f"{labels.get('alertname', 'unknown')}-{service}"
         alerts.append(
