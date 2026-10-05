@@ -10,6 +10,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog'
 import { CopyableId } from '../components/CopyableId'
 import { CountdownText } from '../components/CountdownText'
 import { EmptyState } from '../components/EmptyState'
+import { PermissionGate } from '../components/PermissionGate'
 import { StageBadge } from '../components/StageBadge'
 import { Toast } from '../components/Toast'
 import type { FlowItem } from '../lib/types'
@@ -171,18 +172,20 @@ export function Approvals() {
                         <CountdownText at={item.deadline?.at} className="text-lg font-semibold" />
                       </div>
                       <div className="flex gap-2">
-                        <ActionButton
-                          tone="accent"
-                          onClick={() => openDecision(item, second, 'approve', write)}
-                        >
-                          批准
-                        </ActionButton>
-                        <ActionButton
-                          tone="danger"
-                          onClick={() => openDecision(item, second, 'reject', write)}
-                        >
-                          驳回
-                        </ActionButton>
+                        <PermissionGate require="operator">
+                          <ActionButton
+                            tone="accent"
+                            onClick={() => openDecision(item, second, 'approve', write)}
+                          >
+                            批准
+                          </ActionButton>
+                          <ActionButton
+                            tone="danger"
+                            onClick={() => openDecision(item, second, 'reject', write)}
+                          >
+                            驳回
+                          </ActionButton>
+                        </PermissionGate>
                       </div>
                     </div>
                   </div>

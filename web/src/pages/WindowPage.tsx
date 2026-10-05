@@ -9,6 +9,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog'
 import { CopyableId } from '../components/CopyableId'
 import { CountdownText } from '../components/CountdownText'
 import { EmptyState } from '../components/EmptyState'
+import { PermissionGate } from '../components/PermissionGate'
 import { QueuePatchDialog } from '../components/QueuePatchDialog'
 import { StageBadge } from '../components/StageBadge'
 import { Toast } from '../components/Toast'
@@ -118,13 +119,15 @@ export function WindowPage() {
                   />
                 </div>
                 <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-line pt-4">
-                  <ActionButton tone="accent" onClick={() => openDeploy(item, write)}>
-                    立即发布
-                  </ActionButton>
-                  <ActionButton tone="danger" onClick={() => openCancel(item, write)}>
-                    取消公告
-                  </ActionButton>
-                  <ActionButton onClick={() => setQueueFor(item)}>排队补丁</ActionButton>
+                  <PermissionGate require="operator">
+                    <ActionButton tone="accent" onClick={() => openDeploy(item, write)}>
+                      立即发布
+                    </ActionButton>
+                    <ActionButton tone="danger" onClick={() => openCancel(item, write)}>
+                      取消公告
+                    </ActionButton>
+                    <ActionButton onClick={() => setQueueFor(item)}>排队补丁</ActionButton>
+                  </PermissionGate>
                   <span className="ml-auto text-xs text-idle">到期将自动进入金丝雀发布</span>
                 </div>
                 {item.queued_patches.length > 0 && (

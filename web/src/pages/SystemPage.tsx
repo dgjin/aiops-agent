@@ -77,7 +77,7 @@ export function SystemPage() {
   } = data
 
   const killActive = Boolean(kill.state?.active)
-  const isAdmin = authStatus?.self_token?.role === 'admin'
+  const isAdmin = authStatus?.self?.role === 'admin'
 
   const EFFECT_META: Record<string, { label: string; cls: string }> = {
     hot: { label: '热生效', cls: 'border-ok/40 text-ok' },

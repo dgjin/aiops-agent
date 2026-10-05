@@ -6,9 +6,11 @@ import { Copy, Download, Plus, Upload } from 'lucide-react'
 import { api, describeError } from '../lib/api'
 import { cn, downloadJson, fmtDateTime } from '../lib/format'
 import { useWriteAction } from '../lib/actions'
+import { hasRole, useSelf } from '../lib/permission'
 import { ActionButton } from '../components/ActionButton'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { EmptyState } from '../components/EmptyState'
+import { PermissionGate } from '../components/PermissionGate'
 import { Toast } from '../components/Toast'
 import type {
   MonitoredApp,
@@ -471,6 +473,7 @@ export function MonitoredApps() {
   })
   const queryClient = useQueryClient()
   const write = useWriteAction()
+  const canManage = hasRole(useSelf()?.role, 'admin')
   const [formOpen, setFormOpen] = useState(false)
   const [editing, setEditing] = useState<MonitoredApp | null>(null)
   const [selected, setSelected] = useState<string[]>([])
@@ -605,31 +608,33 @@ export function MonitoredApps() {
               导出
             </span>
           </ActionButton>
-          <ActionButton onClick={() => fileRef.current?.click()}>
-            <span className="inline-flex items-center gap-1.5">
-              <Upload className="h-3.5 w-3.5" />
-              导入
-            </span>
-          </ActionButton>
-          <input
-            ref={fileRef}
-            type="file"
-            accept="application/json,.json"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0]
-              e.target.value = ''
-              if (file) void onPickFile(file)
-            }}
-          />
-          <button
-            type="button"
-            onClick={openCreate}
-            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-accent/90 px-3.5 py-1.5 text-sm font-medium text-canvas hover:bg-accent"
-          >
-            <Plus className="h-4 w-4" />
-            新增
-          </button>
+          <PermissionGate require="admin">
+            <ActionButton onClick={() => fileRef.current?.click()}>
+              <span className="inline-flex items-center gap-1.5">
+                <Upload className="h-3.5 w-3.5" />
+                导入
+              </span>
+            </ActionButton>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0]
+                e.target.value = ''
+                if (file) void onPickFile(file)
+              }}
+            />
+            <button
+              type="button"
+              onClick={openCreate}
+              className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-accent/90 px-3.5 py-1.5 text-sm font-medium text-canvas hover:bg-accent"
+            >
+              <Plus className="h-4 w-4" />
+              新增
+            </button>
+          </PermissionGate>
         </div>
       </div>
 
@@ -644,7 +649,7 @@ export function MonitoredApps() {
         </div>
       )}
 
-      {selected.length > 0 && (
+      {selected.length > 0 && canManage && (
         <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-accent/40 bg-accent/5 px-3 py-2 text-xs">
           <span className="text-muted">已选 {selected.length} 项</span>
           <ActionButton onClick={() => confirmBatch('enable')}>批量启用</ActionButton>
@@ -668,13 +673,15 @@ export function MonitoredApps() {
             <thead>
               <tr className="border-b border-line text-left text-xs text-muted">
                 <th className="px-4 py-3 font-medium">
-                  <input
-                    type="checkbox"
-                    checked={allSelected}
-                    onChange={() => setSelected(allSelected ? [] : items.map((item) => item.id))}
-                    className="h-3.5 w-3.5 accent-current"
-                    aria-label="全选"
-                  />
+                  {canManage && (
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      onChange={() => setSelected(allSelected ? [] : items.map((item) => item.id))}
+                      className="h-3.5 w-3.5 accent-current"
+                      aria-label="全选"
+                    />
+                  )}
                 </th>
                 <th className="px-4 py-3 font-medium">名称</th>
                 <th className="px-4 py-3 font-medium">地址</th>
@@ -689,17 +696,19 @@ export function MonitoredApps() {
               {items.map((app) => (
                 <tr key={app.id} className="border-b border-line/60 last:border-0">
                   <td className="px-4 py-3">
-                    <input
-                      type="checkbox"
-                      checked={selected.includes(app.id)}
-                      onChange={() =>
-                        setSelected((prev) =>
-                          prev.includes(app.id) ? prev.filter((id) => id !== app.id) : [...prev, app.id],
-                        )
-                      }
-                      className="h-3.5 w-3.5 accent-current"
-                      aria-label={`选择 ${app.name}`}
-                    />
+                    {canManage && (
+                      <input
+                        type="checkbox"
+                        checked={selected.includes(app.id)}
+                        onChange={() =>
+                          setSelected((prev) =>
+                            prev.includes(app.id) ? prev.filter((id) => id !== app.id) : [...prev, app.id],
+                          )
+                        }
+                        className="h-3.5 w-3.5 accent-current"
+                        aria-label={`选择 ${app.name}`}
+                      />
+                    )}
                   </td>
                   <td className="px-4 py-3">
                     <div className="text-ink">{app.name}</div>
@@ -748,21 +757,25 @@ export function MonitoredApps() {
                   </td>
                   <td className="px-4 py-3 text-xs text-idle">{fmtDateTime(app.updated_at)}</td>
                   <td className="px-4 py-3">
-                    <div className="flex justify-end gap-1.5 whitespace-nowrap">
-                      <ActionButton onClick={() => openEdit(app)}>编辑</ActionButton>
-                      <ActionButton onClick={() => confirmDuplicate(app)}>
-                        <span className="inline-flex items-center gap-1">
-                          <Copy className="h-3 w-3" />
-                          复制
-                        </span>
-                      </ActionButton>
-                      <ActionButton onClick={() => confirmToggle(app)}>
-                        {app.enabled ? '停用' : '启用'}
-                      </ActionButton>
-                      <ActionButton tone="danger" onClick={() => confirmDelete(app)}>
-                        删除
-                      </ActionButton>
-                    </div>
+                    {canManage ? (
+                      <div className="flex justify-end gap-1.5 whitespace-nowrap">
+                        <ActionButton onClick={() => openEdit(app)}>编辑</ActionButton>
+                        <ActionButton onClick={() => confirmDuplicate(app)}>
+                          <span className="inline-flex items-center gap-1">
+                            <Copy className="h-3 w-3" />
+                            复制
+                          </span>
+                        </ActionButton>
+                        <ActionButton onClick={() => confirmToggle(app)}>
+                          {app.enabled ? '停用' : '启用'}
+                        </ActionButton>
+                        <ActionButton tone="danger" onClick={() => confirmDelete(app)}>
+                          删除
+                        </ActionButton>
+                      </div>
+                    ) : (
+                      <div className="text-right text-xs text-idle">仅管理员可编辑</div>
+                    )}
                   </td>
                 </tr>
               ))}

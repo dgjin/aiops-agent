@@ -10,13 +10,16 @@ import type {
   FlowDetailResp,
   HealthResp,
   KillSwitchResp,
+  LoginResp,
   MonitoredAppInput,
   MonitoredAppsResp,
   MonitoredAppWriteResp,
   OverviewResp,
   ResultResp,
+  SessionItem,
   SubsystemsResp,
   SystemResp,
+  UserItem,
   WindowResp,
   WriteResp,
 } from './types'
@@ -114,7 +117,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const serverMsg = (data as { error?: string } | null)?.error
     const hint =
       res.status === 401
-        ? '（凭证缺失或已失效：请在左下角「访问令牌」中设置最新令牌）'
+        ? '（凭证缺失或已失效：请登录，或在用户菜单中更新访问令牌）'
         : res.status === 403
           ? '（当前角色权限不足）'
           : res.status === 503
@@ -133,7 +136,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
  */
 export function describeError(err: unknown): string {
   if (err instanceof ApiError) {
-    if (err.status === 401) return '未授权：请在左下角「访问令牌」填入有效令牌后重试'
+    if (err.status === 401) return '未授权：请登录，或在用户菜单中更新访问令牌后重试'
     if (err.status === 403) return '权限不足：当前角色无权访问该功能'
     if (err.status === 503) return '鉴权未配置：服务端处于 fail-closed，请先配置令牌注册表'
     return err.message
@@ -186,6 +189,60 @@ export const api = {
   subsystems: () => request<SubsystemsResp>('/api/subsystems'),
   /** 令牌轮换状态（含调用方自身令牌状态）。 */
   authStatus: () => request<AuthStatusResp>('/api/auth/status'),
+
+  // ---- 登录 / 登出 / 本人改密（认证域） ----
+  /** 登录：用户名+密码换会话令牌（公开端点；失败按 IP 限速）。 */
+  login: (username: string, password: string) =>
+    request<LoginResp>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    }),
+  /** 登出：吊销当前会话令牌（静态令牌无会话可吊销，返回 hint）。 */
+  logout: () =>
+    request<{ revoked: boolean; hint?: string }>('/api/auth/logout', { method: 'POST' }),
+  /** 本人改密（需原密码）；成功后全部会话被吊销（relogin_required=true 需重新登录）。 */
+  changeOwnPassword: (oldPassword: string, newPassword: string) =>
+    request<{ updated: boolean; revoked_sessions: number; relogin_required: boolean }>(
+      '/api/auth/password',
+      {
+        method: 'POST',
+        body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+      },
+    ),
+
+  // ---- 用户管理（管理员；/api/users 全接口服务端要求 admin） ----
+  users: () => request<{ users: UserItem[] }>('/api/users'),
+  createUser: (username: string, password: string, role: string) =>
+    request<{ user: UserItem }>('/api/users', {
+      method: 'POST',
+      body: JSON.stringify({ username, password, role }),
+    }),
+  updateUser: (username: string, body: { role?: string; state?: string }) =>
+    request<{ user: UserItem }>(`/api/users/${encodeURIComponent(username)}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  deleteUser: (username: string) =>
+    request<{ deleted: boolean; revoked_sessions: number }>(
+      `/api/users/${encodeURIComponent(username)}`,
+      { method: 'DELETE' },
+    ),
+  /** 重置他人密码（管理员；成功后强制下线其全部会话）。 */
+  resetUserPassword: (username: string, password: string) =>
+    request<{ updated: boolean; revoked_sessions: number }>(
+      `/api/users/${encodeURIComponent(username)}/password`,
+      { method: 'POST', body: JSON.stringify({ password }) },
+    ),
+  /** 用户在线会话（管理员；脱敏）。 */
+  userSessions: (username: string) =>
+    request<{ sessions: SessionItem[] }>(`/api/users/${encodeURIComponent(username)}/sessions`),
+  /** 强制下线（管理员）：吊销该用户全部有效会话。 */
+  revokeUserSessions: (username: string) =>
+    request<{ revoked_sessions: number }>(
+      `/api/users/${encodeURIComponent(username)}/sessions`,
+      { method: 'DELETE' },
+    ),
+
   /** 立即轮换令牌（管理员）。 */
   rotateTokens: (reason = 'manual') =>
     request<

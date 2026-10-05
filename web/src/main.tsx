@@ -4,7 +4,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter } from 'react-router-dom'
 import App from './App'
 import { ApiError } from './lib/api'
+import { initTheme } from './lib/theme'
 import './styles.css'
+
+// 首屏前应用已保存的主题偏好（避免浅色用户先看到深色闪烁）
+initTheme()
 
 const queryClient = new QueryClient({
   defaultOptions: {

@@ -370,6 +370,8 @@ export interface AuthStatusResp extends Timed {
     expires_at: string | null
     retired_at: string | null
   }
+  /** 调用方身份统一视图（会话/静态令牌共用；顶栏用户菜单数据源） */
+  self: SelfIdentity
   tokens?: AuthTokenMeta[]
 }
 
@@ -442,4 +444,46 @@ export interface WriteResp extends Timed {
   ok: boolean
   wf_id: string
   action: string
+}
+
+// ----------------------------------------------------------------------
+// 用户与会话（批次 1 后端；登录/用户管理/在线会话）
+// ----------------------------------------------------------------------
+
+/** 调用方身份统一视图（/api/auth/status 的 self 字段）。 */
+export interface SelfIdentity {
+  user: string | null
+  role: string | null
+  /** session=用户名密码登录的会话令牌；static=长期静态令牌（自动化/应急通道） */
+  source: 'session' | 'static' | string
+  state: string | null
+  expires_at: string | null
+}
+
+/** 登录响应（换发会话令牌；明文令牌仅在本次响应回显）。 */
+export interface LoginResp extends Timed {
+  token: string
+  user: string
+  role: string
+  expires_at: string
+  ttl_seconds: number
+}
+
+/** 用户条目（不含密码哈希）。 */
+export interface UserItem {
+  username: string
+  role: 'viewer' | 'operator' | 'admin' | string
+  state: 'active' | 'disabled' | string
+  created_at: string | null
+  updated_at: string | null
+}
+
+/** 在线会话条目（脱敏：id 为令牌指纹前 8 位）。 */
+export interface SessionItem {
+  id: string
+  user: string
+  role: string
+  created_at: string | null
+  expires_at: string | null
+  last_seen_at: string | null
 }

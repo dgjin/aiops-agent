@@ -5,12 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link
       rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%232DD4BF' stroke-width='2'/%3E%3Ccircle cx='8' cy='8' r='2' fill='%232DD4BF'/%3E%3C/svg%3E"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='1' y='1' width='30' height='30' rx='9' fill='%230d151c'/%3E%3Crect x='1.75' y='1.75' width='28.5' height='28.5' rx='8.25' fill='none' stroke='%232dd4bf' stroke-width='1.6' stroke-opacity='0.9'/%3E%3Cpath d='M5.5 17.2h4.6l2.3-6.4 3.5 10.8 2.5-6.8 1.4 2.4h6.7' fill='none' stroke='%23e6edf3' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='26.5' cy='17.2' r='2' fill='%232dd4bf'/%3E%3C/svg%3E"
     />
     <title>AIOps 运维控制台</title>
     <style>
+      /* 首屏主题底色（styles.css 加载前的占位；initTheme() 尽早写入 data-theme） */
       html {
         background: #0b0f14;
+      }
+      html[data-theme='light'] {
+        background: #f6f8fa;
       }
     </style>
   </head>

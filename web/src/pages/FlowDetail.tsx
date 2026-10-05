@@ -17,6 +17,7 @@ import { EventTimeline } from '../components/EventTimeline'
 import { FlowStateMachine } from '../components/charts/FlowStateMachine'
 import { ReleasePipeline } from '../components/charts/ReleasePipeline'
 import { JsonBlock } from '../components/JsonBlock'
+import { PermissionGate } from '../components/PermissionGate'
 import { QueuePatchDialog } from '../components/QueuePatchDialog'
 import { StageBadge } from '../components/StageBadge'
 import { Toast } from '../components/Toast'
@@ -105,7 +106,7 @@ function ApprovalPanel({
         </div>
         <div className="flex items-center gap-2">
           {first === null && (
-            <>
+            <PermissionGate require="operator">
               <ActionButton
                 tone="accent"
                 onClick={() =>
@@ -139,10 +140,10 @@ function ApprovalPanel({
               >
                 驳回
               </ActionButton>
-            </>
+            </PermissionGate>
           )}
           {first === 'approve' && status.needs_second && second === null && (
-            <>
+            <PermissionGate require="operator">
               <ActionButton
                 tone="accent"
                 onClick={() =>
@@ -176,7 +177,7 @@ function ApprovalPanel({
               >
                 二级驳回
               </ActionButton>
-            </>
+            </PermissionGate>
           )}
           {first === 'reject' && <span className="text-xs text-danger">一级已驳回，等待流程响应</span>}
           {first === 'approve' && (!status.needs_second || second !== null) && (
@@ -211,41 +212,43 @@ function WindowPanel({
           <div className="mt-1 text-xs text-muted">到期后自动进入金丝雀发布</div>
         </div>
         <div className="flex items-center gap-2">
-          <ActionButton
-            tone="accent"
-            onClick={() =>
-              write.open({
-                title: '确认立即发布？',
-                tone: 'danger',
-                confirmLabel: '立即发布',
-                detail: (
-                  <ActionSummary wfId={wfId} service={service} alertId={alertId} decision="跳过剩余公告倒计时，直接进入金丝雀发布" />
-                ),
-                run: () => api.deployCommand(wfId, 'deploy_now'),
-                success: '已下发 deploy-now，流程将进入金丝雀发布',
-              })
-            }
-          >
-            立即发布
-          </ActionButton>
-          <ActionButton
-            tone="danger"
-            onClick={() =>
-              write.open({
-                title: '确认取消本次发布？',
-                tone: 'danger',
-                confirmLabel: '取消公告',
-                detail: (
-                  <ActionSummary wfId={wfId} service={service} alertId={alertId} decision="中止公告窗口，本次修复不发布上线" />
-                ),
-                run: () => api.deployCommand(wfId, 'cancel'),
-                success: '已下发 cancel 命令',
-              })
-            }
-          >
-            取消公告
-          </ActionButton>
-          <ActionButton onClick={onQueue}>排队补丁</ActionButton>
+          <PermissionGate require="operator">
+            <ActionButton
+              tone="accent"
+              onClick={() =>
+                write.open({
+                  title: '确认立即发布？',
+                  tone: 'danger',
+                  confirmLabel: '立即发布',
+                  detail: (
+                    <ActionSummary wfId={wfId} service={service} alertId={alertId} decision="跳过剩余公告倒计时，直接进入金丝雀发布" />
+                  ),
+                  run: () => api.deployCommand(wfId, 'deploy_now'),
+                  success: '已下发 deploy-now，流程将进入金丝雀发布',
+                })
+              }
+            >
+              立即发布
+            </ActionButton>
+            <ActionButton
+              tone="danger"
+              onClick={() =>
+                write.open({
+                  title: '确认取消本次发布？',
+                  tone: 'danger',
+                  confirmLabel: '取消公告',
+                  detail: (
+                    <ActionSummary wfId={wfId} service={service} alertId={alertId} decision="中止公告窗口，本次修复不发布上线" />
+                  ),
+                  run: () => api.deployCommand(wfId, 'cancel'),
+                  success: '已下发 cancel 命令',
+                })
+              }
+            >
+              取消公告
+            </ActionButton>
+            <ActionButton onClick={onQueue}>排队补丁</ActionButton>
+          </PermissionGate>
         </div>
       </div>
       {status.queued_patches.length > 0 && (

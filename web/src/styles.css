@@ -1,24 +1,92 @@
 @import 'tailwindcss';
 
-@theme {
-  /* 深色主题 token（设计方案 7.1） */
-  --color-canvas: #0b0f14;
-  --color-panel: #10161d;
-  --color-elevated: #172029;
-  --color-line: #1f2933;
-  --color-ink: #e6edf3;
-  --color-muted: #8899a6;
-  --color-accent: #2dd4bf;
-  --color-ok: #34d399;
-  --color-warn: #fbbf24;
-  --color-danger: #f87171;
-  --color-info: #60a5fa;
-  --color-idle: #64748b;
+/* ============================================================
+   主题系统（两层 token，2026-10 鉴权与体验升级）：
+
+   - 原始层 `--c-*`：由 <html data-theme> / <html data-accent> 切换，
+     是唯一真正随主题变化的值；
+   - 语义层：`@theme inline` 把 `--color-*` 映射到 `var(--c-*)`，
+     Tailwind 工具类（bg-canvas / text-muted / bg-accent …）因此动态化。
+     组件全部使用语义 class，**零改动**获得双主题 + 三强调色能力。
+
+   对比度基线（正文 ≥ 4.5:1，AA）：
+   - 深色：ink/canvas ≈ 13.2:1，muted/canvas ≈ 5.5:1；
+   - 浅色：ink/canvas ≈ 15.8:1，muted/panel ≈ 5.9:1。
+   ============================================================ */
+
+:root {
+  /* 深色（默认，原设计 token） */
+  --c-canvas: #0b0f14;
+  --c-panel: #10161d;
+  --c-elevated: #172029;
+  --c-line: #1f2933;
+  --c-ink: #e6edf3;
+  --c-muted: #8899a6;
+  --c-accent: #2dd4bf; /* teal 亮阶（默认强调色） */
+  --c-ok: #34d399;
+  --c-warn: #fbbf24;
+  --c-danger: #f87171;
+  --c-info: #60a5fa;
+  --c-idle: #64748b;
+  color-scheme: dark;
+}
+
+/* 浅色：面板=白、底=浅灰、线=冷灰 */
+:root[data-theme='light'] {
+  --c-canvas: #f6f8fa;
+  --c-panel: #ffffff;
+  --c-elevated: #eef2f6;
+  --c-line: #d8e0e8;
+  --c-ink: #16202b;
+  --c-muted: #5b6b7c;
+  --c-accent: #0d9488; /* teal 深阶（浅底可读） */
+  --c-ok: #047857;
+  --c-warn: #b45309;
+  --c-danger: #dc2626;
+  --c-info: #1d4ed8;
+  --c-idle: #94a3b8;
+  color-scheme: light;
+}
+
+/* 强调色三选：深色用亮阶、浅色用深阶（组合覆盖，切主题保持所选色相） */
+:root[data-accent='blue'] {
+  --c-accent: #38bdf8;
+}
+:root[data-accent='violet'] {
+  --c-accent: #a78bfa;
+}
+:root[data-theme='light'][data-accent='teal'] {
+  --c-accent: #0d9488;
+}
+:root[data-theme='light'][data-accent='blue'] {
+  --c-accent: #0284c7;
+}
+:root[data-theme='light'][data-accent='violet'] {
+  --c-accent: #7c3aed;
+}
+
+@theme inline {
+  --color-canvas: var(--c-canvas);
+  --color-panel: var(--c-panel);
+  --color-elevated: var(--c-elevated);
+  --color-line: var(--c-line);
+  --color-ink: var(--c-ink);
+  --color-muted: var(--c-muted);
+  --color-accent: var(--c-accent);
+  --color-ok: var(--c-ok);
+  --color-warn: var(--c-warn);
+  --color-danger: var(--c-danger);
+  --color-info: var(--c-info);
+  --color-idle: var(--c-idle);
 
   --font-sans:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
     'Microsoft YaHei', sans-serif;
   --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+html {
+  background: var(--c-canvas);
 }
 
 html,
@@ -28,14 +96,15 @@ body,
 }
 
 body {
-  background-color: var(--color-canvas);
-  color: var(--color-ink);
+  background-color: var(--c-canvas);
+  color: var(--c-ink);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
+  transition: background-color 0.18s ease, color 0.18s ease;
 }
 
 ::selection {
-  background: rgb(45 212 191 / 0.25);
+  background: color-mix(in srgb, var(--c-accent) 25%, transparent);
 }
 
 ::-webkit-scrollbar {
@@ -43,9 +112,9 @@ body {
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--color-line);
+  background: var(--c-line);
   border-radius: 6px;
-  border: 2px solid var(--color-canvas);
+  border: 2px solid var(--c-canvas);
 }
 ::-webkit-scrollbar-track {
   background: transparent;
