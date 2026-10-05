@@ -1,6 +1,7 @@
 """被监控应用清单单测（bff/monitored_apps）：播种 / 校验 / CRUD / 持久化 / 热生效。
 
 「热生效」的判据：清单不在进程内缓存——**外部改动磁盘后，下一次 list_all() 即反映新值**。
+另含 production 模式（SQLite 注入）回归：repo 字段落库 + 修复侧注册表直读同一张表。
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from aiops_agent import app_registry
+from aiops_agent import db as db_layer
 from bff import monitored_apps as store
 
 
@@ -317,6 +320,68 @@ class DiffFieldsTest(unittest.TestCase):
 
     def test_new_field_shows_none_from(self) -> None:
         self.assertEqual(store.diff_fields({}, {"note": "hi"}), {"note": {"from": None, "to": "hi"}})
+
+
+class ProductionDbBackendTest(unittest.TestCase):
+    """production 模式（SQLite 注入）：前台写入的 repo 落库，worker 侧注册表直读同一张表。
+
+    对应「自动适配」关键路径：控制台配置 → 落库 → 修复链路 resolve 热生效，无需人工改代码。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = Path(self._tmp.name) / "repo"
+        self.repo.mkdir()
+        patcher = mock.patch.dict(
+            os.environ,
+            {
+                "AIOPS_MODE": "production",
+                "AIOPS_DATABASE_URL": f"sqlite:///{Path(self._tmp.name) / 'aiops.sqlite3'}",
+            },
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(db_layer.reset_engine)
+
+    def test_repo_persists_and_registry_resolves(self) -> None:
+        app = store.add(
+            name="自动适配应用",
+            url="http://auto.test/",
+            service="svc-db",
+            repo=str(self.repo),
+            probe_keyword="OK",
+        )
+        row = store.get(app["id"])
+        self.assertEqual(row["repo"], str(self.repo))  # 此前生产写侧静默丢 repo
+        entry = app_registry.resolve("svc-db")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["repo"], self.repo)
+        self.assertEqual(entry["contract"], {"keyword": "OK"})
+
+    def test_console_update_is_visible_to_registry_immediately(self) -> None:
+        """热生效：控制台 update 后，worker 侧下一次 resolve 即读到新仓库。"""
+        first = Path(self._tmp.name) / "repo-first"
+        second = Path(self._tmp.name) / "repo-second"
+        first.mkdir()
+        second.mkdir()
+        app = store.add(
+            name="切换仓库", url="http://switch.test/", service="svc-switch", repo=str(first)
+        )
+        self.assertEqual(app_registry.resolve("svc-switch")["repo"], first)
+        _before, updated = store.update(app["id"], repo=str(second))
+        self.assertEqual(updated["repo"], str(second))
+        self.assertEqual(app_registry.resolve("svc-switch")["repo"], second)
+
+    def test_repo_missing_dir_resolves_none(self) -> None:
+        """登记的仓库目录不存在 → resolve 返回 None（回退默认行为，修复不会走错仓）。"""
+        store.add(
+            name="坏路径",
+            url="http://bad.test/",
+            service="svc-bad",
+            repo=str(Path(self._tmp.name) / "not-exist"),
+        )
+        self.assertIsNone(app_registry.resolve("svc-bad"))
 
 
 if __name__ == "__main__":

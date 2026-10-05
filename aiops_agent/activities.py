@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,15 +53,20 @@ async def _tiny_delay() -> None:
     await asyncio.sleep(0.5)
 
 
-def _resolve_repo_dir(service: str) -> Path | None:
-    """解析被监控应用对应的修复目标仓库（未注册/未配置返回 None → 走 demo-app 默认行为）。"""
+def _resolve_app(service: str) -> dict | None:
+    """解析被监控应用注册表条目（未注册/注册表不可用 → None → 回退 demo-app 默认行为）。"""
     from . import app_registry
 
     try:
-        entry = app_registry.resolve(service)
+        return app_registry.resolve(service)
     except Exception as exc:  # noqa: BLE001 - 注册表不可用不阻断修复
-        log.warning("[registry] 应用注册表不可用，使用默认仓库: %s", exc)
+        log.warning("[registry] 应用注册表不可用，回退默认行为: %s", exc)
         return None
+
+
+def _resolve_repo_dir(service: str) -> Path | None:
+    """解析被监控应用对应的修复目标仓库（未注册/未配置返回 None → 走 demo-app 默认行为）。"""
+    entry = _resolve_app(service)
     if entry:
         log.info(
             "[registry] 服务 %s → 修复仓库 %s（契约关键词=%s）",
@@ -70,6 +76,56 @@ def _resolve_repo_dir(service: str) -> Path | None:
         )
         return entry["repo"]
     return None
+
+
+# 应用专属索引的进程内单飞锁：多活动并发首检同一应用时只允许一个真正建库
+_APP_INDEX_LOCKS: dict[str, threading.Lock] = {}
+_APP_INDEX_LOCKS_GUARD = threading.Lock()
+
+
+def _app_index_lock(service: str) -> threading.Lock:
+    with _APP_INDEX_LOCKS_GUARD:
+        return _APP_INDEX_LOCKS.setdefault(service, threading.Lock())
+
+
+def _index_repo_of(index_path: Path) -> str:
+    """读索引文件头部记录的 ``repo`` 字段（只读前 4KB——chunks 可达数十 MB，避免整读）。"""
+    try:
+        with index_path.open("r", encoding="utf-8") as fh:
+            head = fh.read(4096)
+    except OSError:
+        return ""
+    match = re.search(r'"repo"\s*:\s*"((?:[^"\\]|\\.)*)"', head)
+    return match.group(1) if match else ""
+
+
+def _ensure_app_index(service: str, repo_dir: Path, index_path: Path) -> None:
+    """确保应用专属索引存在且指向当前登记的仓库；缺失/仓库变更时自动构建。
+
+    - fast-path：索引存在且头部记录的 repo == 当前 repo_dir → 直接复用；
+    - 构建前加进程内单飞锁并双检（并发首检只建一次）；
+    - 由检索活动以 ``asyncio.to_thread`` 调用，嵌入批量请求在独立线程内执行，
+      构建完成后写盘——超时重试时命中已完成索引，无需重复构建。
+    """
+    if index_path.is_file() and _index_repo_of(index_path) == str(repo_dir):
+        log.info("[rag] 应用 %s 复用已有专属索引: %s", service, index_path)
+        return
+    with _app_index_lock(service):
+        if index_path.is_file() and _index_repo_of(index_path) == str(repo_dir):
+            return  # 双检：等待锁期间其他活动已完成构建
+        from . import code_rag
+
+        started = time.monotonic()
+        summary = code_rag.build_index(repo_dir, index_path=index_path)
+        log.info(
+            "[rag] 应用 %s 专属索引自动构建完成：%d 文件 / %d 块（仓库=%s，耗时=%.1fs，索引=%s）",
+            service,
+            summary["files"],
+            summary["chunks"],
+            repo_dir,
+            time.monotonic() - started,
+            index_path,
+        )
 
 
 # --------------------------------------------------------------------------
@@ -186,17 +242,43 @@ async def analyze_root_cause(
 # --------------------------------------------------------------------------
 
 @activity.defn
-async def retrieve_similar_fixes(root_cause: RootCause) -> list[dict]:
+async def retrieve_similar_fixes(alert: Alert, root_cause: RootCause) -> list[dict]:
     """真实实现（WP4）：Code RAG 检索相关代码块与相似历史工单作为修复上下文。
 
-    索引不可用时降级为空引用（修复 Agent 仍可基于目标文件生成补丁）。
+    索引解析（自动适配，无需人工 export 环境变量 / 手工建库 / 重启 worker）：
+
+    1. **已注册且配置了 repo 的应用** → 专属索引 ``data/code_index_<service>.json``，
+       缺失或登记的仓库已变更时先自动构建（注册应用始终使用自己仓库的索引——
+       全局环境变量不得误导其他仓库的检索）；
+    2. **未注册** → 回落 ``AIOPS_CODE_INDEX`` 环境变量（若有）或默认索引
+       ``data/code_index.json``（由 ``search_index`` 内部完成回落）。
+
+    索引/嵌入服务不可用时降级为空引用（修复 Agent 仍可基于目标文件生成补丁）；
+    专属索引构建失败**不回退**其他仓库的索引——错误仓库的引用会误导 LLM 修复。
     """
     from . import code_rag
 
     await _tiny_delay()
+    index_path: Path | None = None
+    entry = _resolve_app(alert.service)
+    if entry:
+        index_path = code_rag.app_index_path(alert.service)
+        try:
+            await asyncio.to_thread(
+                _ensure_app_index, alert.service, entry["repo"], index_path
+            )
+        except Exception as exc:  # noqa: BLE001 - 建索引失败不阻断主流程
+            log.warning(
+                "[rag] 应用 %s 专属索引构建失败，降级为空引用（不回退他仓索引）: %s",
+                alert.service,
+                exc,
+            )
+            return []
     query = " ".join([root_cause.error_type, root_cause.summary, *root_cause.suspect_files])
     try:
-        references = await asyncio.to_thread(code_rag.search_index, query, top_k=5)
+        references = await asyncio.to_thread(
+            code_rag.search_index, query, index_path=index_path, top_k=5
+        )
     except Exception as exc:  # noqa: BLE001 - 索引缺失/嵌入服务不可用不阻断主流程
         log.warning("[rag] Code RAG 不可用，降级为空引用: %s", exc)
         references = []

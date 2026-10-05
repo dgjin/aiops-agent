@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -138,8 +139,8 @@ class RunRoundTest(unittest.TestCase):
         queue = list(results)
         calls: list[tuple] = []
 
-        def probe(url, *, timeout=2.0, keyword=""):
-            calls.append((url, timeout, keyword))
+        def probe(url, *, timeout=2.0, keyword="", health_path=""):
+            calls.append((url, timeout, keyword, health_path))
             return queue.pop(0) if len(queue) > 1 else queue[0]
 
         probe.calls = calls
@@ -159,7 +160,7 @@ class RunRoundTest(unittest.TestCase):
         self.assertEqual(alert_payload[0]["labels"]["alert_id"], "probe-app-1-1000")  # fail_since 首败时刻
         self.assertEqual(resolved_payload[0]["labels"], alert_payload[0]["labels"])
         self.assertIn("endsAt", resolved_payload[0])
-        self.assertTrue(all(c == (app["url"], 1.5, "") for c in probe.calls))  # 探测超时/关键字透传
+        self.assertTrue(all(c == (app["url"], 1.5, "", "") for c in probe.calls))  # 探测超时/关键字/健康路径透传
 
         record = self.state["app-1"]
         self.assertTrue(record["ok"])
@@ -195,7 +196,46 @@ class RunRoundTest(unittest.TestCase):
         probe = self._fake_probe([_ok()])
         with mock.patch.object(prober.store, "list_all", return_value=[app]):
             prober.run_round(self.state, probe_fn=probe, threshold=3, ts=1000.0)
-        self.assertEqual(probe.calls, [(app["url"], 2.0, '<div id="root"')])
+        self.assertEqual(probe.calls, [(app["url"], 2.0, '<div id="root"', "")])
+
+    def test_health_path_passed_through(self) -> None:
+        """条目的健康路径透传给探测函数（Manifest 预填；未配置为空串 → 根路径）。"""
+        app = _app("app-1", health_path="/health")
+        probe = self._fake_probe([_ok()])
+        with mock.patch.object(prober.store, "list_all", return_value=[app]):
+            prober.run_round(self.state, probe_fn=probe, threshold=3, ts=1000.0)
+        self.assertEqual(probe.calls, [(app["url"], 2.0, "", "/health")])
+
+
+class DaemonLoopResilienceTest(unittest.TestCase):
+    """守护循环：单轮异常（如存储层瞬断）不杀死进程，等待下一轮重试；--once 保留异常传播。"""
+
+    def test_transient_error_does_not_kill_daemon_loop(self) -> None:
+        """对齐 ship/surge 的守护语义：单轮故障 warning 留痕后继续下一轮。"""
+        with (
+            mock.patch.object(
+                prober, "run_round", side_effect=[RuntimeError("db down"), KeyboardInterrupt()]
+            ) as run_round,
+            mock.patch.object(prober, "write_status"),
+            mock.patch.object(prober.time, "sleep"),
+            mock.patch.object(prober.logger, "warning") as warn,
+            mock.patch.object(sys, "argv", ["app_prober.py"]),
+        ):
+            prober.main()  # 第 1 轮异常被兜底、第 2 轮 KeyboardInterrupt 正常收尾 → 不向外抛出
+        self.assertEqual(run_round.call_count, 2)
+        warn.assert_called_once()
+        self.assertIn("db down", str(warn.call_args))
+
+    def test_once_mode_propagates_error(self) -> None:
+        """--once 调试模式保留异常传播（非零退出码可被脚本感知）。"""
+        with (
+            mock.patch.object(prober, "run_round", side_effect=RuntimeError("db down")),
+            mock.patch.object(prober, "write_status"),
+            mock.patch.object(prober.logger, "warning"),
+            mock.patch.object(sys, "argv", ["app_prober.py", "--once"]),
+        ):
+            with self.assertRaises(RuntimeError):
+                prober.main()
 
 
 class WriteStatusAndReadTest(unittest.TestCase):

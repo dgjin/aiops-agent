@@ -10,7 +10,12 @@ import { ActionButton } from '../components/ActionButton'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { EmptyState } from '../components/EmptyState'
 import { Toast } from '../components/Toast'
-import type { MonitoredApp, MonitoredAppInput, MonitoredAppWatcher } from '../lib/types'
+import type {
+  MonitoredApp,
+  MonitoredAppInput,
+  MonitoredAppReadiness,
+  MonitoredAppWatcher,
+} from '../lib/types'
 
 const INPUT_CLS =
   'w-full rounded-lg border border-line bg-canvas px-3 py-2 text-sm text-ink placeholder:text-idle focus:border-accent/50 focus:outline-none'
@@ -22,6 +27,7 @@ const EMPTY_FORM: MonitoredAppInput = {
   service: 'nl2sql',
   log_path: '',
   probe_keyword: '',
+  health_path: '',
   repo: '',
   enabled: true,
   note: '',
@@ -136,6 +142,67 @@ function WatcherLine({ watcher }: { watcher: MonitoredAppWatcher }) {
   )
 }
 
+/** 就绪度圆点：null=灰（未配置）/ true=绿 / false=红（tone=warn 时黄，用于「待自动构建」类非异常状态）。 */
+function ReadyDot({ state, tone = 'status' }: { state: boolean | null; tone?: 'status' | 'warn' }) {
+  const cls =
+    state === null ? 'bg-idle' : state ? 'bg-ok' : tone === 'warn' ? 'bg-warn' : 'bg-danger'
+  return <span className={cn('h-1 w-1 shrink-0 rounded-full', cls)} />
+}
+
+/** 接入就绪度行：仓库 / 索引 / 日志三态（前台添加后的自动适配状态一览）。 */
+function ReadinessLine({ readiness }: { readiness: MonitoredAppReadiness }) {
+  const { repo_ok, index_ok, log_files } = readiness
+  return (
+    <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px]">
+      <span
+        className={cn(
+          'inline-flex items-center gap-1',
+          repo_ok === null ? 'text-idle' : repo_ok ? 'text-muted' : 'text-danger',
+        )}
+        title={
+          repo_ok === null
+            ? '未配置修复仓库：不参与自动修复（告警 / 日志 / 探测照常生效）'
+            : repo_ok
+              ? '修复仓库目录存在：修复引擎可定位并生成补丁'
+              : '配置的修复仓库目录不存在：请检查路径，否则修复将回退默认行为'
+        }
+      >
+        <ReadyDot state={repo_ok} />
+        {repo_ok === null ? '仓库未配置' : repo_ok ? '修复仓库就绪' : '修复仓库缺失'}
+      </span>
+      {repo_ok === true && (
+        <span
+          className={cn('inline-flex items-center gap-1', index_ok ? 'text-muted' : 'text-warn')}
+          title={
+            index_ok
+              ? '应用专属代码索引已存在（仓库变更时首次检索自动重建）'
+              : '专属索引将在首次修复检索时自动构建，无需手工建库或重启'
+          }
+        >
+          <ReadyDot state={index_ok} tone="warn" />
+          {index_ok ? '索引就绪' : '索引待建（首次检索自动构建）'}
+        </span>
+      )}
+      <span
+        className={cn(
+          'inline-flex items-center gap-1',
+          log_files === null ? 'text-idle' : log_files > 0 ? 'text-muted' : 'text-danger',
+        )}
+        title={
+          log_files === null
+            ? '未配置日志路径：不采集日志（突增检测不含该应用）'
+            : log_files > 0
+              ? `采集器可命中 ${log_files} 个日志文件（通配已展开）`
+              : '日志路径当前未命中任何文件：请检查路径或应用是否已产生日志'
+        }
+      >
+        <ReadyDot state={log_files === null ? null : log_files > 0} />
+        {log_files === null ? '日志未配置' : log_files > 0 ? `日志就绪（${log_files} 个文件）` : '日志路径未命中'}
+      </span>
+    </div>
+  )
+}
+
 /** 新增 / 编辑表单：实时字段级校验，存在错误时禁用提交。 */
 function AppFormDialog({
   open,
@@ -154,6 +221,8 @@ function AppFormDialog({
   const [error, setError] = useState<string | null>(null)
   const [touched, setTouched] = useState(false)
   const [lastKey, setLastKey] = useState<string | null>(null)
+  const [discovering, setDiscovering] = useState(false)
+  const [discoverMsg, setDiscoverMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
   const key = `${open}:${initial?.id ?? 'new'}`
   if (open && key !== lastKey) {
@@ -166,6 +235,7 @@ function AppFormDialog({
             service: initial.service,
             log_path: initial.log_path,
             probe_keyword: initial.probe_keyword,
+            health_path: initial.health_path ?? '',
             repo: initial.repo ?? '',
             enabled: initial.enabled,
             note: initial.note,
@@ -174,12 +244,74 @@ function AppFormDialog({
     )
     setError(null)
     setTouched(false)
+    setDiscoverMsg(null)
   }
   if (!open && lastKey !== null) setLastKey(null)
 
   const patch = (next: Partial<MonitoredAppInput>) => {
     setTouched(true)
     setForm((prev) => ({ ...prev, ...next }))
+  }
+
+  /**
+   * 从标准接口自动探测（GET <url>/.well-known/aiops.json，AIOps Manifest v1.0）：
+   * 成功则预填技术字段（名称仅当为空时填充，避免覆盖人工命名）；
+   * 未接入标准接口是常态，提示可手动填写。
+   */
+  const discover = async () => {
+    const url = form.url.trim()
+    if (!/^https?:\/\//i.test(url)) {
+      setDiscoverMsg({ ok: false, text: '请先填写合法地址（http:// 或 https://）' })
+      return
+    }
+    setDiscovering(true)
+    setDiscoverMsg(null)
+    try {
+      const result = await api.discoverMonitoredApp(url)
+      if (result.ok && result.suggested) {
+        const { name, service, probe_keyword, health_path, log_path } = result.suggested
+        const applied: string[] = []
+        const next: Partial<MonitoredAppInput> = {}
+        if (name && !form.name.trim()) {
+          next.name = name
+          applied.push('名称')
+        }
+        if (service) {
+          next.service = service
+          applied.push('service')
+        }
+        if (probe_keyword) {
+          next.probe_keyword = probe_keyword
+          applied.push('健康关键字')
+        }
+        if (health_path) {
+          next.health_path = health_path
+          applied.push('健康路径')
+        }
+        if (log_path) {
+          next.log_path = log_path
+          applied.push('日志路径')
+        }
+        if (Object.keys(next).length > 0) patch(next)
+        const warn = result.warnings.length > 0 ? `（${result.warnings.join('；')}）` : ''
+        setDiscoverMsg({
+          ok: true,
+          text:
+            applied.length > 0
+              ? `已从标准接口预填：${applied.join(' / ')}${warn}`
+              : `标准接口可用，未提供可预填字段${warn}`,
+        })
+      } else {
+        setDiscoverMsg({
+          ok: false,
+          text: `未检测到标准接口（${result.error || '应用未部署 /.well-known/aiops.json'}），可手动填写`,
+        })
+      }
+    } catch (err) {
+      setDiscoverMsg({ ok: false, text: `探测失败：${describeError(err)}，可手动填写` })
+    } finally {
+      setDiscovering(false)
+    }
   }
 
   const errors = validateApp(form, existingNames, initial?.name)
@@ -229,12 +361,31 @@ function AppFormDialog({
           />
         </Field>
         <Field label="地址 *（http:// 或 https://）" error={showError('url')}>
-          <input
-            value={form.url}
-            onChange={(e) => patch({ url: e.target.value })}
-            placeholder="http://localhost:3000/"
-            className={cn(INPUT_CLS, 'font-mono text-xs', showError('url') && INPUT_ERR_CLS)}
-          />
+          <div className="flex gap-2">
+            <input
+              value={form.url}
+              onChange={(e) => {
+                patch({ url: e.target.value })
+                setDiscoverMsg(null)
+              }}
+              placeholder="http://localhost:3000/"
+              className={cn(INPUT_CLS, 'flex-1 font-mono text-xs', showError('url') && INPUT_ERR_CLS)}
+            />
+            <button
+              type="button"
+              onClick={discover}
+              disabled={discovering}
+              className="shrink-0 rounded-lg border border-accent/40 px-3 py-2 text-xs text-accent hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-50"
+              title="读取应用的 /.well-known/aiops.json 标准接口（AIOps Manifest v1.0），自动预填名称 / service / 健康关键字 / 日志路径"
+            >
+              {discovering ? '探测中…' : '从标准接口探测'}
+            </button>
+          </div>
+          {discoverMsg && (
+            <p className={cn('mt-1 text-[11px]', discoverMsg.ok ? 'text-ok' : 'text-warn')}>
+              {discoverMsg.text}
+            </p>
+          )}
         </Field>
         <Field
           label="Loki service 标签"
@@ -264,6 +415,17 @@ function AppFormDialog({
             value={form.probe_keyword ?? ''}
             onChange={(e) => patch({ probe_keyword: e.target.value })}
             placeholder={'例如 <div id="root"'}
+            className={cn(INPUT_CLS, 'font-mono text-xs')}
+          />
+        </Field>
+        <Field
+          label="健康检查路径（可选）"
+          hint="Manifest 自动预填；非空时探测与巡检请求该路径（如 /health），关键字也在该页校验"
+        >
+          <input
+            value={form.health_path ?? ''}
+            onChange={(e) => patch({ health_path: e.target.value })}
+            placeholder="/health"
             className={cn(INPUT_CLS, 'font-mono text-xs')}
           />
         </Field>
@@ -433,7 +595,7 @@ export function MonitoredApps() {
         <div>
           <h1 className="text-lg font-medium">被监控应用</h1>
           <p className="mt-1 text-xs text-muted">
-            维护需要监控的应用清单（改动热生效，无需重启）；15 秒自动刷新探测状态
+            维护需要监控的应用清单（改动热生效、支持标准接口自动探测，均无需重启）；15 秒自动刷新探测状态
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -582,6 +744,7 @@ export function MonitoredApps() {
                         {app.probe.error}
                       </div>
                     )}
+                    {app.readiness && <ReadinessLine readiness={app.readiness} />}
                   </td>
                   <td className="px-4 py-3 text-xs text-idle">{fmtDateTime(app.updated_at)}</td>
                   <td className="px-4 py-3">

@@ -1,8 +1,11 @@
 """被监控应用注册表：把告警 service 映射到修复目标仓库与验证契约（热生效）。
 
-数据源：``data/monitored_apps.json``（与 BFF 控制台同一份清单；可用
-``AIOPS_MONITORED_APPS_PATH`` 覆盖，测试可指向临时文件）。
-**每次调用读盘**——控制台修改清单后，修复链路下一次执行即生效，无需重启 worker。
+数据源（``AIOPS_MODE`` 决定，与 BFF 控制台同一份清单）：
+
+- **demo**：``data/monitored_apps.json``（``AIOPS_MONITORED_APPS_PATH`` 可覆盖，测试可指向临时文件）；
+- **production**：MySQL ``monitored_apps`` 表（与 BFF 同库同表，控制台写入即被本端读到）。
+
+**每次调用读取**——控制台修改清单后，修复链路下一次执行即生效，无需重启 worker。
 
 未注册 / 未配置 repo / 目录不存在 → ``resolve()`` 返回 None，
 调用方回退既有 demo-app 行为（零行为变更）。
@@ -11,8 +14,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
+
+log = logging.getLogger("aiops.registry")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_MONITORED_APPS_PATH = BASE_DIR / "data" / "monitored_apps.json"
@@ -24,14 +30,44 @@ def monitored_apps_path() -> Path:
     return Path(override) if override else DEFAULT_MONITORED_APPS_PATH
 
 
-def load_apps() -> list[dict]:
-    """读取清单（缺文件/损坏/结构异常 → 空列表，调用方回退默认行为）。"""
+def _load_from_file() -> list[dict]:
+    """文件后端（demo）：缺文件/损坏/结构异常 → 空列表，调用方回退默认行为。"""
     try:
         payload = json.loads(monitored_apps_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
     items = payload if isinstance(payload, list) else []
     return [item for item in items if isinstance(item, dict)]
+
+
+def _load_from_db() -> list[dict]:
+    """数据库后端（production）：读 MySQL ``monitored_apps`` 表（BFF 写入的同一份清单）。
+
+    读库失败（连接/建表/缺列等）→ 空列表并告警，调用方回退默认行为，不阻断修复链路。
+    """
+    from sqlalchemy import select
+
+    from . import db as db_layer
+
+    try:
+        engine = db_layer.get_engine()
+        with engine.begin() as conn:
+            rows = conn.execute(
+                select(db_layer.monitored_apps).order_by(db_layer.monitored_apps.c.id)
+            ).mappings()
+            return [dict(row) for row in rows]
+    except Exception as exc:  # noqa: BLE001 - 数据库不可用不阻断修复链路
+        log.warning("[registry] 生产清单读取失败，回退默认行为: %s", exc)
+        return []
+
+
+def load_apps() -> list[dict]:
+    """读取清单（按模式分发；读取失败 → 空列表，调用方回退默认行为）。"""
+    from . import mode
+
+    if mode.is_production():
+        return _load_from_db()
+    return _load_from_file()
 
 
 def resolve(service: str) -> dict | None:

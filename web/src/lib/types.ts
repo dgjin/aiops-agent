@@ -265,6 +265,16 @@ export interface MonitoredAppWatcher {
   alert_id?: string | null
 }
 
+/** 接入就绪度（三态：null=未配置 / true=就绪 / false=未就绪）。 */
+export interface MonitoredAppReadiness {
+  /** 修复仓库：已配置且目录存在 */
+  repo_ok: boolean | null
+  /** 应用专属代码索引已存在（仓库变更时首次检索自动重建） */
+  index_ok: boolean | null
+  /** 可采集日志文件数（null=未配置；0=路径未命中） */
+  log_files: number | null
+}
+
 /** 被监控应用（控制台可维护；改动热生效，无需重启）。 */
 export interface MonitoredApp {
   id: string
@@ -275,6 +285,8 @@ export interface MonitoredApp {
   log_path: string
   /** 页面健康关键字（可选；空=仅连接级探测）：响应内容须包含该关键字才算在线 */
   probe_keyword: string
+  /** 健康检查路径（可选；空=根路径"/"）：Manifest 自动预填，探测/巡检按该路径校验关键字 */
+  health_path?: string
   /** 修复目标仓库路径（AIOps 修复引擎据此定位并生成补丁；空=不参与自动修复） */
   repo: string
   enabled: boolean
@@ -284,6 +296,26 @@ export interface MonitoredApp {
   probe: MonitoredAppProbe
   /** 主动巡检状态（连续失败计数 / 是否已自动触发修复流程） */
   watcher?: MonitoredAppWatcher | null
+  /** 接入就绪度（仓库 / 索引 / 日志三态；驱动运维排查提示） */
+  readiness?: MonitoredAppReadiness
+}
+
+/** 标准接口自动探测结果（Manifest v1.0：GET <url>/.well-known/aiops.json）。 */
+export interface DiscoverMonitoredAppResp extends Timed {
+  url: string
+  ok: boolean
+  error: string
+  errors: string[]
+  warnings: string[]
+  manifest: Record<string, unknown> | null
+  /** 成功时的建议预填值（控制台一键填表） */
+  suggested?: {
+    name: string | null
+    service: string | null
+    probe_keyword: string
+    health_path: string
+    log_path: string
+  }
 }
 
 /** 新增/编辑入参。 */
@@ -293,6 +325,7 @@ export interface MonitoredAppInput {
   service: string
   log_path?: string
   probe_keyword?: string
+  health_path?: string
   repo?: string
   enabled: boolean
   note?: string

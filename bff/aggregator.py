@@ -196,10 +196,18 @@ def _read_head(stream, limit: int = 65536) -> bytes:
         return b""
 
 
-def probe_monitored_app(url: str | None = None, timeout: float = 2.0, keyword: str = "") -> dict:
-    """探测**被监控应用**根地址的可用性（同步函数，调用方用 asyncio.to_thread 包装）。
+def probe_monitored_app(
+    url: str | None = None,
+    timeout: float = 2.0,
+    keyword: str = "",
+    health_path: str = "",
+) -> dict:
+    """探测**被监控应用**的可用性（同步函数，调用方用 asyncio.to_thread 包装）。
 
-    地址优先级：显式 url > 环境变量 AIOPS_MONITOR_URL > DEFAULT_MONITOR_URL。
+    地址优先级：显式 url > 环境变量 AIOPS_MONITOR_URL > DEFAULT_MONITOR_URL；
+    ``health_path``（来自清单，Manifest 自动预填）非空且非 ``/`` 时探测 ``url + health_path``
+    （如 ``/health``），否则探测根地址（旧语义不变）。
+
     与 probe_stable 的差异：被监控应用是外部系统，根路径通常返回 HTML，故**不解析 JSON**，
     只回报可达性、HTTP 状态码与延迟。
 
@@ -208,8 +216,12 @@ def probe_monitored_app(url: str | None = None, timeout: float = 2.0, keyword: s
 
     关键字校验（可选）：配置 keyword 时，响应内容须包含该关键字才算在线——
     覆盖「端口活着但页面白屏/异常」类故障（如前端挂载点被改坏：HTTP 200 但内容失效）。
+    Manifest 场景下关键字通常位于健康页（health_path），两者配合使用。
     """
     target = url or os.environ.get("AIOPS_MONITOR_URL") or DEFAULT_MONITOR_URL
+    path = (health_path or "").strip()
+    if path and path != "/":
+        target = target.rstrip("/") + "/" + path.lstrip("/")
     check = (keyword or "").strip()
     started = time.monotonic()
 

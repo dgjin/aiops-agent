@@ -7,7 +7,9 @@
     - validate_source：编译校验（对应验收「建议 diff 可编译」）；
     - locate_target_file：OrderService.java → order_service.py 模糊定位；
     - run_fix：LLM 正常路径（validated）/ 垃圾输出（degraded 兜底）/ 演示分支短路；
-    - activities 集成：test-fail 短路、RAG 检索降级与命中。
+    - activities 集成：test-fail 短路、RAG 检索降级与命中；
+    - 自动适配（WP-ADAPT）：检索索引自动解析（环境变量覆盖 > 专属索引 > 默认），
+      专属索引缺失/仓库变更时自动构建，构建失败不回退他仓索引。
 
 运行：
     .venv/bin/python -m unittest discover -s tests -t . -v
@@ -529,8 +531,13 @@ class TestActivitiesWP4(unittest.TestCase):
         self.assertEqual(root_cause.suspect_files, ["src/order/service.py"])
 
     def test_retrieve_degrades_when_index_missing(self) -> None:
-        with mock.patch("aiops_agent.code_rag.search_index", side_effect=FileNotFoundError("no index")):
-            refs = asyncio.run(activities.retrieve_similar_fixes(ROOT_CAUSE))
+        with (
+            mock.patch("aiops_agent.activities._resolve_app", return_value=None),
+            mock.patch(
+                "aiops_agent.code_rag.search_index", side_effect=FileNotFoundError("no index")
+            ),
+        ):
+            refs = asyncio.run(activities.retrieve_similar_fixes(ALERT_REAL, ROOT_CAUSE))
         self.assertEqual(refs, [])
 
     def test_retrieve_returns_hits(self) -> None:
@@ -545,9 +552,146 @@ class TestActivitiesWP4(unittest.TestCase):
                 "similarity": 0.84,
             }
         ]
-        with mock.patch("aiops_agent.code_rag.search_index", return_value=hits):
-            refs = asyncio.run(activities.retrieve_similar_fixes(ROOT_CAUSE))
+        with (
+            mock.patch("aiops_agent.activities._resolve_app", return_value=None),
+            mock.patch("aiops_agent.code_rag.search_index", return_value=hits),
+        ):
+            refs = asyncio.run(activities.retrieve_similar_fixes(ALERT_REAL, ROOT_CAUSE))
         self.assertEqual(refs, hits)
+
+
+class TestRetrieveIndexAutoAdapt(unittest.TestCase):
+    """自动适配（WP-ADAPT）：控制台登记应用后，检索索引自动解析 / 自动构建，无需人工干预。"""
+
+    def _alert(self, service: str = "svc-auto") -> Alert:
+        return Alert(alert_id="adapt-1", service=service, description="错误突增")
+
+    def test_registered_app_uses_dedicated_index(self) -> None:
+        """已注册应用 → 检索指向专属索引，且先触发「确保索引」（缺失自动构建）。"""
+        entry = {"name": "A", "repo": Path("/tmp/repo-a"), "url": "", "contract": None}
+        index_path = code_rag.app_index_path("svc-auto")
+        hit = {
+            "kind": "ticket",
+            "file": "data/historical_tickets.json",
+            "qualname": "INC-2026-0101",
+            "start_line": 0,
+            "end_line": 0,
+            "snippet": "NullPointerException …",
+            "similarity": 0.84,
+        }
+        with (
+            mock.patch("aiops_agent.activities._resolve_app", return_value=entry),
+            mock.patch("aiops_agent.activities._ensure_app_index") as ensure,
+            mock.patch("aiops_agent.code_rag.search_index", return_value=[hit]) as search,
+        ):
+            refs = asyncio.run(activities.retrieve_similar_fixes(self._alert(), ROOT_CAUSE))
+        ensure.assert_called_once_with("svc-auto", entry["repo"], index_path)
+        self.assertEqual(search.call_args.kwargs["index_path"], index_path)
+        self.assertEqual(refs, [hit])
+
+    def test_env_override_does_not_hijack_registered_app(self) -> None:
+        """环境变量指向他仓索引时，注册应用仍用专属索引（全局变量不得误导其他仓库）。"""
+        entry = {"name": "A", "repo": Path("/tmp/repo-a"), "url": "", "contract": None}
+        index_path = code_rag.app_index_path("svc-auto")
+        with (
+            mock.patch.dict(os.environ, {"AIOPS_CODE_INDEX": "/tmp/other-app.json"}),
+            mock.patch("aiops_agent.activities._resolve_app", return_value=entry),
+            mock.patch("aiops_agent.activities._ensure_app_index"),
+            mock.patch("aiops_agent.code_rag.search_index", return_value=[]) as search,
+        ):
+            asyncio.run(activities.retrieve_similar_fixes(self._alert(), ROOT_CAUSE))
+        self.assertEqual(search.call_args.kwargs["index_path"], index_path)
+
+    def test_unregistered_app_defers_to_env_or_default(self) -> None:
+        """未注册服务 → index_path 传 None，由 search_index 回落「环境变量 > 默认索引」。"""
+        with (
+            mock.patch("aiops_agent.activities._resolve_app", return_value=None),
+            mock.patch("aiops_agent.code_rag.search_index", return_value=[]) as search,
+        ):
+            asyncio.run(activities.retrieve_similar_fixes(self._alert(), ROOT_CAUSE))
+        self.assertIsNone(search.call_args.kwargs["index_path"])
+
+    def test_build_failure_returns_empty_without_cross_repo_fallback(self) -> None:
+        """专属索引构建失败 → 空引用，**绝不回退他仓索引**（错误仓库引用会误导修复）。"""
+        entry = {"name": "A", "repo": Path("/tmp/repo-a"), "url": "", "contract": None}
+        with (
+            mock.patch("aiops_agent.activities._resolve_app", return_value=entry),
+            mock.patch(
+                "aiops_agent.activities._ensure_app_index", side_effect=RuntimeError("boom")
+            ),
+            mock.patch("aiops_agent.code_rag.search_index") as search,
+        ):
+            refs = asyncio.run(activities.retrieve_similar_fixes(self._alert(), ROOT_CAUSE))
+        self.assertEqual(refs, [])
+        search.assert_not_called()
+
+    def test_ensure_app_index_builds_once_and_reuses(self) -> None:
+        """索引缺失 → 构建一次；再次调用 fast-path 复用（不重复建库）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            index_path = Path(tmp) / "idx.json"
+
+            def fake_build(repo_dir, index_path, model=None, tickets_path=None):
+                Path(index_path).write_text(
+                    json.dumps({"repo": str(repo_dir), "chunks": []}), encoding="utf-8"
+                )
+                return {
+                    "files": 1,
+                    "chunks": 0,
+                    "tickets": 0,
+                    "dim": 2,
+                    "model": "m",
+                    "backend": "python",
+                    "index": str(index_path),
+                    "faiss_index": "",
+                }
+
+            with mock.patch("aiops_agent.code_rag.build_index", side_effect=fake_build) as build:
+                activities._ensure_app_index("svc-auto", repo, index_path)
+                activities._ensure_app_index("svc-auto", repo, index_path)  # fast-path 复用
+                self.assertEqual(build.call_count, 1)
+
+    def test_ensure_app_index_rebuilds_on_repo_change(self) -> None:
+        """索引存在但登记的仓库已变更 → 自动重建（避免用错仓库的引用）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_a = Path(tmp) / "a"
+            repo_b = Path(tmp) / "b"
+            repo_a.mkdir()
+            repo_b.mkdir()
+            index_path = Path(tmp) / "idx.json"
+            index_path.write_text(
+                json.dumps({"repo": str(repo_a), "chunks": []}), encoding="utf-8"
+            )
+
+            def fake_build(repo_dir, index_path, model=None, tickets_path=None):
+                Path(index_path).write_text(
+                    json.dumps({"repo": str(repo_dir), "chunks": []}), encoding="utf-8"
+                )
+                return {
+                    "files": 1,
+                    "chunks": 0,
+                    "tickets": 0,
+                    "dim": 2,
+                    "model": "m",
+                    "backend": "python",
+                    "index": str(index_path),
+                    "faiss_index": "",
+                }
+
+            with mock.patch("aiops_agent.code_rag.build_index", side_effect=fake_build) as build:
+                activities._ensure_app_index("svc-auto", repo_a, index_path)  # 一致 → 复用
+                build.assert_not_called()
+                activities._ensure_app_index("svc-auto", repo_b, index_path)  # 变更 → 重建
+                self.assertEqual(build.call_count, 1)
+                self.assertEqual(activities._index_repo_of(index_path), str(repo_b))
+
+    def test_index_repo_of_tolerates_missing_and_garbage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(activities._index_repo_of(Path(tmp) / "nope.json"), "")
+            garbage = Path(tmp) / "garbage.json"
+            garbage.write_text('{"chunks": [', encoding="utf-8")
+            self.assertEqual(activities._index_repo_of(garbage), "")
 
 
 if __name__ == "__main__":

@@ -94,6 +94,12 @@ monitored_apps = Table(
     # 页面健康关键字（可选，空=仅连接级探测）：响应内容须包含该关键字才算在线；
     # 旧生产库升级需迁移：ALTER TABLE monitored_apps ADD COLUMN probe_keyword VARCHAR(256) NOT NULL DEFAULT '';
     Column("probe_keyword", String(256), nullable=False, server_default=""),
+    # 健康检查路径（可选，空=根路径 "/"）：Manifest 自动预填；探测/巡检按该路径校验关键字
+    # 旧生产库升级需迁移：ALTER TABLE monitored_apps ADD COLUMN health_path VARCHAR(512) NOT NULL DEFAULT '';
+    Column("health_path", String(512), nullable=False, server_default=""),
+    # 修复目标仓库路径（可选，空=不参与自动修复）；AIOps 修复引擎据此定位并生成补丁。
+    # 旧生产库升级需迁移：ALTER TABLE monitored_apps ADD COLUMN repo VARCHAR(1024) NOT NULL DEFAULT '';
+    Column("repo", String(1024), nullable=False, server_default=""),
     Column("enabled", Boolean, nullable=False, server_default=text("1")),
     # 注意：MySQL 8 严格模式下 TEXT 列不允许 DEFAULT（''）——不设 server_default，
     # 由写入路径显式提供空串（bff/monitored_apps.py 的 _insert_apps 恒赋值）

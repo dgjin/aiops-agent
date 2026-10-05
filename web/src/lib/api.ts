@@ -5,6 +5,7 @@ import type {
   AuditResp,
   AuditSummaryResp,
   AuthStatusResp,
+  DiscoverMonitoredAppResp,
   FlowsResp,
   FlowDetailResp,
   HealthResp,
@@ -221,6 +222,16 @@ export const api = {
 
   // 被监控应用维护（写盘即热生效）
   monitoredApps: () => request<MonitoredAppsResp>('/api/monitored-apps'),
+  /**
+   * 标准接口自动探测：GET <url>/.well-known/aiops.json（AIOps Manifest v1.0）。
+   * 成功返回 suggested 预填值（免人工翻代码找日志路径 / 健康关键字）；
+   * 失败是常态（未接入标准接口的应用），由调用方提示可手动填写。
+   */
+  discoverMonitoredApp: (url: string) =>
+    request<DiscoverMonitoredAppResp>('/api/monitored-apps/discover', {
+      method: 'POST',
+      body: JSON.stringify({ url }),
+    }),
   createMonitoredApp: (body: MonitoredAppInput) =>
     request<MonitoredAppWriteResp>('/api/monitored-apps', {
       method: 'POST',

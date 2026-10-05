@@ -423,6 +423,31 @@ class MonitoredAppProbeTest(unittest.TestCase):
         self.assertEqual(result["status_code"], 200)
         self.assertIn("关键字", result["error"])
 
+    def test_health_path_appended_to_target(self):
+        """Manifest 预填的健康路径拼接到探测地址（关键字在健康页上校验）。"""
+        with mock.patch("bff.aggregator.urllib.request.urlopen") as urlopen:
+            resp = mock.MagicMock()
+            resp.status = 200
+            resp.read.return_value = b'{"status": "ok"}'
+            resp.__enter__.return_value = resp
+            urlopen.return_value = resp
+            result = aggregator.probe_monitored_app(
+                "http://x:8000/", keyword='"status": "ok"', health_path="/health"
+            )
+        self.assertTrue(result["running"])
+        self.assertEqual(result["target"], "http://x:8000/health")
+        self.assertEqual(urlopen.call_args.args[0], "http://x:8000/health")
+
+    def test_health_path_root_keeps_original_target(self):
+        """health_path 为空或 "/" 时探测根地址（旧语义不变）。"""
+        with mock.patch("bff.aggregator.urllib.request.urlopen") as urlopen:
+            resp = mock.MagicMock()
+            resp.status = 200
+            resp.__enter__.return_value = resp
+            urlopen.return_value = resp
+            result = aggregator.probe_monitored_app("http://x/", health_path="/")
+        self.assertEqual(result["target"], "http://x/")
+
     def test_unreachable_reports_error(self):
         with mock.patch("bff.aggregator.urllib.request.urlopen",
                         side_effect=ConnectionRefusedError("connection refused")):

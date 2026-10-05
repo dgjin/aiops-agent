@@ -53,6 +53,17 @@ INDEX_PATH = DATA_DIR / "code_index.json"
 TICKETS_PATH = DATA_DIR / "historical_tickets.json"
 
 
+def app_index_path(service: str) -> Path:
+    """被监控应用专属索引路径约定：``data/code_index_<service>.json``。
+
+    控制台登记应用的修复仓库（repo）后，修复检索自动指向该索引；缺失（或登记的
+    仓库已变更）时由活动在首次检索前自动构建——无需人工执行 index_codebase.py
+    或 export AIOPS_CODE_INDEX（该环境变量仍对**未注册服务**生效，见 search_index 回落链）。
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", (service or "").strip().lower()).strip("-")
+    return DATA_DIR / f"code_index_{slug or 'app'}.json"
+
+
 def chunk_python_source(source: str, file_path: str) -> list[dict]:
     """AST 语义切块：顶层函数与类方法各成一块（附行号区间），模块级赋值不入库。
 

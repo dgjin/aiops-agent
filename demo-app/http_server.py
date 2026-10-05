@@ -2,6 +2,7 @@
 
 端点：
     GET  /health   健康检查（版本 / 金丝雀模式）
+    GET  /.well-known/aiops.json   AIOps 标准接口（Manifest v1.0，控制台自动探测接入）
     POST /order    提交订单（OrderService.submit，请求体 JSON）
 
 故障注入（模拟新版缺陷的金丝雀劣化）：
@@ -25,6 +26,17 @@ BAD_CANARY = os.environ.get("BAD_CANARY") == "1"
 APP_VERSION = os.environ.get("APP_VERSION", "v0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
 
+# AIOps 标准接口（Manifest v1.0）：控制台「从标准接口自动探测」据此预填接入配置。
+# probe_keyword 与 /health 响应体一致（json.dumps 默认 "key": "value" 带空格格式）。
+MANIFEST = {
+    "spec_version": "1.0",
+    "service": "order",
+    "name": "demo-app 订单服务",
+    "probe_keyword": '"status": "ok"',
+    "health_path": "/health",
+    "protected_paths": ["auth/**"],
+}
+
 service = OrderService(CouponClient(), OrderRepository())
 
 
@@ -42,6 +54,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - http.server 约定命名
         if self.path == "/health":
             self._send(200, {"status": "ok", "version": APP_VERSION, "canary_bad": BAD_CANARY})
+        elif self.path == "/.well-known/aiops.json":
+            self._send(200, MANIFEST)
         else:
             self._send(404, {"error": "not found"})
 

@@ -1,15 +1,21 @@
-"""被监控应用域：/api/monitored-apps*（清单 CRUD / 导入导出 / 批量 / 回滚）。
+"""被监控应用域：/api/monitored-apps*（清单 CRUD / 导入导出 / 批量 / 回滚 / 标准接口探测）。
 
 清单**每次读盘**（monitored_apps.list_all），因此控制台的增删改无需重启 BFF 即生效；
 写盘即热生效，全部写操作落操作审计（配置类：wf_id 留空 + target 记录对象）。
+每条附「接入就绪度」（仓库 / 索引 / 日志三态）与「标准接口自动探测」（“从标准接口自动探测”），
+支撑「前台添加后配置 → 各链路自动适配」。
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
+
+from aiops_agent import app_manifest, code_rag
 
 from .. import aggregator, audit
 from .. import monitored_apps as store
@@ -26,6 +32,8 @@ class MonitoredAppBody(BaseModel):
     log_path: str = Field(default="", max_length=512)
     # 页面健康关键字（可选；空=仅连接级探测）：响应内容须包含该关键字才算在线
     probe_keyword: str = Field(default="", max_length=256)
+    # 健康检查路径（可选；空=根路径"/"）：Manifest 自动预填，探测/巡检按该路径校验关键字
+    health_path: str = Field(default="", max_length=512)
     # 修复目标仓库路径（AIOps 修复引擎据此定位并生成补丁）；None=请求未携带该字段时保留原值，防漏字段清空
     repo: str | None = Field(default=None, max_length=1024)
     enabled: bool = True
@@ -34,6 +42,40 @@ class MonitoredAppBody(BaseModel):
 
 def _monitor_error_code(message: str) -> int:
     return 404 if message.startswith("未找到") else 400
+
+
+_GLOB_CHARS = re.compile(r"[*?\[]")
+
+
+def _log_files_state(log_path: str) -> int | None:
+    """日志路径就绪度：None=未配置；否则为当前可采集文件数（与采集器同口径：expanduser + 通配）。"""
+    raw = (log_path or "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not _GLOB_CHARS.search(path.name):
+        return 1 if path.is_file() else 0
+    return sum(1 for item in path.parent.glob(path.name) if item.is_file())
+
+
+def _readiness(app: dict) -> dict:
+    """应用接入就绪度三态：None=未配置 / True=就绪 / False=未就绪。
+
+    - ``repo_ok``：配置了修复仓库且目录存在；
+    - ``index_ok``：专属索引已存在（仓库变更时首次检索会自动重建，此处仅展示现状）；
+      未配置仓库 → None（不使用应用专属索引，走默认索引）；
+    - ``log_files``：可采集日志文件数（未配置 → None；0 = 路径未命中须排查）。
+    """
+    repo_raw = str(app.get("repo") or "").strip()
+    repo_ok = Path(repo_raw).expanduser().is_dir() if repo_raw else None
+    index_ok = (
+        code_rag.app_index_path(str(app.get("service") or "")).is_file() if repo_ok else None
+    )
+    return {
+        "repo_ok": repo_ok,
+        "index_ok": index_ok,
+        "log_files": _log_files_state(str(app.get("log_path") or "")),
+    }
 
 
 async def apps_with_probe() -> list[dict]:
@@ -52,6 +94,7 @@ async def apps_with_probe() -> list[dict]:
                     aggregator.probe_monitored_app,
                     app.get("url"),
                     keyword=app.get("probe_keyword") or "",
+                    health_path=app.get("health_path") or "",
                 )
                 for app in enabled
             ]
@@ -67,6 +110,7 @@ async def apps_with_probe() -> list[dict]:
             "probe": probed.get(app["id"])
             or {"running": False, "target": app.get("url"), "error": "已停用（未探测）"},
             "watcher": watchers.get(app["id"]),
+            "readiness": _readiness(app),
         }
         for app in apps
     ]
@@ -74,8 +118,37 @@ async def apps_with_probe() -> list[dict]:
 
 @router.get("/api/monitored-apps")
 async def api_monitored_apps() -> dict:
-    """清单 + 实时探测（控制台管理页数据源）。"""
+    """清单 + 实时探测 + 接入就绪度（控制台管理页数据源）。"""
     return ok({"items": await apps_with_probe()})
+
+
+class DiscoverBody(BaseModel):
+    url: str = Field(min_length=1, max_length=512)
+
+
+@router.post("/api/monitored-apps/discover")
+async def api_monitored_apps_discover(body: DiscoverBody) -> dict:
+    """标准接口自动探测：GET ``<url>/.well-known/aiops.json``（AIOps Manifest v1.0）。
+
+    成功时返回 ``manifest`` 原文与 ``suggested`` 预填值（控制台一键填表，
+    免人工翻代码找日志路径 / 健康关键字）；失败是常态（未接入标准接口的应用），
+    返回 ``ok=False`` 与原因。只读探测，不写审计。
+    """
+    try:
+        url = store._normalize_url(body.url)
+    except store.MonitorStoreError as exc:
+        raise ApiError(400, str(exc)) from exc
+    result = await asyncio.to_thread(app_manifest.fetch_manifest, url)
+    manifest = result.get("manifest") or {}
+    if result.get("ok"):
+        result["suggested"] = {
+            "name": (manifest.get("name") or "").strip() or None,
+            "service": (manifest.get("service") or "").strip() or None,
+            "probe_keyword": manifest.get("probe_keyword") or "",
+            "health_path": manifest.get("health_path") or "",
+            "log_path": manifest.get("log_path") or "",
+        }
+    return ok(result)
 
 
 @router.post("/api/monitored-apps")
@@ -138,7 +211,7 @@ async def api_monitored_app_delete(request: Request, app_id: str) -> dict:
         params={
             "removed": {
                 k: removed.get(k)
-                for k in ("name", "url", "service", "log_path", "probe_keyword", "repo", "enabled")
+                for k in ("name", "url", "service", "log_path", "probe_keyword", "health_path", "repo", "enabled")
             }
         },
     )
@@ -165,7 +238,7 @@ async def api_monitored_apps_export() -> dict:
     items = [
         {
             key: app.get(key)
-            for key in ("name", "url", "service", "log_path", "probe_keyword", "repo", "enabled", "note")
+            for key in ("name", "url", "service", "log_path", "probe_keyword", "health_path", "repo", "enabled", "note")
         }
         for app in store.list_all()
     ]

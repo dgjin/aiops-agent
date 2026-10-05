@@ -33,6 +33,9 @@ _CANARY_ACTIVITY_TIMEOUT = timedelta(seconds=600)
 # 这样超时会在活动内部触发优雅降级（QoderFixError → 兜底补丁），而不是被 Temporal 取消
 # ——被取消会一路冒泡为活动失败并触发重试，最终无法降级。
 _FIX_ACTIVITY_TIMEOUT = timedelta(seconds=300)
+# RAG 检索活动：首次接入的应用在检索前会自动构建专属索引（嵌入批量请求，分钟级），
+# 单独放宽；构建在独立线程内完成且不随活动取消，超时重试时命中已完成索引。
+_RAG_ACTIVITY_TIMEOUT = timedelta(seconds=300)
 _RETRY_POLICY = RetryPolicy(
     maximum_attempts=3,
     initial_interval=timedelta(seconds=1),
@@ -151,7 +154,9 @@ class AIOpsFixWorkflow:
             return self._final(alert, root_cause, None, None, started)
 
         # ---------- FIXING / TESTING：补丁生成 + 沙箱验证（回炉限次） ----------
-        references = await self._call(activities.retrieve_similar_fixes, root_cause)
+        references = await self._call(
+            activities.retrieve_similar_fixes, alert, root_cause, timeout=_RAG_ACTIVITY_TIMEOUT
+        )
         patch: Patch | None = None
         test_report: TestReport | None = None
         max_retries = triage_cfg["max_fix_retries"]

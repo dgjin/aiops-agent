@@ -132,13 +132,16 @@ cd aiops-agent
   > 排查 401 时：先 `GET /api/auth/tokens` 看清单与状态；若刚做过删除重置，请改用 `.env` / `.env.example` 里记载的播种令牌。
   >
   > **注意**：`/api/auth/tokens` 返回的 `id` 是令牌的 **sha256 指纹（前 8 位）**，只用来区分不同令牌，**不是令牌、不能填进「访问令牌」**（填指纹必然 401「凭证无效或已过期」）。要在关闭回显时取真令牌，只能读 `data/console_tokens.json` 里对应记录的 `token` 字段。
-- **被监控应用**：`AIOPS_MONITOR_URL`（默认 `http://localhost:3000/`）。控制台「系统状态 → 被监控应用」会探测该地址并展示可达性/状态码/延迟（能收到任何 HTTP 响应即视为在线；条目可选配「页面关键字」，配置后响应内容须包含该关键字才算在线——可发现「端口活着但页面白屏」类故障）。
+- **被监控应用**：`AIOPS_MONITOR_URL`（默认 `http://localhost:3000/`）。控制台「系统状态 → 被监控应用」会探测该地址并展示可达性/状态码/延迟（能收到任何 HTTP 响应即视为在线；条目可选配「页面关键字」，配置后响应内容须包含该关键字才算在线——可发现「端口活着但页面白屏」类故障）。应用部署 AIOps 标准接口（Manifest v1.0）后，新增条目可「从标准接口探测」自动预填接入配置（含健康检查路径 `health_path`，探测/巡检按该路径发起关键字校验）。
 
 ### 接入被监控应用（日志 + 代码索引）
 
-把真实应用（如 `智能问数据分析系统` / `nl2sql`）纳入监控与修复链路：
+把真实应用（如 `智能问数据分析系统` / `nl2sql`）纳入监控与修复链路。**推荐路径：标准接口自动适配** —— 应用部署 [AIOps 标准接口（Manifest v1.0）](../AIOps%20被监控系统标准接口改造方案.md)（`GET /.well-known/aiops.json`）后，控制台「被监控应用 → 新增 → 从标准接口探测」一键预填（名称 / service / 健康关键字 / 健康路径 / 日志路径）；保存后探测、巡检、日志采集、突增检测、修复解析各链路**热生效**，代码索引在首次修复检索时**自动构建**——无需手工建索引、export 环境变量或重启进程。改造方案、字段规范与验收清单一文交底：**《AIOps 被监控系统标准接口改造方案》**（工作区根目录）。
 
 ```bash
+# 0. 接入前体检：校验应用的 Manifest / 健康页 / 关键字（--extended 再查指标与日志文件）
+.venv/bin/python check_aiops_interface.py --url http://localhost:3000 --extended
+
 # 1. 日志接入 AIOps Loki（扮演 Filebeat 角色；增量位点记录在 data/log_ship_positions.json）
 #    推荐：清单模式 —— 采集目标来自控制台「被监控应用」清单，每轮重读 → 改动热生效
 .venv/bin/python ship_app_logs.py --from-start --once   # 首次全量
@@ -152,14 +155,9 @@ cd aiops-agent
 .venv/bin/python log_surge_detector.py --once           # 单轮（调试/验证）
 .venv/bin/python log_surge_detector.py                  # 守护运行（默认 15s 间隔）
 
-# 3. 为目标应用建代码索引（TS/JS 与 Python 均可）
-.venv/bin/python index_codebase.py \
-    --repo "/Users/dgjin/dgjinapp/智能问数据分析系统" \
-    --index data/code_index_nl2sql.json \
-    --tickets data/tickets_nl2sql.json          # 不存在的工单路径 → 排除演示工单
-
-# 4. 让检索指向该索引（worker 进程生效）
-export AIOPS_CODE_INDEX=data/code_index_nl2sql.json
+# 3. 代码索引：无需人工步骤 —— 在控制台为该应用登记「修复仓库路径」（repo）后，
+#    首次修复检索自动构建 data/code_index_<service>.json（仓库变更自动重建）；
+#    兼容项 AIOPS_CODE_INDEX 仅对「未注册到清单」的 service 生效。
 ```
 
 采集器会规范化应用日志：JSON 行取 `level`、把 `requestId` 注入为 `trace_id=<id>`、正文带 `module` 前缀；非 JSON 行按正则识别级别。因此既有 `logs.query_lines()`、Drain3 聚类与突增检测**无需改动**即可工作。

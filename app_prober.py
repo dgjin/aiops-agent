@@ -1,8 +1,9 @@
 """被监控应用可用性巡检（控制塔主动巡检）：探测 → 连续失败 → 注入标准告警 → 自动修复流程。
 
 巡检逻辑（每 interval 秒一轮，对 monitored_apps 清单中 enabled 的每一项）：
-    探测根地址（判定与控制台实时探测一致：收到任何 HTTP 响应即在线的；连接失败/超时才不可达；
-    配置了页面关键字的条目还要求响应内容包含该关键字，否则同样判失败——覆盖「端口活着但页面白屏」）
+    探测 清单 URL + health_path（Manifest 预填，默认根地址）；判定与控制台实时探测一致：
+    收到任何 HTTP 响应即在线的；连接失败/超时才不可达；配置了页面关键字的条目还要求响应内容
+    包含该关键字，否则同样判失败——覆盖「端口活着但页面白屏」）
     - 连续失败达到 threshold 次 → 向 Alertmanager 注入标准告警：
         POST <alertmanager>/api/v2/alerts
         labels: {alertname: AppUnreachable, severity: critical, service: <svc>,
@@ -152,9 +153,15 @@ def run_round(
         _resolve_pending(state.pop(stale_id), alertmanager)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        # keyword 透传（未配置为空串 → 纯连接级探测，与旧行为一致）
+        # keyword / health_path 透传（未配置为空串 → 纯连接级探测、根路径，与旧行为一致）
         results = [
-            pool.submit(probe_fn, app.get("url"), timeout=timeout, keyword=str(app.get("probe_keyword") or ""))
+            pool.submit(
+                probe_fn,
+                app.get("url"),
+                timeout=timeout,
+                keyword=str(app.get("probe_keyword") or ""),
+                health_path=str(app.get("health_path") or ""),
+            )
             for app in apps
         ]
         probes = [future.result() for future in results]
@@ -264,13 +271,18 @@ def main() -> None:
     )
     try:
         while True:
-            run_round(
-                state,
-                timeout=args.timeout,
-                threshold=args.failures,
-                alertmanager=args.alertmanager,
-            )
-            write_status(Path(args.status_file), state)
+            try:
+                run_round(
+                    state,
+                    timeout=args.timeout,
+                    threshold=args.failures,
+                    alertmanager=args.alertmanager,
+                )
+                write_status(Path(args.status_file), state)
+            except Exception as exc:  # noqa: BLE001 - 单轮故障（如存储层瞬断）不中断守护循环
+                if args.once:
+                    raise  # 调试模式保留异常传播，非零退出码可被脚本感知
+                logger.warning("本轮巡检失败（%s: %s），%ds 后重试", type(exc).__name__, exc, args.interval)
             if args.once:
                 break
             time.sleep(args.interval)
