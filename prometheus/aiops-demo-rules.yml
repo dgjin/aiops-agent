@@ -3,14 +3,15 @@
 #   - 本文件为「可自动修复」类告警的规则样例，统一携带 aiops_demo="true" 标签；
 #     nl2sql-monitoring 栈的 Alertmanager 已配置子路由将携带该标签的告警转发至
 #     AIOps 告警接入服务（aiops-agent/alert_webhook.py:8099，见 deploy/alertmanager.yml 接入点注释）；
-#   - 默认不挂载（不改动「智能问数据分析系统」栈的现有配置）。接入 / 演示时：
-#       1. 复制本文件到该栈 deploy/ 目录；
-#       2. 在 deploy/prometheus.yml 的 rule_files 下追加一行： - /etc/prometheus/aiops-demo-rules.yml
-#       3. 在 docker-compose.monitoring.yml 的 prometheus.volumes 追加：
-#          - ./deploy/aiops-demo-rules.yml:/etc/prometheus/aiops-demo-rules.yml:ro
-#       4. docker compose -f docker-compose.monitoring.yml up -d prometheus
-#   - 语法校验（零挂载）：docker cp 本文件到 prometheus 容器后执行
-#       docker exec nl2sql-monitoring-prometheus-1 promtool check rules /tmp/<文件名>
+#   - 接入状态（2026-10-04）：已挂载至「智能问数据分析系统」监控栈并生效——
+#     副本位于该栈 deploy/aiops-demo-rules.yml，deploy/prometheus.yml 的 rule_files 与
+#     docker-compose.monitoring.yml 的 prometheus.volumes 均已配置；
+#     同栈 deploy/prometheus-alerts.yml 的 10 条业务规则已同步加 aiops_demo="true" 标签；
+#     两类告警均经 Alertmanager 子路由直达告警接入服务（8099 → Temporal 自动流程）。
+#   - 新环境接入步骤（此前未挂载时）：复制本文件到该栈 deploy/ 目录；在 prometheus.yml
+#     rule_files 追加 - /etc/prometheus/aiops-demo-rules.yml；在 docker-compose.monitoring.yml
+#     prometheus.volumes 追加同名挂载；docker-compose -f docker-compose.monitoring.yml up -d prometheus。
+#   - 语法校验：docker exec nl2sql-monitoring-prometheus-1 promtool check rules /etc/prometheus/aiops-demo-rules.yml
 #
 # 规则设计对齐实施计划 WP1：阈值 + 环比基线；分组与抑制沿用该栈既有配置
 # （route.group_by: [alertname, service] + inhibit_rules 防告警风暴）。
