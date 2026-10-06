@@ -1,7 +1,7 @@
 /** 应用外壳：侧栏（可收缩）+ 顶栏（帮助 / 外观 / 用户菜单）+ 全局横幅 + 路由出口。
  *
  * - 侧栏收缩状态持久化于 localStorage（'aiops.sidebar'），w-56 ↔ w-16；
- *   收缩开关位于顶栏左侧（纯图标按钮，收起/展开二态），不占用侧栏底部；
+ *   收缩开关位于侧栏内（展开态在 logo 行右侧，收起态在 logo 下方居中）；
  * - 全局横幅（登录失效 / 令牌轮换 / kill switch / 降级）由原 App.tsx 迁入；
  * - 「用户管理」导航仅管理员可见（服务端同样强制 admin，前端只是不展示入口）；
  * - 快捷键：? 打开帮助中心（输入框内不触发）。
@@ -298,15 +298,39 @@ export function AppShell() {
         <div
           className={cn(
             'flex h-14 shrink-0 items-center border-b border-line',
-            collapsed ? 'justify-center px-2' : 'px-4',
+            collapsed ? 'justify-center px-2' : 'justify-between px-4',
           )}
         >
           {collapsed ? (
             <Logo size={26} className="text-ink" />
           ) : (
-            <BrandLockup subtitle="自动运维智能体" />
+            <>
+              <BrandLockup subtitle="自动运维智能体" />
+              <button
+                type="button"
+                onClick={toggleSidebar}
+                title="收起侧栏"
+                aria-label="收起侧栏"
+                className="rounded-lg p-1.5 text-muted transition-colors hover:bg-elevated hover:text-accent"
+              >
+                <PanelLeftClose size={16} strokeWidth={1.8} />
+              </button>
+            </>
           )}
         </div>
+        {collapsed && (
+          <div className="flex shrink-0 justify-center pt-2">
+            <button
+              type="button"
+              onClick={toggleSidebar}
+              title="展开侧栏"
+              aria-label="展开侧栏"
+              className="rounded-lg p-1.5 text-muted transition-colors hover:bg-elevated hover:text-accent"
+            >
+              <PanelLeftOpen size={16} strokeWidth={1.8} />
+            </button>
+          </div>
+        )}
         <nav className={cn('flex-1 space-y-1 overflow-y-auto py-3', collapsed ? 'px-2' : 'px-3')}>
           {items.map((item) => {
             const count = item.badgeKey ? (overview?.counts[item.badgeKey] ?? 0) : 0
@@ -357,19 +381,6 @@ export function AppShell() {
       <div className={cn('min-h-full transition-[margin] duration-200', collapsed ? 'ml-16' : 'ml-56')}>
         <header className="topbar-glow sticky top-0 z-30 flex h-12 items-center justify-between gap-3 border-b border-line bg-panel/95 px-6 backdrop-blur">
           <div className="flex min-w-0 items-center gap-1.5">
-            <button
-              type="button"
-              onClick={toggleSidebar}
-              title={collapsed ? '展开侧栏' : '收起侧栏'}
-              aria-label={collapsed ? '展开侧栏' : '收起侧栏'}
-              className="-ml-1.5 rounded-lg p-2 text-muted transition-colors hover:bg-elevated hover:text-accent"
-            >
-              {collapsed ? (
-                <PanelLeftOpen size={16} strokeWidth={1.8} />
-              ) : (
-                <PanelLeftClose size={16} strokeWidth={1.8} />
-              )}
-            </button>
             <div className="truncate text-sm text-muted">{current?.label ?? ''}</div>
           </div>
           <div className="flex items-center gap-1">

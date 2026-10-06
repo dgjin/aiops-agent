@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "AIOps 自动运维智能体技术架构",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "aiops-architecture.html",
+    "views": [
+      {
+        "id": "main-path",
+        "label": "主链路：告警到发布",
+        "focus": ["alerts", "webhook", "temporal", "triage", "fix", "sandbox", "gates", "release"],
+        "note": "从告警接入到金丝雀发布的修复主链路，每环均有真实执行器。"
+      },
+      {
+        "id": "safety",
+        "label": "安全与闸门",
+        "focus": ["webhook", "triage", "sandbox", "gates"],
+        "note": "接入鉴权、置信度闸门、沙箱隔离与审批 / 公告闸门。"
+      },
+      {
+        "id": "console",
+        "label": "控制面与运营",
+        "focus": ["web", "bff", "temporal", "store"],
+        "note": "运维控制台经 BFF 读写流程状态、推送审批信号并持久化审计。"
+      }
+    ]
+  },
+  "components": [
+    { "id": "alerts", "type": "external", "label": "告警源", "sublabel": "Alertmanager / 日志突增 / 可用性巡检", "pos": [40, 20], "size": [140, 64] },
+    { "id": "webhook", "type": "backend", "label": "Webhook 接入", "sublabel": "Bearer/HMAC · 限速 · 幂等", "pos": [40, 140], "size": [140, 64] },
+    { "id": "temporal", "type": "backend", "label": "Temporal 编排", "sublabel": "AIOpsFixWorkflow · 信号 / 定时器", "pos": [260, 140], "size": [140, 64] },
+    { "id": "triage", "type": "backend", "label": "智能根因分析", "sublabel": "Drain3 聚类 · LLM triage · 变更关联", "pos": [490, 140], "size": [140, 64] },
+    { "id": "fix", "type": "backend", "label": "修复生成", "sublabel": "Code RAG（FAISS）· 最小 diff", "pos": [730, 140], "size": [140, 64] },
+    { "id": "sandbox", "type": "security", "label": "Docker 沙箱验证", "sublabel": "无网络强隔离 · 单测 + Bandit", "pos": [730, 244], "size": [140, 64] },
+    { "id": "gates", "type": "security", "label": "审批与发布闸门", "sublabel": "IM 审批 · 二级审批 · 公告倒计时", "pos": [490, 244], "size": [140, 64] },
+    { "id": "release", "type": "backend", "label": "金丝雀发布", "sublabel": "ArgoCD · 自动回滚", "pos": [260, 244], "size": [140, 64] },
+    { "id": "web", "type": "frontend", "label": "Web 控制台", "sublabel": "流程 · 审批 · 度量 · 待办", "pos": [40, 366], "size": [140, 64] },
+    { "id": "bff", "type": "backend", "label": "控制台 BFF", "sublabel": "FastAPI · RBAC · 聚合", "pos": [260, 366], "size": [140, 64] },
+    { "id": "store", "type": "database", "label": "双模存储", "sublabel": "MySQL 8 / 文件后端", "pos": [490, 366], "size": [140, 64] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "自动修复闭环（Temporal 编排）", "wraps": ["webhook", "temporal", "triage", "fix", "sandbox", "gates", "release"] },
+    { "kind": "security-group", "label": "强隔离与闸门", "wraps": ["sandbox", "gates"] },
+    { "kind": "region", "label": "运维控制面", "wraps": ["web", "bff", "store"] }
+  ],
+  "connections": [
+    { "id": "alert-in", "from": "alerts", "to": "webhook", "label": "POST /webhook", "labelAt": [110, 98], "variant": "emphasis" },
+    { "id": "start-flow", "from": "webhook", "to": "temporal", "label": "幂等启动" },
+    { "id": "orchestrate-triage", "from": "temporal", "to": "triage", "label": "调度" },
+    { "id": "confidence-gate", "from": "triage", "to": "fix", "label": "置信度≥0.8" },
+    { "id": "patch-candidate", "from": "fix", "to": "sandbox", "label": "候选补丁", "labelAt": [800, 228], "fromSide": "bottom", "toSide": "top" },
+    { "id": "verify-pass", "from": "sandbox", "to": "gates", "label": "验证通过" },
+    { "id": "gate-approve", "from": "gates", "to": "release", "label": "闸门放行" },
+    { "id": "console-api", "from": "web", "to": "bff", "label": "REST /api", "labelAt": [220, 420] },
+    { "id": "signal-query", "from": "bff", "to": "temporal", "label": "审批信号", "fromSide": "left", "toSide": "left" },
+    { "id": "persist", "from": "bff", "to": "store", "label": "会话审计" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "修复闭环",
+      "items": [
+        "Temporal 编排：分析 → 修复 → 沙箱 → 审批 → 金丝雀",
+        "变更关联注入 triage，覆盖「刚发版就崩」场景",
+        "沙箱回炉重试耗尽自动转人工（ESCALATED）"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "安全设计",
+      "items": [
+        "三道闸门 fail-closed：低置信转人工 / 二级审批 / 公告倒计时",
+        "Docker 无网络强隔离验证 + Bandit 安全门禁",
+        "Webhook 接入鉴权（Bearer / HMAC）+ 幂等防重；审批经 IM 卡片闭环"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "控制面与运营",
+      "items": [
+        "Web 控制台 + BFF：流程、审批、转人工待办、审计回看",
+        "转人工待办 SLA 超时自动再升级",
+        "双模存储：MySQL 8 / 文件后端；LLM 本机 Ollama 无云依赖"
+      ]
+    }
+  ]
+}
