@@ -17,7 +17,7 @@ export function ActionButton({
       onClick={onClick}
       className={cn(
         'rounded-lg px-3.5 py-1.5 text-sm font-medium transition-colors',
-        tone === 'accent' && 'bg-accent/90 text-canvas hover:bg-accent',
+        tone === 'accent' && 'btn-glow bg-accent/90 text-canvas hover:bg-accent',
         tone === 'danger' && 'bg-danger/90 text-canvas hover:bg-danger',
         tone === 'default' && 'border border-line text-muted hover:bg-elevated hover:text-ink',
       )}

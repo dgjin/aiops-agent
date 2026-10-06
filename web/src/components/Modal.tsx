@@ -48,11 +48,11 @@ export function Modal({ open, title, size = 'sm', onClose, children, footer }: M
 
 /** 表单字段通用样式（输入框 / 下拉）。 */
 export const fieldClass =
-  'w-full rounded-lg border border-line bg-canvas px-3 py-2 text-sm text-ink placeholder:text-idle focus:border-accent/60 focus:outline-none'
+  'w-full rounded-lg border border-line bg-canvas px-3 py-2 text-sm text-ink placeholder:text-idle focus:border-accent/60 focus:shadow-[0_0_14px_-6px_var(--c-glow)] focus:outline-none'
 
 /** 主按钮 / 次级按钮样式（弹窗内表单提交共用）。 */
 export const primaryButtonClass =
-  'rounded-lg bg-accent/90 px-3.5 py-1.5 text-sm font-medium text-canvas transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50'
+  'btn-glow rounded-lg bg-accent/90 px-3.5 py-1.5 text-sm font-medium text-canvas transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50'
 
 export const secondaryButtonClass =
   'rounded-lg border border-line px-3.5 py-1.5 text-sm text-muted transition-colors hover:bg-elevated hover:text-ink'

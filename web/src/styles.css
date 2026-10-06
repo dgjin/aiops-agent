@@ -10,24 +10,32 @@
      组件全部使用语义 class，**零改动**获得双主题 + 三强调色能力。
 
    对比度基线（正文 ≥ 4.5:1，AA）：
-   - 深色：ink/canvas ≈ 13.2:1，muted/canvas ≈ 5.5:1；
+   - 深色：ink/canvas ≈ 17.2:1，muted/panel ≈ 7.0:1；
    - 浅色：ink/canvas ≈ 15.8:1，muted/panel ≈ 5.9:1。
+
+   科技风细节层（2026-10 升级）：深空蓝黑底 + 网格 / 极光渐晕（引
+   --c-grid / --c-aurora）、辉光阴影（--c-glow，色相派生自强调色，
+   三色自动适配）、导航激活指示条与顶栏辉光线；详见文件底部小节。
    ============================================================ */
 
 :root {
-  /* 深色（默认，原设计 token） */
-  --c-canvas: #0b0f14;
-  --c-panel: #10161d;
-  --c-elevated: #172029;
-  --c-line: #1f2933;
-  --c-ink: #e6edf3;
-  --c-muted: #8899a6;
+  /* 深色（默认，科技风）：深空蓝黑底 + 钢蓝分隔线 */
+  --c-canvas: #060a12;
+  --c-panel: #0b111c;
+  --c-elevated: #121a28;
+  --c-line: #1e2b3d;
+  --c-ink: #e8f0f9;
+  --c-muted: #8fa0b6;
   --c-accent: #2dd4bf; /* teal 亮阶（默认强调色） */
   --c-ok: #34d399;
   --c-warn: #fbbf24;
   --c-danger: #f87171;
   --c-info: #60a5fa;
-  --c-idle: #64748b;
+  --c-idle: #6b7d94;
+  /* 科技风派生量：辉光 / 背景网格 / 极光渐晕（引用 accent，随强调色自动变化） */
+  --c-glow: color-mix(in srgb, var(--c-accent) 55%, transparent);
+  --c-grid: color-mix(in srgb, var(--c-ink) 3.5%, transparent);
+  --c-aurora: color-mix(in srgb, var(--c-accent) 8%, transparent);
   color-scheme: dark;
 }
 
@@ -45,6 +53,10 @@
   --c-danger: #dc2626;
   --c-info: #1d4ed8;
   --c-idle: #94a3b8;
+  /* 派生量浅色档：网格/极光全透明（保持浅色简洁），辉光减弱 */
+  --c-glow: color-mix(in srgb, var(--c-accent) 30%, transparent);
+  --c-grid: transparent;
+  --c-aurora: transparent;
   color-scheme: light;
 }
 
@@ -97,8 +109,16 @@ body,
 
 body {
   background-color: var(--c-canvas);
+  /* 科技质感底：右上角强调色极光 + 32px 方格网格（浅色档为透明层） */
+  background-image:
+    radial-gradient(1100px 520px at 78% -8%, var(--c-aurora), transparent 62%),
+    linear-gradient(var(--c-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--c-grid) 1px, transparent 1px);
+  background-size: auto, 32px 32px, 32px 32px;
+  background-attachment: fixed;
   color: var(--c-ink);
   font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums; /* 控制台数字对齐（时间/计数/ID） */
   -webkit-font-smoothing: antialiased;
   transition: background-color 0.18s ease, color 0.18s ease;
 }
@@ -116,6 +136,99 @@ body {
   border-radius: 6px;
   border: 2px solid var(--c-canvas);
 }
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--c-accent) 45%, var(--c-line));
+}
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* ============================================================
+   科技风细节层（全局增强，零组件改动）：
+   - 指针/焦点可访问性基线；
+   - 侧栏激活项：左指示条 + 内描边 + 外辉光；
+   - 顶栏底边渐隐辉光线（HUD 分隔）；
+   - 主按钮辉光 .btn-glow（配合 primaryButtonClass / ActionButton）；
+   - 平面面板顶部 1px 高光（:where 零权重，不覆盖已有 shadow-*）。
+   ============================================================ */
+
+button:not(:disabled),
+[role='button'] {
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--c-accent) 85%, transparent);
+  outline-offset: 2px;
+}
+
+/* 文本类输入自带 focus:border-accent，避免与外描边叠加双圈 */
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+}
+
+.nav-active {
+  position: relative;
+  background: color-mix(in srgb, var(--c-accent) 10%, transparent);
+  color: var(--c-accent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--c-accent) 22%, transparent),
+    0 0 20px -10px var(--c-glow);
+}
+.nav-active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 2px;
+  height: 55%;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  background: var(--c-accent);
+  box-shadow: 0 0 10px var(--c-glow);
+}
+
+.topbar-glow {
+  position: relative;
+}
+.topbar-glow::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--c-accent) 40%, transparent) 20%,
+    color-mix(in srgb, var(--c-accent) 40%, transparent) 80%,
+    transparent
+  );
+  opacity: 0.6;
+}
+
+.btn-glow {
+  box-shadow: 0 0 18px -8px var(--c-glow);
+}
+.btn-glow:hover:not(:disabled) {
+  box-shadow: 0 0 24px -6px var(--c-glow);
+}
+
+/* 平面面板顶部高光（border-line + bg-panel 组合的卡片/侧栏/弹窗） */
+:where([class~='bg-panel'][class~='border-line']) {
+  box-shadow: inset 0 1px 0 0 color-mix(in srgb, var(--c-ink) 5%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }
