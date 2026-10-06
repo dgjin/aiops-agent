@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# AIOps 一键启动脚本：环境准备（Colima/依赖容器）→ 自检 → 启动 worker/BFF/告警接入/可用性巡检/日志接入/突增检测 → 灌日志 → 起流程
+# AIOps 一键启动脚本：环境准备（Colima/依赖容器）→ 自检 → 启动 worker/BFF/告警接入/可用性巡检/日志接入/突增检测/组件守护 → 灌日志 → 起流程
 # 用法：
 #   bash scripts/demo-up.sh           一键启动（幂等，已运行则跳过重启）
 #   bash scripts/demo-up.sh env       仅环境准备（Colima + Temporal/Loki 容器 + 等就绪）
-#   bash scripts/demo-up.sh down      停止 worker 与 BFF
+#   bash scripts/demo-up.sh down      停止全部常驻组件（含组件守护）
 #   bash scripts/demo-up.sh down-all  停止应用与依赖容器（保留数据卷）
 #   bash scripts/demo-up.sh status    查看运行状态
 set -euo pipefail
@@ -21,6 +21,7 @@ WEBHOOK_LOG="$ROOT/alert_webhook.log"
 PROBER_LOG="$ROOT/app_prober.log"
 SHIP_LOG="$ROOT/ship_app_logs.log"
 SURGE_LOG="$ROOT/log_surge_detector.log"
+WATCHDOG_LOG="$ROOT/aiops_watchdog.log"
 TEMPORAL_ADDR="127.0.0.1:7233"
 LOKI_URL="http://localhost:3101"
 
@@ -60,6 +61,8 @@ wait_http() { # url timeout_s
 }
 
 cmd_down() {
+  # 先停守护再停组件，否则被停组件会被守护就地复活（组件守护专门守护这 6 个组件）
+  pkill -f "aiops-watchdog.py" 2>/dev/null && info "组件守护已停止" || warn "组件守护本未运行"
   pkill -f "aiops_agent.worker" 2>/dev/null && info "worker 已停止" || warn "worker 本未运行"
   pkill -f "uvicorn bff.app:app" 2>/dev/null && info "BFF 已停止" || warn "BFF 本未运行"
   pkill -f "alert_webhook.py" 2>/dev/null && info "告警接入服务已停止" || warn "告警接入服务本未运行"
@@ -89,6 +92,7 @@ cmd_status() {
   running "app_prober.py" && info "可用性巡检运行中（被监控应用 → 自动修复流程）" || { warn "可用性巡检未运行"; ok=1; }
   running "ship_app_logs.py" && info "日志采集器运行中（被监控应用日志 → Loki）" || { warn "日志采集器未运行"; ok=1; }
   running "log_surge_detector.py" && info "突增检测器运行中（错误日志突增 → 自动修复流程）" || { warn "突增检测器未运行"; ok=1; }
+  running "aiops-watchdog.py" && info "组件守护运行中（每 30 秒巡检 6 组件，异常自动拉起）" || { warn "组件守护未运行"; ok=1; }
   if docker info >/dev/null 2>&1; then
     docker ps --format '{{.Names}}' | grep -qx aiops-temporal && info "Temporal 运行中（127.0.0.1:7233）" || { warn "Temporal 未运行"; ok=1; }
     docker ps --format '{{.Names}}' | grep -qx aiops-loki && info "Loki 运行中（http://localhost:3101）" || { warn "Loki 未运行"; ok=1; }
@@ -129,7 +133,7 @@ cmd_env() {
 cmd_up() {
   cmd_env
 
-  echo "${c_dim}== 1/9 环境自检 ==${c_reset}"
+  echo "${c_dim}== 1/10 环境自检 ==${c_reset}"
   # 检查硬依赖（Temporal/Loki/Ollama/Docker/策略/前端）；日志新鲜度由第 4 步灌入、
   # BFF 由第 3 步启动，这两项失败属预期噪声，从展示与告警判断中剔除
   local dout dshown
@@ -140,7 +144,7 @@ cmd_up() {
     warn "部分依赖未就绪（见上），仍尝试继续；若失败请先按提示修复"
   fi
 
-  echo "${c_dim}== 2/9 启动 worker ==${c_reset}"
+  echo "${c_dim}== 2/10 启动 worker ==${c_reset}"
   if running "aiops_agent.worker"; then
     info "worker 已在运行，跳过"
   else
@@ -148,7 +152,7 @@ cmd_up() {
     wait_up "aiops_agent.worker" && info "worker 已启动（日志 ${WORKER_LOG}）" || { err "worker 启动失败，见 ${WORKER_LOG}"; exit 1; }
   fi
 
-  echo "${c_dim}== 3/9 启动 BFF 控制台 ==${c_reset}"
+  echo "${c_dim}== 3/10 启动 BFF 控制台 ==${c_reset}"
   if running "uvicorn bff.app:app"; then
     info "BFF 已在运行，跳过"
   else
@@ -156,7 +160,7 @@ cmd_up() {
     wait_up "uvicorn bff.app:app" && info "BFF 已启动（http://127.0.0.1:8600，日志 ${BFF_LOG}）" || { err "BFF 启动失败，见 ${BFF_LOG}"; exit 1; }
   fi
 
-  echo "${c_dim}== 4/9 启动告警接入服务 ==${c_reset}"
+  echo "${c_dim}== 4/10 启动告警接入服务 ==${c_reset}"
   if running "alert_webhook.py"; then
     info "告警接入服务已在运行，跳过"
   else
@@ -164,7 +168,7 @@ cmd_up() {
     wait_up "alert_webhook.py" && info "告警接入服务已启动（http://127.0.0.1:8099，日志 ${WEBHOOK_LOG}）" || { err "告警接入服务启动失败，见 ${WEBHOOK_LOG}"; exit 1; }
   fi
 
-  echo "${c_dim}== 5/9 启动可用性巡检 ==${c_reset}"
+  echo "${c_dim}== 5/10 启动可用性巡检 ==${c_reset}"
   if running "app_prober.py"; then
     info "可用性巡检已在运行，跳过"
   else
@@ -172,7 +176,7 @@ cmd_up() {
     wait_up "app_prober.py" && info "可用性巡检已启动（连续 3 次失败自动触发修复流程，日志 ${PROBER_LOG}）" || { err "可用性巡检启动失败，见 ${PROBER_LOG}"; exit 1; }
   fi
 
-  echo "${c_dim}== 6/9 启动日志实时接入（被监控应用日志 → Loki，Filebeat 角色） ==${c_reset}"
+  echo "${c_dim}== 6/10 启动日志实时接入（被监控应用日志 → Loki，Filebeat 角色） ==${c_reset}"
   if running "ship_app_logs.py"; then
     info "日志采集器已在运行，跳过"
   else
@@ -180,7 +184,7 @@ cmd_up() {
     wait_up "ship_app_logs.py" && info "日志采集器已启动（清单模式每 2 秒增量采集 → Loki，日志 ${SHIP_LOG}）" || { err "日志采集器启动失败，见 ${SHIP_LOG}"; exit 1; }
   fi
 
-  echo "${c_dim}== 7/9 启动错误日志实时检测（突增 → 自动发起修复流程） ==${c_reset}"
+  echo "${c_dim}== 7/10 启动错误日志实时检测（突增 → 自动发起修复流程） ==${c_reset}"
   if running "log_surge_detector.py"; then
     info "突增检测器已在运行，跳过"
   else
@@ -189,12 +193,20 @@ cmd_up() {
     wait_up "log_surge_detector.py" && info "突增检测器已启动（ERROR 突增 → Alertmanager → 自动修复流程，日志 ${SURGE_LOG}）" || { err "突增检测器启动失败，见 ${SURGE_LOG}"; exit 1; }
   fi
 
-  echo "${c_dim}== 8/9 灌入演示日志 ==${c_reset}"
+  echo "${c_dim}== 8/10 启动组件守护（watchdog：任一组件崩溃自动拉起） ==${c_reset}"
+  if running "aiops-watchdog.py"; then
+    info "组件守护已在运行，跳过"
+  else
+    nohup "$PY" scripts/aiops-watchdog.py --interval 30 >>"$WATCHDOG_LOG" 2>&1 &
+    wait_up "aiops-watchdog.py" && info "组件守护已启动（每 30 秒巡检 6 组件，日志 ${WATCHDOG_LOG}）" || { err "组件守护启动失败，见 ${WATCHDOG_LOG}"; exit 1; }
+  fi
+
+  echo "${c_dim}== 9/10 灌入演示日志 ==${c_reset}"
   "$PY" demo_log_generator.py --service "$SERVICE" --mode surge --count 800
   "$PY" demo_log_generator.py --service "$SERVICE" --mode normal --count 60
   info "已灌入 $SERVICE 故障日志（落在近 10 分钟窗口内）"
 
-  echo "${c_dim}== 9/9 启动修复流程 ==${c_reset}"
+  echo "${c_dim}== 10/10 启动修复流程 ==${c_reset}"
   "$PY" demo_cli.py start --service "$SERVICE" --alert-id "$ALERT_ID" --description "一键演示"
 
   cat <<EOF
@@ -204,6 +216,7 @@ ${c_green}启动完成${c_reset}
   工作流：  aiops-fix-$SERVICE-$ALERT_ID
   巡检：    每 15 秒探测「被监控应用」，连续 3 次不可达自动触发修复流程
   日志：    被监控应用日志 → Loki → 突增检测（每 15 秒）→ 自动发起修复流程
+  守护：    组件守护每 30 秒巡检，任一常驻组件崩溃自动拉起
 
 接下来到控制台操作：
   1. 「审批中心」→ 找到该流程 → 点「批准」

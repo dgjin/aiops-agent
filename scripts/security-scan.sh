@@ -20,9 +20,21 @@ LEVEL="-ll"
 [ "${1:-}" = "-a" ] && LEVEL="-l"
 
 echo "== Bandit SAST 扫描（Medium 及以上；HIGH 必须为 0）=="
-"$PY" -m bandit -r aiops_agent bff \
+# 注意：bandit 只要发现问题（含 Medium）退出码即为 1，若直传会让「HIGH=0 即通过」
+# 的门禁语义失真（文件头列出的历史接受 Medium 项会误杀 CI）。故用 --exit-zero 压制其
+# 退出码，门禁判定统一由下方 High 计数完成。
+OUT="$("$PY" -m bandit -r aiops_agent bff \
     alert_webhook.py demo_cli.py index_codebase.py ship_app_logs.py \
-    "$LEVEL" 2>&1 | tail -12
+    scripts/aiops-watchdog.py \
+    "$LEVEL" --exit-zero 2>&1)"
+printf '%s\n' "$OUT" | tail -12
+
+HIGH_COUNT="$(printf '%s\n' "$OUT" | sed -n 's/^[[:space:]]*High: \([0-9][0-9]*\)$/\1/p' | head -1)"
+if [ "${HIGH_COUNT:-1}" != "0" ]; then
+    echo "❌ 发布门禁未通过：HIGH 告警 ${HIGH_COUNT:-未知} 项（必须为 0）"
+    exit 1
+fi
+echo "✅ 发布门禁通过：HIGH=0（Medium 项为历史审计接受的已知类别，见文件头说明）"
 
 echo
 echo "提示：依赖漏洞扫描可选执行 pip-audit："

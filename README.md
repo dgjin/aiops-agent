@@ -72,11 +72,11 @@ AIOPS_POLICY_PATH=./demo-policy.yaml .venv/bin/python demo_cli.py start \
 
 ```bash
 cd aiops-agent
-bash scripts/demo-up.sh        # 探活依赖 → 启动 6 个常驻组件 → 灌日志 → 起流程
-bash scripts/demo-up.sh down   # 停止全部常驻组件（含日志采集与突增检测）
+bash scripts/demo-up.sh        # 探活依赖 → 启动 6 个常驻组件 + 组件守护 → 灌日志 → 起流程
+bash scripts/demo-up.sh down   # 停止全部（先停组件守护再停组件）
 ```
 
-脚本会自动完成依赖探活，后台常驻启动 worker / BFF / 告警接入 / 可用性巡检 / **日志采集（ship_app_logs --follow）** / **错误日志突增检测（log_surge_detector）**，再灌入演示日志、启动一个修复流程，并打印控制台地址与后续操作提示。
+脚本会自动完成依赖探活，后台常驻启动 worker / BFF / 告警接入 / 可用性巡检 / **日志采集（ship_app_logs --follow）** / **错误日志突增检测（log_surge_detector）**，再灌入演示日志、启动一个修复流程，并打印控制台地址与后续操作提示。第 8 步额外启动**组件守护（aiops-watchdog.py）**：每 30 秒巡检 6 个组件，任一崩溃自动拉起；同一组件在窗口内反复崩溃时自动冷却（防拉起风暴）。状态可用 `python3 scripts/aiops-watchdog.py --status` 单独查看。
 
 ---
 
@@ -106,6 +106,7 @@ cd aiops-agent
 | 窗口排队补丁 | `demo_cli.py queue-patch --wf-id <wf_id> --new-wf-id <id> --service <svc> --alert-id <aid>` |
 | 环境自检 | `demo_cli.py doctor` |
 | 突增检测（单轮） | `log_surge_detector.py --once` |
+| 组件守护状态 | `python3 scripts/aiops-watchdog.py --status` |
 | 灌演示日志 | `demo_log_generator.py --service order --mode surge --count 800` |
 
 演示分支（`start --description` 带关键词）：`low-conf`（置信度不足转人工）、`protected`（受保护目录需二级审批）、`test-fail`（测试首败回炉）、`test-always-fail`（重试耗尽转人工）、`canary-bad`（金丝雀劣化自动回滚）。
@@ -223,6 +224,8 @@ cd aiops-agent
 
 > `-t .`（顶层目录=仓库根）让测试以 `tests.*` 包方式导入，先执行 `tests/__init__.py` 隔离钩子（强制 demo 模式，测试**永不**连生产库）；省略 `-t .` 会按顶层模块导入并跳过该钩子（曾实测把测试数据写进生产 MySQL）。pytest 方式由 `tests/conftest.py` 同款覆盖。
 
+同样的三道门禁已固化到 CI（`.github/workflows/ci.yml`）：单测（demo 档 + 强制 `-t .`）、前端构建（`tsc + vite`）、Bandit SAST（Medium+，HIGH=0）——推送/PR `main` 自动执行。
+
 ---
 
 ## 九、生产化部署（企业级）
@@ -299,6 +302,7 @@ bash scripts/security-scan.sh                # Bandit（Medium+；发布门禁�
 ```
 
 - 控制台鉴权 fail-closed；未配置令牌时 `/api` 全部 503
+- 告警接入鉴权（P0-1）：IP 白名单 + 共享密钥（`Authorization: Bearer` / `X-AIOps-Token`）+ 可选 HMAC 签名（`X-AIOps-Signature`）+ 限速（默认 120 次/分钟/来源 IP）；production 档未配置密钥时 `/webhook` 全部 503（fail-closed）。两端配置：接入服务读 `AIOPS_WEBHOOK_TOKEN`；Alertmanager 侧执行 `monitoring/apply_alertmanager_route.py --set-webhook-token <同一令牌>` 写入 receiver 的 `http_config.authorization` 并重启容器
 - 写操作限速 + 认证失败限速（Redis）；安全响应头（HSTS 等，TLS 终结时按 `X-Forwarded-Proto` 附加）
 - 杀开关（kill switch）：`POST /api/system/kill-switch`（admin，body `{"active":true,"reason":"..."}`）激活后 BFF 拒绝一切写操作、webhook 拒绝新流程；控制台「系统状态」页可一键操作
 - 生产冒烟 `scripts/production-smoke.py` 9 项全绿方可发布

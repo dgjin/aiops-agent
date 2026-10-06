@@ -14,6 +14,9 @@ Alertmanager 侧接入点（本机 nl2sql-monitoring 栈 deploy/alertmanager.yml
     - 幂等：workflow id = aiops-fix-{service}-{alert_id}，REJECT_DUPLICATE + FAIL，
       重复投递仅返回 duplicates，不产生第二个流程实例；
     - kill switch：启动前检查，激活时返回 503 拒绝新流程；状态不可读时 fail-closed；
+    - 鉴权（P0-1）：来源 IP 白名单 + 共享密钥（Authorization: Bearer / X-AIOps-Token）+
+      可选 HMAC 签名（X-AIOps-Signature）+ 限速；production 档未配置密钥时 fail-closed（503），
+      demo 档未配置放行并打启动警告（保持演示零配置可跑）；
     - 策略快照在服务启动时加载一次（与 worker 语义一致，运行期不热修改）；
     - 启动失败返回 5xx，交由 Alertmanager 按重试策略再次投递。
 """
@@ -22,9 +25,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
+import threading
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -44,6 +53,112 @@ logger = logging.getLogger("aiops.webhook")
 
 # 服务启动时加载一次的策略快照（运行期不热修改）
 _POLICY_SNAPSHOT: dict = {}
+
+# ---- 接入鉴权（P0-1）----
+# 背景：/webhook 是「AI 改代码 + 发布」链路的入口，必须具备防伪造能力。
+# 检查顺序：IP 白名单（可选）→ 共享密钥 / HMAC 签名（未配置则按档位放行或 fail-closed）→ 单条通过即放行。
+# Alertmanager 侧经 receiver 的 http_config.authorization 携带 Bearer 密钥
+# （写入工具：monitoring/apply_alertmanager_route.py --set-webhook-token）。
+AUTH_TOKEN_ENV = "AIOPS_WEBHOOK_TOKEN"
+AUTH_HMAC_ENV = "AIOPS_WEBHOOK_HMAC_SECRET"
+AUTH_IPS_ENV = "AIOPS_WEBHOOK_ALLOW_IPS"
+AUTH_RATE_ENV = "AIOPS_WEBHOOK_RATE_LIMIT"
+DEFAULT_RATE_LIMIT = 120  # 次/分钟/来源 IP；0 表示关闭限速
+MAX_BODY_BYTES = 1_048_576  # 1 MiB：Alertmanager 载荷远小于此，超出直接 413
+
+
+@dataclass(frozen=True)
+class AuthConfig:
+    """接入鉴权配置（服务启动时快照，与策略快照语义一致，运行期不热修改）。"""
+
+    token: str = ""
+    hmac_secret: str = ""
+    allow_ips: tuple[str, ...] = ()
+    rate_limit_per_min: int = DEFAULT_RATE_LIMIT
+    demo: bool = False
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.token or self.hmac_secret)
+
+    def describe(self) -> str:
+        return (
+            f"token={'已配置' if self.token else '未配置'} "
+            f"hmac={'已配置' if self.hmac_secret else '未配置'} "
+            f"ip白名单={len(self.allow_ips)}个 "
+            f"限速={self.rate_limit_per_min}/分钟 "
+            f"档位={'demo' if self.demo else 'production'}"
+        )
+
+
+def load_auth_config(env: Mapping[str, str] | None = None) -> AuthConfig:
+    """从环境变量加载鉴权配置（env 可注入，供单测）。档位判定缺省为 production（与 mode.py 一致）。"""
+    source = env if env is not None else os.environ
+    raw_ips = (source.get(AUTH_IPS_ENV) or "").strip()
+    try:
+        rate = int((source.get(AUTH_RATE_ENV) or str(DEFAULT_RATE_LIMIT)).strip())
+    except ValueError:
+        rate = DEFAULT_RATE_LIMIT
+    return AuthConfig(
+        token=(source.get(AUTH_TOKEN_ENV) or "").strip(),
+        hmac_secret=(source.get(AUTH_HMAC_ENV) or "").strip(),
+        allow_ips=tuple(ip.strip() for ip in raw_ips.split(",") if ip.strip()),
+        rate_limit_per_min=max(0, rate),
+        demo=(source.get("AIOPS_MODE") or "production").strip().lower() == "demo",
+    )
+
+
+class RateLimiter:
+    """固定窗口限速（进程内，按来源 IP 计数；limit<=0 关闭）。线程安全（ThreadingHTTPServer）。"""
+
+    def __init__(self, limit_per_min: int) -> None:
+        self._limit = limit_per_min
+        self._lock = threading.Lock()
+        self._window: dict[str, tuple[float, int]] = {}
+
+    def allow(self, key: str, now: float | None = None) -> bool:
+        if self._limit <= 0:
+            return True
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            start, count = self._window.get(key, (now, 0))
+            if now - start >= 60.0:
+                start, count = now, 0
+            count += 1
+            self._window[key] = (start, count)
+            if len(self._window) > 1024:  # 内存兜底：窗口字典异常膨胀时清掉过期项
+                self._window = {k: v for k, v in self._window.items() if now - v[0] < 60.0}
+            return count <= self._limit
+
+
+def check_request_auth(
+    headers: Mapping[str, str], raw_body: bytes, client_ip: str, cfg: AuthConfig
+) -> tuple[int, dict] | None:
+    """鉴权准入检查：通过返回 None；拒绝返回 (HTTP 状态码, 错误响应体)。纯函数（除常时比较）。"""
+    if cfg.allow_ips and client_ip not in cfg.allow_ips:
+        return 403, {"error": f"来源 IP 不在白名单: {client_ip}"}
+    if not cfg.configured:
+        if cfg.demo:
+            return None  # 演示档零配置放行（启动时已打警告）
+        return 503, {"error": "webhook 鉴权未配置（fail-closed）: 请设置 AIOPS_WEBHOOK_TOKEN"}
+    provided = ""
+    auth_header = headers.get("Authorization") or ""
+    if auth_header.startswith("Bearer "):
+        provided = auth_header[len("Bearer "):].strip()
+    if not provided:
+        provided = (headers.get("X-AIOps-Token") or "").strip()
+    if cfg.token and provided:
+        if hmac.compare_digest(provided.encode(), cfg.token.encode()):
+            return None
+    if cfg.hmac_secret:
+        signature = (headers.get("X-AIOps-Signature") or "").strip()
+        if signature.startswith("sha256="):
+            expected = hmac.new(cfg.hmac_secret.encode(), raw_body, hashlib.sha256).hexdigest()
+            if hmac.compare_digest(signature[len("sha256="):].lower(), expected):
+                return None
+    return 401, {
+        "error": "鉴权失败: 缺少或无效凭证（Authorization: Bearer / X-AIOps-Token / X-AIOps-Signature）"
+    }
 
 
 def _starts_at_suffix(item: dict) -> str:
@@ -143,14 +258,39 @@ class _WebhookHandler(BaseHTTPRequestHandler):
         if self.path != WEBHOOK_PATH:
             self._respond(404, {"error": f"仅支持 POST {WEBHOOK_PATH}"})
             return
+        client_ip = self.client_address[0]
+        if not _RATE_LIMITER.allow(client_ip):
+            logger.warning(
+                "接入限速拦截: %s 超过 %d 次/分钟", client_ip, _AUTH_CONFIG.rate_limit_per_min
+            )
+            self._respond(429, {"error": "请求过于频繁（超出限速配额），请稍后重试"})
+            return
         try:
             length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            self._respond(400, {"error": "Content-Length 非法"})
+            return
+        if length > MAX_BODY_BYTES:
+            self._respond(413, {"error": f"请求体过大（>{MAX_BODY_BYTES} 字节）"})
+            return
+        raw_body = self.rfile.read(length) if length else b"{}"
+        denied = check_request_auth(self.headers, raw_body, client_ip, _AUTH_CONFIG)
+        if denied:
+            status, body = denied
+            logger.warning("接入鉴权拒绝（%d）: %s | %s", status, client_ip, body["error"])
+            self._respond(status, body)
+            return
+        try:
+            payload = json.loads(raw_body or b"{}")
         except ValueError:
             self._respond(400, {"error": "请求体不是合法 JSON"})
             return
         if not isinstance(payload, dict):
             self._respond(400, {"error": "请求体必须是 JSON 对象（Alertmanager v4 载荷）"})
+            return
+        alerts_raw = payload.get("alerts", [])
+        if not isinstance(alerts_raw, list) or any(not isinstance(item, dict) for item in alerts_raw):
+            self._respond(400, {"error": "alerts 字段必须是对象数组（Alertmanager v4 载荷）"})
             return
 
         alerts, resolved = parse_alertmanager_payload(payload)
@@ -217,7 +357,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    global _POLICY_SNAPSHOT
+    global _POLICY_SNAPSHOT, _AUTH_CONFIG, _RATE_LIMITER
     policy = load_policy()
     _POLICY_SNAPSHOT = snapshot_for_workflow(policy)
     logger.info(
@@ -225,6 +365,22 @@ def main() -> None:
         os.environ.get("AIOPS_POLICY_PATH", "默认"),
         policy.summary(),
     )
+
+    _AUTH_CONFIG = load_auth_config()
+    _RATE_LIMITER = RateLimiter(_AUTH_CONFIG.rate_limit_per_min)
+    if not _AUTH_CONFIG.configured:
+        if _AUTH_CONFIG.demo:
+            logger.warning(
+                "webhook 鉴权未配置（demo 档放行）: 生产环境请设置 %s 并同步更新 "
+                "Alertmanager receiver 的 Authorization 头",
+                AUTH_TOKEN_ENV,
+            )
+        else:
+            logger.error(
+                "webhook 鉴权未配置（production fail-closed）: 所有请求将返回 503，请设置 %s",
+                AUTH_TOKEN_ENV,
+            )
+    logger.info("接入鉴权姿态: %s", _AUTH_CONFIG.describe())
 
     server = ThreadingHTTPServer((args.host, args.port), _WebhookHandler)
     logger.info("告警接入服务已启动: http://%s:%d%s", args.host, args.port, WEBHOOK_PATH)
