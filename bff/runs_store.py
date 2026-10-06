@@ -23,8 +23,8 @@ from aiops_agent import metrics, mode
 # 变化签名键（任一变化即触发 upsert）
 _SIGNATURE_FIELDS = ("stage", "exec_status", "close_time", "confidence", "patch_id")
 
-# 终态集合：首次出现时计 workflow_completed 指标
-_TERMINAL_STAGES = {"DONE", "ESCALATED", "CANCELLED", "FAILED"}
+# 终态集合：首次出现时计 workflow_completed 指标（SHADOWED 为 P1-2 影子档终态）
+_TERMINAL_STAGES = {"DONE", "ESCALATED", "CANCELLED", "FAILED", "SHADOWED"}
 
 _last_seen: dict[str, tuple] = {}
 

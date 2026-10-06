@@ -29,7 +29,7 @@ from fastapi.staticfiles import StaticFiles
 
 from aiops_agent import tracing
 
-from . import auth
+from . import auth, escalations
 from .deps import ApiError, WEB_DIST, gw, log, ok
 from .middleware import register_middlewares
 from .middleware import required_role as required_role  # noqa: F401 - 兼容测试引用（bff.app.required_role）
@@ -67,6 +67,36 @@ async def _rotation_loop() -> None:
         await asyncio.sleep(_rotation_check_seconds())
 
 
+def _escalation_sweep_seconds() -> int:
+    """转人工待办 SLA 巡检周期（秒）：单次巡检很轻，默认 60 秒一次。"""
+    try:
+        return max(5, int(os.environ.get("AIOPS_ESCALATION_SWEEP_SECONDS", "60")))
+    except ValueError:
+        return 60
+
+
+async def _escalation_loop() -> None:
+    """转人工待办 SLA 巡检（P1-3）：超时未处置则再升级一次。
+
+    ``sweep_due`` 为同步（读存储 + 发通知），放线程池避免阻塞事件循环；
+    每单只升级一次（``re_escalated`` 打标），巡检失败不影响控制台服务。
+    """
+    while True:
+        try:
+            escalated = await asyncio.to_thread(escalations.sweep_due)
+            if escalated:
+                log.warning(
+                    "[escalations] %d 个待办超时未处置，已再升级（SLA %s 分钟）",
+                    len(escalated),
+                    escalations.sla_minutes(),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 巡检失败不影响服务
+            log.warning("[escalations] SLA 巡检失败：%s", exc)
+        await asyncio.sleep(_escalation_sweep_seconds())
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     try:
@@ -74,12 +104,16 @@ async def lifespan(_: FastAPI):
     except Exception:  # noqa: BLE001 - Temporal 暂不可达时仍允许启动
         pass
     rotation_task = asyncio.create_task(_rotation_loop())
+    escalation_task = asyncio.create_task(_escalation_loop())
     try:
         yield
     finally:
         rotation_task.cancel()
+        escalation_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await rotation_task
+        with contextlib.suppress(asyncio.CancelledError):
+            await escalation_task
 
 
 app = FastAPI(title="AIOps Console BFF", version="1.0.0", lifespan=lifespan)

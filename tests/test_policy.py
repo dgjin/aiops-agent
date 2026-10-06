@@ -85,6 +85,30 @@ class TestPolicyLoading(unittest.TestCase):
             Policy.model_validate(raw)
 
 
+class TestShadowMode(unittest.TestCase):
+    """P1-2 影子档：默认关闭；开启时正确透传到工作流快照与启动日志。"""
+
+    def test_default_off_and_snapshot_passthrough(self) -> None:
+        policy = Policy.model_validate(_base_policy())
+        self.assertFalse(policy.release_gate.shadow_mode)
+        snapshot = snapshot_for_workflow(policy)
+        self.assertIn("shadow_mode", snapshot)
+        self.assertFalse(snapshot["shadow_mode"])
+
+    def test_enabled_passed_to_snapshot_and_summary(self) -> None:
+        raw = _base_policy()
+        raw["release_gate"]["shadow_mode"] = True
+        policy = Policy.model_validate(raw)
+        self.assertTrue(policy.release_gate.shadow_mode)
+        self.assertTrue(snapshot_for_workflow(policy)["shadow_mode"])
+        self.assertIn("shadow_mode=True", policy.summary())
+
+    def test_loaded_yaml_policies_expose_switch(self) -> None:
+        for name in ("release-gate-policy.yaml", "demo-policy.yaml"):
+            policy = load_policy(name)
+            self.assertIn("shadow_mode", snapshot_for_workflow(policy))
+
+
 class TestLockedPoliciesCannotBeBypassed(unittest.TestCase):
     """锁定策略：任何绕过尝试都必须在启动校验阶段失败。"""
 

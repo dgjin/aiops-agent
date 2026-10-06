@@ -65,10 +65,38 @@ class ItemNormalizeTest(unittest.TestCase):
                 "queued_patches": ["a-9"],
             },
         )
-        self.assertEqual(base["alert"], {"alert_id": "a-1", "service": "order"})
+        self.assertEqual(
+            base["alert"],
+            {
+                "alert_id": "a-1",
+                "service": "order",
+                "description": "",
+                "severity": "critical",
+            },
+        )
+        self.assertEqual(base["gate_events"], [])
         self.assertEqual(base["queued_patches"], [{"workflow_id": None, "alert_id": "a-9"}])
         self.assertEqual(base["confidence"], 0.9)
         self.assertEqual(base["model_version"], "qwen3:8b")
+
+    def test_from_result_carries_alert_meta_and_gate_events(self):
+        """P1-3：重试构造原告警所需的 description/severity 与升级原因所需的 gate_events。"""
+        base: dict = {}
+        _item_from_result(
+            base,
+            {
+                "stage": "ESCALATED",
+                "alert_id": "a-2",
+                "service": "order",
+                "alert": {"description": "订单错误率激增", "severity": "warning"},
+                "gate_events": ["gate1:blocked:confidence-low", "gate2:timeout"],
+                "root_cause": "下游超时",
+            },
+        )
+        self.assertEqual(base["alert"]["description"], "订单错误率激增")
+        self.assertEqual(base["alert"]["severity"], "warning")
+        self.assertEqual(base["gate_events"][-1], "gate2:timeout")
+        self.assertEqual(base["root_cause"], "下游超时")
 
 
 class AuditTest(unittest.TestCase):

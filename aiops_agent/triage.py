@@ -55,8 +55,13 @@ def strip_code_fence(text: str) -> str:
     return text.strip()
 
 
-def build_triage_prompt(alert: Alert, clustered: dict, trace_ids: list[str] | None = None) -> str:
-    """构造 triage prompt：告警 + 聚类模板（降噪后）+ 调用链 ID。"""
+def build_triage_prompt(
+    alert: Alert,
+    clustered: dict,
+    trace_ids: list[str] | None = None,
+    changes: list[dict] | None = None,
+) -> str:
+    """构造 triage prompt：告警 + 聚类模板（降噪后）+ 调用链 ID + 最近变更（P1-1）。"""
     templates = clustered.get("templates", [])[:10]
     template_lines = (
         "\n".join(f"- [{t['count']}x] {t['pattern']}" for t in templates)
@@ -64,6 +69,14 @@ def build_triage_prompt(alert: Alert, clustered: dict, trace_ids: list[str] | No
         else "- （无日志证据）"
     )
     trace_line = ", ".join(trace_ids or []) or "（无）"
+    change_lines = (
+        "\n".join(
+            f"- [{c.get('ts', '')}] {c.get('version') or '--'} {c.get('kind', 'release')}: {c.get('summary', '')}"
+            for c in changes or []
+        )
+        if changes
+        else "- （窗口内无发布/配置变更记录）"
+    )
     return f"""你是资深 SRE 故障根因分析专家。请基于以下证据判定故障根因，只输出一个 JSON 对象。
 
 ## 告警
@@ -78,6 +91,9 @@ def build_triage_prompt(alert: Alert, clustered: dict, trace_ids: list[str] | No
 ## 相关调用链 trace_id
 {trace_line}
 
+## 最近变更（发布/配置事件，时间倒序；用于故障与变更的相关性判断）
+{change_lines}
+
 ## 输出要求（JSON，不要输出其他内容）
 {{
   "error_type": "异常/故障类型，如 NullPointerException / TimeoutError / OutOfMemoryError",
@@ -89,6 +105,8 @@ def build_triage_prompt(alert: Alert, clustered: dict, trace_ids: list[str] | No
 ## 置信度校准规则（必须遵守）
 - 证据明确指向特定异常类型（模板中直接出现异常名/堆栈/错误码）时，confidence 可高于 0.8；
 - 证据不足、模板全是正常日志或日志极少、无法定位具体异常时，confidence 必须低于 0.8；
+- 若日志证据与某项变更高度相关（如发布/配置变更后短时间内爆发故障），在 summary 中明确指出该变更关联；
+- 变更记录仅是时间线索：若日志证据与该变更无关，不得仅凭时间接近判定根因、不得虚增 confidence；
 - confidence 必须是 0 到 1 之间的小数。"""
 
 
@@ -132,13 +150,14 @@ def run_triage(
     trace_ids: list[str] | None = None,
     model: str | None = None,
     timeout: int = 45,
+    changes: list[dict] | None = None,
 ) -> tuple[RootCause, dict]:
     """执行一次 triage：返回 (RootCause, meta)。meta 含 degraded/elapsed 等评测所需信息。"""
     used_model = model or DEFAULT_MODEL
     meta: dict = {"model": used_model, "degraded": False, "reason": ""}
     start = time.monotonic()
     try:
-        prompt = build_triage_prompt(alert, clustered, trace_ids)
+        prompt = build_triage_prompt(alert, clustered, trace_ids, changes)
         raw = call_ollama(prompt, model=used_model, timeout=timeout)
         parsed = TriageOutput.model_validate_json(strip_code_fence(raw))
         root_cause = RootCause(

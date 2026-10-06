@@ -6,6 +6,8 @@ import type {
   AuditSummaryResp,
   AuthStatusResp,
   DiscoverMonitoredAppResp,
+  EscalationsResp,
+  EscalationWriteResp,
   FlowsResp,
   FlowDetailResp,
   HealthResp,
@@ -14,6 +16,7 @@ import type {
   MonitoredAppInput,
   MonitoredAppsResp,
   MonitoredAppWriteResp,
+  OpsMetricsResp,
   OverviewResp,
   ResultResp,
   SessionItem,
@@ -276,6 +279,30 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+
+  // ---- 转人工待办（P1-3；读侧自动登记 ESCALATED 流程） ----
+  escalations: (status: 'all' | 'open' | 'assigned' | 'closed' = 'all') =>
+    request<EscalationsResp>(`/api/escalations${qs({ status })}`),
+  /** 指派/改派责任人（open/assigned 均可）。 */
+  assignEscalation: (escId: string, assignee: string) =>
+    request<EscalationWriteResp>(`/api/escalations/${encodeURIComponent(escId)}/assign`, {
+      method: 'POST',
+      body: JSON.stringify({ assignee }),
+    }),
+  /** 处置关闭（备注留档）。 */
+  closeEscalation: (escId: string, note: string) =>
+    request<EscalationWriteResp>(`/api/escalations/${encodeURIComponent(escId)}/close`, {
+      method: 'POST',
+      body: JSON.stringify({ note }),
+    }),
+  /** 重试修复：以新幂等键重启修复流程，待办自动关闭。 */
+  retryEscalation: (escId: string) =>
+    request<EscalationWriteResp>(`/api/escalations/${encodeURIComponent(escId)}/retry`, {
+      method: 'POST',
+    }),
+
+  /** 运营度量（P1-4）：MTTR / 自动修复率 / 人工干预率 / 闸门拦截率。 */
+  opsMetrics: (days = 7) => request<OpsMetricsResp>(`/api/metrics/ops${qs({ days })}`),
 
   // 被监控应用维护（写盘即热生效）
   monitoredApps: () => request<MonitoredAppsResp>('/api/monitored-apps'),

@@ -18,6 +18,7 @@ const STAGE_OPTIONS = [
   'CANARY',
   'ROLLING_OUT',
   'DONE',
+  'SHADOWED',
   'ESCALATED',
   'FAILED',
   'CANCELLED',

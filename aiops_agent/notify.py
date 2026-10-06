@@ -180,6 +180,60 @@ def render_broadcast_card(
     }
 
 
+def render_shadow_card(
+    alert: Alert,
+    root_cause: RootCause,
+    patch: Patch,
+    test_report: TestReport,
+    *,
+    provider: str = DEFAULT_PROVIDER,
+) -> dict:
+    """Shadow 模式建议卡片（P1-2）：只建议不执行，仅供人工参考，无审批按钮。"""
+    title = f"AI 修复建议（shadow）· {alert.service}/{alert.alert_id}"
+    test_line = (
+        f"单测 {test_report.unit_tests} / 回归 {test_report.regression_tests} / SAST {test_report.sast}"
+    )
+    note = "shadow 模式：未创建 MR、未进入审批与发布，仅生成建议供人工参考。"
+    if provider == "dingtalk":
+        lines = [
+            f"**根因**（confidence={root_cause.confidence:.2f}）：{root_cause.summary}",
+            f"**建议补丁**：{patch.patch_id}（风险：{patch.risk}） 文件：{', '.join(patch.files)}",
+            f"**沙箱测试**：{test_line}",
+            f"**说明**：{note}",
+            f"**Diff**：\n```diff\n{patch.diff}\n```",
+        ]
+        return {
+            "msgtype": "markdown",
+            "markdown": {"title": title, "text": f"### {title}\n\n" + "\n\n".join(lines)},
+        }
+    elements: list[dict] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"**根因**（confidence={root_cause.confidence:.2f}）\n{root_cause.summary}",
+            },
+        },
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"**建议补丁**：{patch.patch_id}（风险：{patch.risk}）\n文件：{', '.join(patch.files)}",
+            },
+        },
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**沙箱测试**\n{test_line}"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**说明**\n{note}"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**Diff**\n```diff\n{patch.diff}\n```"}},
+    ]
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "header": {"title": {"tag": "plain_text", "content": title}, "template": "turquoise"},
+            "elements": elements,
+        },
+    }
+
+
 def render_escalation_card(alert: Alert, reason: str, *, provider: str = DEFAULT_PROVIDER) -> dict:
     """转人工升级卡片（值班负责人；电话/短信升级语义对齐）。"""
     title = f"转人工升级 · {alert.service}/{alert.alert_id}"

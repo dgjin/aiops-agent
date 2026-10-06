@@ -34,6 +34,7 @@ _ACTIVITY_LIST = [
     activities.create_merge_request,
     activities.notify_approvers,
     activities.escalate_to_human,
+    activities.notify_shadow_suggestion,
     activities.notify_users,
     activities.deploy_canary,
     activities.finalize_release,

@@ -22,7 +22,18 @@ web/node_modules/
 web/.vite/
 
 # 运行产物（索引 / 沙箱 / 留痕 / 审计 / 验证截图）
-data/
+# 注：用 data/* 而非 data/ —— 目录级排除后无法再重新包含内部子路径
+# （gitignore 限制），data/* 允许下列评测资产白名单生效
+data/*
+
+# 评测夹具与样本（P1-5 测试资产，纳入版本控制；其 __pycache__ 仍排除）
+!data/fix_eval_repo/
+!data/fix_eval_repo/**
+data/fix_eval_repo/**/__pycache__/
+!data/fix_eval_samples.json
+!data/fix_eval_report.json
+!data/triage_eval_samples.json
+!data/triage_eval_report.json
 
 # 运行日志
 *.log

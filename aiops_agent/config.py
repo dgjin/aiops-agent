@@ -190,10 +190,16 @@ class CanaryConfig(BaseModel):
 
 
 class ReleaseGatePolicy(BaseModel):
-    """release_gate 段总纲。"""
+    """release_gate 段总纲。
+
+    shadow_mode（P1-2）：渐进信任档——流程在沙箱测试通过后停止，只生成
+    根因/补丁/测试报告建议并留痕通知，不创建 MR、不进入审批与发布执行链路。
+    默认关闭；建议按「shadow → 小流量自动 → 全自动」逐步提信任。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
+    shadow_mode: bool = False
     triage: TriageConfig = Field(default_factory=TriageConfig)
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     notify_window: NotifyWindowConfig = Field(default_factory=NotifyWindowConfig)
@@ -227,6 +233,7 @@ class Policy(BaseModel):
     def summary(self) -> str:
         gate = self.release_gate
         return (
+            f"shadow_mode={gate.shadow_mode}, "
             f"confidence_threshold={gate.triage.confidence_threshold}, "
             f"max_fix_retries={gate.triage.max_fix_retries}, "
             f"approval_timeout={gate.approval.timeout}, "
@@ -264,6 +271,8 @@ def snapshot_for_workflow(policy: Policy) -> dict:
     gate = policy.release_gate
     return {
         "policy_source": str(resolve_policy_path()),
+        # P1-2：shadow 档透传（工作流读取用 .get 兜底，旧快照无此键时行为不变）
+        "shadow_mode": gate.shadow_mode,
         "triage": {
             "confidence_threshold": gate.triage.confidence_threshold,
             "max_fix_retries": gate.triage.max_fix_retries,

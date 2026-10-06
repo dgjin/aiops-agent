@@ -1,6 +1,7 @@
 # AIOps 闸门策略配置（设计方案第 5 节 / 附录 A）
 # 策略即配置：工作流启动时加载快照，运行期不热修改，变更走版本升级。
 release_gate:
+  shadow_mode: false              # P1-2 渐进信任档：true = 只建议不执行（测试通过后停止，不发 MR/审批/发布；建议先跑 shadow 积累信任）
   triage:
     confidence_threshold: 0.8     # 闸门 1：根因置信度低于阈值转人工（设计方案 4.2）
     max_fix_retries: 2            # 补丁回炉重试上限（防 token/资源雪崩）

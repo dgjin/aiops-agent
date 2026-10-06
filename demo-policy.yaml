@@ -1,6 +1,7 @@
 # 演示策略（加速版）：仅用于本地端到端演示，键位结构与 release-gate-policy.yaml 完全一致。
 # 使用方式：export AIOPS_POLICY_PATH=./demo-policy.yaml
 release_gate:
+  shadow_mode: false              # P1-2 渐进信任档：true = 只建议不执行（演示可临时打开观察 SHADOWED 终态）
   triage:
     confidence_threshold: 0.8
     max_fix_retries: 2

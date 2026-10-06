@@ -57,12 +57,14 @@ export interface OverviewCounts {
   today_escalated: number
   /** 今日硬失败/超时（读不到 result 的流程，按执行状态派生） */
   today_failed: number
+  /** 转人工待办未闭环数（open+assigned，P1-3 侧栏角标） */
+  escalations_open: number
 }
 
 export interface OverviewResp extends Timed {
   counts: OverviewCounts
   running: FlowItem[]
-  terminal_dist_7d: Record<'DONE' | 'ESCALATED' | 'CANCELLED' | 'FAILED', number>
+  terminal_dist_7d: Record<'DONE' | 'SHADOWED' | 'ESCALATED' | 'CANCELLED' | 'FAILED', number>
 }
 
 export interface FlowsResp extends Timed {
@@ -486,4 +488,96 @@ export interface SessionItem {
   created_at: string | null
   expires_at: string | null
   last_seen_at: string | null
+}
+
+// ----------------------------------------------------------------------
+// 转人工处置闭环（P1-3）：ESCALATED 流程 → 待办 → 指派 → 处置/重试 → 超时再升级
+// ----------------------------------------------------------------------
+
+/** 待办处置轨迹条目。 */
+export interface EscalationHistory {
+  ts: string
+  action: string
+  actor: string
+  detail: string
+}
+
+/** 转人工待办条目（读侧附加 overdue / sla_minutes 派生状态）。 */
+export interface EscalationEntry {
+  id: string
+  wf_id: string
+  alert_id: string
+  service: string
+  /** 自动升级原因摘要（由闸门事件链翻译） */
+  auto_reason: string
+  alert: AlertMeta | null
+  status: 'open' | 'assigned' | 'closed'
+  assignee: string
+  note: string
+  escalated_at: string
+  updated_at: string
+  closed_at: string | null
+  /** 是否已因处置超时再升级（每单只升级一次） */
+  re_escalated: boolean
+  history: EscalationHistory[]
+  /** 已超 SLA 未处置（读侧派生） */
+  overdue: boolean
+  sla_minutes: number
+}
+
+export interface EscalationStats {
+  total: number
+  open: number
+  assigned: number
+  closed: number
+  re_escalated: number
+  sla_minutes: number
+}
+
+export interface EscalationsResp extends Timed {
+  escalations: EscalationEntry[]
+  stats: EscalationStats
+  /** 本次读侧幂等登记的新增条数 */
+  registered: number
+}
+
+export interface EscalationWriteResp extends Timed {
+  ok: boolean
+  escalation: EscalationEntry
+  /** retry 专用：新启动的修复流程 ID */
+  new_wf_id?: string
+}
+
+// ----------------------------------------------------------------------
+// 运营度量（P1-4）：MTTR / 自动修复率 / 人工干预率 / 闸门拦截率
+// ----------------------------------------------------------------------
+
+/** 闸门拦截分档计数（key 为事件族前缀）。 */
+export interface OpsGateBreakdown {
+  key: string
+  label: string
+  count: number
+}
+
+export interface OpsMetricsResp extends Timed {
+  period_days: number
+  /** 窗口内终态流程总数（各项比率的共同分母） */
+  closed_total: number
+  by_stage: Record<string, number>
+  /** 告警→发布完成时长（仅 DONE 样本） */
+  mttr: { avg_seconds: number | null; p95_seconds: number | null; sample: number }
+  /** DONE / 全部终态 */
+  auto_fix_rate: number
+  auto_fix_sample: number
+  /** 被人工写操作（审批/指令/排队/转人工处置）触及的终态占比 */
+  human_intervention_rate: number
+  human_intervention_sample: number
+  /** gate_events 命中拦截族的终态占比 */
+  gate_block_rate: number
+  gate_block_sample: number
+  gate_breakdown: OpsGateBreakdown[]
+  /** 转人工待办现状（存储不可读时为 null） */
+  escalations: EscalationStats | null
+  /** 数据源降级的部件名（temporal / audit / escalations） */
+  degraded: string[]
 }

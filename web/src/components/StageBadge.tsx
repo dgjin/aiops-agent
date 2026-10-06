@@ -17,6 +17,7 @@ export const STAGE_META: Record<string, StageMeta> = {
   CANARY: { label: '金丝雀观测', tone: 'info', pulse: true },
   ROLLING_OUT: { label: '发布中', tone: 'info', pulse: true },
   DONE: { label: '已完成', tone: 'ok' },
+  SHADOWED: { label: '已建议（影子档）', tone: 'idle' },
   ESCALATED: { label: '已转人工', tone: 'danger' },
   CANCELLED: { label: '已取消', tone: 'idle' },
   // 硬失败/超时（读不到 result，由执行状态派生；见 bff/temporal_gateway.stage_from_exec_status）

@@ -19,8 +19,9 @@
 system_kv       系统键值（kill switch / 令牌注册表元数据）
 console_tokens  令牌注册表（production 替代 ``data/console_tokens.json``）
 console_users   控制台用户（密码登录；production 替代 ``data/console_users.json``）
-console_sessions 登录会话（仅存 sha256 指纹；production 替代 ``data/console_sessions.json``）
+console_sessions  登录会话（仅存 sha256 指纹；production 替代 ``data/console_sessions.json``）
 monitored_apps  被监控应用清单（production 替代 ``data/monitored_apps.json``）
+escalations     转人工处置待办（production 替代 ``data/escalations.json``；P1-3）
 audit_events    控制台操作审计（production 替代 JSONL，支持跨实例聚合查询）
 workflow_runs   流程执行速查（BFF 汇总时 upsert，供报表与历史检索）
 =============== ============================================================
@@ -145,6 +146,33 @@ workflow_runs = Table(
     Column("updated_at", DateTime, nullable=False),
     Index("idx_runs_stage", "stage"),
     Index("idx_runs_started", "start_time"),
+)
+
+escalations = Table(
+    "escalations",
+    metadata,
+    Column("id", String(160), primary_key=True),  # esc-<wf_id>
+    Column("wf_id", String(255), nullable=False),
+    Column("alert_id", String(255), nullable=False, server_default=""),
+    Column("service", String(128), nullable=False, server_default=""),
+    # 自动升级原因摘要（由 gate_events 翻译；MySQL TEXT 无 DEFAULT，写入显式提供）
+    Column("auto_reason", Text, nullable=False),
+    Column("alert", JSON),
+    Column(
+        "status",
+        Enum("open", "assigned", "closed", name="escalation_status"),
+        nullable=False,
+        server_default="open",
+    ),
+    Column("assignee", String(128), nullable=False, server_default=""),
+    Column("note", Text, nullable=False),
+    Column("escalated_at", DateTime, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+    Column("closed_at", DateTime),
+    Column("re_escalated", Boolean, nullable=False, server_default=text("0")),
+    Column("history", JSON, nullable=False),
+    Index("idx_escalations_status", "status"),
+    Index("idx_escalations_wf", "wf_id"),
 )
 
 console_users = Table(

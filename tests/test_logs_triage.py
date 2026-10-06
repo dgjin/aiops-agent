@@ -124,6 +124,24 @@ class TestBuildTriagePrompt(unittest.TestCase):
         prompt = triage.build_triage_prompt(ALERT, {"templates": [], "total_lines": 0})
         self.assertIn("（无日志证据）", prompt)
 
+    def test_changes_section_rendered(self) -> None:
+        changes = [
+            {
+                "ts": "2026-10-06T10:12:33+00:00",
+                "version": "v1.0.601",
+                "kind": "config",
+                "summary": "订单超时阈值从 3s 下调为 1s",
+            }
+        ]
+        prompt = triage.build_triage_prompt(ALERT, {"templates": []}, None, changes)
+        self.assertIn("## 最近变更", prompt)
+        self.assertIn("v1.0.601", prompt)
+        self.assertIn("订单超时阈值从 3s 下调为 1s", prompt)
+
+    def test_changes_absent_placeholder(self) -> None:
+        prompt = triage.build_triage_prompt(ALERT, {"templates": []}, None, None)
+        self.assertIn("（窗口内无发布/配置变更记录）", prompt)
+
 
 class TestRunTriage(unittest.TestCase):
     def test_success_path_parses_and_truncates(self) -> None:
@@ -155,6 +173,21 @@ class TestRunTriage(unittest.TestCase):
             root_cause, meta = triage.run_triage(ALERT, {"templates": []})
         self.assertTrue(meta["degraded"])
         self.assertEqual(root_cause.confidence, 0.0)
+
+    def test_changes_passed_into_prompt(self) -> None:
+        payload = json.dumps(
+            {"error_type": "TimeoutError", "suspect_files": [], "confidence": 0.9, "summary": "s"}
+        )
+        changes = [
+            {"ts": "2026-10-06T10:12:33+00:00", "version": "v1.0.601", "kind": "config", "summary": "阈值下调"}
+        ]
+        with mock.patch(
+            "aiops_agent.triage.call_ollama", return_value=payload
+        ) as call:
+            triage.run_triage(ALERT, {"templates": []}, changes=changes)
+        prompt = call.call_args.args[0]
+        self.assertIn("## 最近变更", prompt)
+        self.assertIn("阈值下调", prompt)
 
 
 class TestBuildSurgeAlert(unittest.TestCase):

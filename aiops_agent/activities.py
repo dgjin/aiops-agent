@@ -199,9 +199,10 @@ async def analyze_root_cause(
     """真实实现（WP3）：LLM triage 输出结构化根因（Ollama + pydantic schema 校验）。
 
     安全侧降级：LLM 不可用/输出非法 → confidence=0.0 → 闸门 1 自动转人工。
+    变更关联（P1-1）：注入近 2 小时发布/配置事件，供 LLM 判定故障与变更的相关性。
     演示关键词（low-conf / protected）走确定性桩，保证演示矩阵回归不依赖 LLM。
     """
-    from . import triage
+    from . import changes, triage
 
     await _tiny_delay()
     desc = alert.description.lower()
@@ -223,8 +224,11 @@ async def analyze_root_cause(
         )
         return root_cause
 
+    recent_changes = await asyncio.to_thread(changes.recent_changes, alert.service)
+    if recent_changes:
+        log.info("[triage] 变更关联：近 2 小时命中 %d 条变更记录", len(recent_changes))
     root_cause, meta = await asyncio.to_thread(
-        triage.run_triage, alert, clustered, trace_ids
+        triage.run_triage, alert, clustered, trace_ids, changes=recent_changes
     )
     log.info(
         "[triage] LLM triage：%s confidence=%.2f（model=%s, elapsed=%.1fs, degraded=%s）",
@@ -448,6 +452,32 @@ async def escalate_to_human(alert: Alert, reason: str) -> None:
         delivery["mode"], alert.alert_id, reason,
     )
     return None
+
+
+@activity.defn
+async def notify_shadow_suggestion(
+    alert: Alert,
+    root_cause: RootCause,
+    patch: Patch,
+    test_report: TestReport,
+) -> dict:
+    """Shadow 模式建议投递（P1-2）：只建议不执行——无 MR、无审批、无发布，仅留痕供人工参考。"""
+    from . import notify
+
+    sender = notify.NotificationSender()
+    card = notify.render_shadow_card(
+        alert, root_cause, patch, test_report, provider=sender.provider
+    )
+    delivery = sender.send(card, msg_id=f"shadow-{patch.patch_id}")
+    log.info(
+        "[shadow] 修复建议已生成（未执行，仅供人工参考）：补丁=%s 投递=%s",
+        patch.patch_id, delivery["mode"],
+    )
+    return {
+        "msg_id": delivery.get("msg_id") or f"shadow-{patch.patch_id}",
+        "delivery": delivery["mode"],
+        "path": delivery.get("path"),
+    }
 
 
 # --------------------------------------------------------------------------

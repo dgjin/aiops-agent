@@ -1,0 +1,604 @@
+{
+  "generated_at": "2026-10-06 17:37:45",
+  "model": "qwen3:8b",
+  "confidence_threshold": 0.8,
+  "metrics": {
+    "total": 32,
+    "schema_pass_rate": 1.0,
+    "high_evidence_samples": 26,
+    "top1_hit_rate": 0.9231,
+    "auto_proceed_accuracy": 0.9231,
+    "low_evidence_samples": 6,
+    "low_conf_block_rate": 1.0,
+    "correct_rate": 0.9375,
+    "avg_elapsed_seconds": 1.12,
+    "total_elapsed_seconds": 35.98
+  },
+  "samples": [
+    {
+      "id": "S01",
+      "note": "NPE 证据充分",
+      "expect_low_confidence": false,
+      "error_type": "NullPointerException",
+      "confidence": 0.95,
+      "suspect_files": [
+        "com/example/service/OrderService.java"
+      ],
+      "summary": "大量 NullPointerException 异常表明 OrderService.java 中的 coupon 处理逻辑存在空指针问题，导致服务异常。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 0.9,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S02",
+      "note": "超时证据充分",
+      "expect_low_confidence": false,
+      "error_type": "TimeoutError",
+      "confidence": 0.95,
+      "suspect_files": [
+        "nl2sql/internal/call_service.go",
+        "nl2sql/internal/fallback_handler.go",
+        "nl2sql/config/timeout_config.go"
+      ],
+      "summary": "上游服务 coupon-mock 超时导致接口 P99 超过 3s，错误日志突增，触发降级逻辑。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.17,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S03",
+      "note": "OOM 证据充分",
+      "expect_low_confidence": false,
+      "error_type": "OutOfMemoryError",
+      "confidence": 0.95,
+      "suspect_files": [
+        "src/main/java/com/example/nl2sql/ModelProcessor.java",
+        "src/main/java/com/example/nl2sql/CacheManager.java",
+        "src/main/java/com/example/nl2sql/QueryExecutor.java"
+      ],
+      "summary": "进程频繁Full GC并导致OOM，可能由于内存泄漏或对象缓存未释放，建议检查模型处理和缓存管理逻辑。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.25,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S04",
+      "note": "死锁证据充分",
+      "expect_low_confidence": false,
+      "error_type": "DeadlockError",
+      "confidence": 0.95,
+      "suspect_files": [
+        "nl2sql/internal/db/transaction.go",
+        "nl2sql/internal/db/lock_manager.go",
+        "nl2sql/internal/db/queries.go"
+      ],
+      "summary": "数据库死锁导致事务回滚，引发写接口超时率升高。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 0.92,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S05",
+      "note": "证据不足：混合正常日志，无明确异常",
+      "expect_low_confidence": true,
+      "error_type": "LlmRetryError",
+      "confidence": 0.65,
+      "suspect_files": [
+        "src/main/java/com/nl2sql/service/LlmService.java",
+        "src/main/java/com/nl2sql/controller/QueryController.java"
+      ],
+      "summary": "日志显示 Ollama 引擎出现重试，可能与 LLM 服务调用失败相关，但无明确异常类型或根因证据。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.13,
+      "keyword_hit": false,
+      "gate": "escalate（转人工）",
+      "correct": true
+    },
+    {
+      "id": "S06",
+      "note": "证据不足：完全无日志",
+      "expect_low_confidence": true,
+      "error_type": "Unknown",
+      "confidence": 0.0,
+      "suspect_files": [],
+      "summary": "无日志证据和调用链信息，无法确定根因。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 0.54,
+      "keyword_hit": false,
+      "gate": "escalate（转人工）",
+      "correct": true
+    },
+    {
+      "id": "S07",
+      "note": "Redis 连接拒绝证据充分",
+      "expect_low_confidence": false,
+      "error_type": "Redis连接失败",
+      "confidence": 0.95,
+      "suspect_files": [
+        "session-store/redis_client.go",
+        "session-store/session_store.go",
+        "session-api/main.go"
+      ],
+      "summary": "Redis连接失败导致会话读取失败，大量请求降级到数据库存储，登录成功率骤降。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 0.91,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S08",
+      "note": "数据库连接池耗尽证据充分",
+      "expect_low_confidence": false,
+      "error_type": "TimeoutError",
+      "confidence": 0.95,
+      "suspect_files": [
+        "src/main/java/com/ordercenter/config/DataSourceConfig.java",
+        "src/main/java/com/ordercenter/service/OrderService.java",
+        "src/main/java/com/ordercenter/repository/OrderRepository.java"
+      ],
+      "summary": "数据库连接池耗尽导致下单接口超时，大量线程等待数据库连接，表明连接池配置不足或数据库性能瓶颈。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.41,
+      "keyword_hit": false,
+      "gate": "auto_proceed（放行）",
+      "correct": false
+    },
+    {
+      "id": "S09",
+      "note": "DNS 解析失败证据充分",
+      "expect_low_confidence": false,
+      "error_type": "DNS解析失败",
+      "confidence": 0.95,
+      "suspect_files": [
+        "dns_resolver.go",
+        "service_discovery.go",
+        "config_loader.go"
+      ],
+      "summary": "支付网关服务因DNS解析失败导致下游全部不可达，错误提示显示无法解析payment-gateway和api.partner.example.com",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 0.93,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S10",
+      "note": "TLS 证书过期证据充分",
+      "expect_low_confidence": false,
+      "error_type": "CertificateExpiredError",
+      "confidence": 0.95,
+      "suspect_files": [
+        "src/main/java/com/partner/bridge/security/TlsConfig.java",
+        "src/main/java/com/partner/bridge/client/PartnerApiClient.java",
+        "src/main/java/com/partner/bridge/utils/SSLUtils.java"
+      ],
+      "summary": "外部合作方证书已过期，导致 TLS 握手失败，引发服务调用全部失败。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.23,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S11",
+      "note": "网关 502 上游失联证据充分",
+      "expect_low_confidence": false,
+      "error_type": "TimeoutError",
+      "confidence": 0.95,
+      "suspect_files": [
+        "edge-gateway/src/main/java/com/example/gateway/OrderService.java",
+        "edge-gateway/src/main/java/com/example/gateway/LoadBalancer.java",
+        "edge-gateway/src/main/java/com/example/gateway/RequestHandler.java"
+      ],
+      "summary": "订单查询页面出现大面积 502 错误，日志显示 upstream 连接失败，可能与订单服务（orders:8080）超时或连接失败有关。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.46,
+      "keyword_hit": false,
+      "gate": "auto_proceed（放行）",
+      "correct": false
+    },
+    {
+      "id": "S12",
+      "note": "限流 429 证据充分",
+      "expect_low_confidence": false,
+      "error_type": "RateLimitExceeded",
+      "confidence": 0.95,
+      "suspect_files": [
+        "src/main/java/com/example/api/RateLimiter.java",
+        "src/main/java/com/example/api/PartnerController.java"
+      ],
+      "summary": "合作方请求被拒绝是由于 API 的速率限制被触发，日志显示大量请求超过限流阈值，可能与限流配置或请求处理逻辑相关。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.17,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S13",
+      "note": "Kafka 消费滞后/再平衡证据充分",
+      "expect_low_confidence": false,
+      "error_type": "RebalanceTimeoutError",
+      "confidence": 0.95,
+      "suspect_files": [
+        "src/main/java/com/eventconsumer/kafka/ConsumerGroupManager.java",
+        "src/main/java/com/eventconsumer/kafka/ConsumerConfig.java",
+        "src/main/java/com/eventconsumer/kafka/ConsumerRebalanceListener.java"
+      ],
+      "summary": "消费者组 rebalance 超时导致成员被踢出，引发订单事件积压和账务延迟升高。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.26,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S14",
+      "note": "磁盘写满证据充分",
+      "expect_low_confidence": false,
+      "error_type": "DiskFullError",
+      "confidence": 0.95,
+      "suspect_files": [
+        "/var/data/wal/segment-<NUM>.log"
+      ],
+      "summary": "磁盘空间不足导致写入失败，日志显示磁盘使用率已达 100%。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 0.93,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S15",
+      "note": "配置解析失败 CrashLoop 证据充分",
+      "expect_low_confidence": false,
+      "error_type": "YAML解析错误",
+      "confidence": 0.95,
+      "suspect_files": [
+        "config/app.yaml"
+      ],
+      "summary": "报表服务实例因 config/app.yaml 文件中 YAML 格式错误导致配置解析失败，引发容器异常退出并反复重启。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 0.86,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S16",
+      "note": "线程池拒绝证据充分",
+      "expect_low_confidence": false,
+      "error_type": "RejectedExecutionException",
+      "confidence": 0.95,
+      "suspect_files": [
+        "src/main/java/com/example/jobs/SyncTask.java",
+        "src/main/java/com/example/worker/ThreadPoolConfig.java",
+        "src/main/java/com/example/worker/TaskQueueManager.java"
+      ],
+      "summary": "同步任务大量丢弃是由于线程池队列已满，任务被拒绝执行，可能与线程池配置或任务队列管理逻辑相关。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.51,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S17",
+      "note": "JSON 反序列化失败证据充分",
+      "expect_low_confidence": false,
+      "error_type": "JSONDecodeError",
+      "confidence": 0.95,
+      "suspect_files": [
+        "api/ingest/handler.py",
+        "api/ingest/utils.py",
+        "api/ingest/models.py"
+      ],
+      "summary": "事件入库接口因接收到非法 JSON 格式数据导致 JSONDecodeError，错误率飙升。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.2,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S18",
+      "note": "文件权限拒绝证据充分",
+      "expect_low_confidence": false,
+      "error_type": "PermissionError",
+      "confidence": 0.95,
+      "suspect_files": [
+        "/etc/aiops/secrets.key",
+        "/var/lib/updater"
+      ],
+      "summary": "升级通道读取失败是由于权限不足导致无法访问 '/etc/aiops/secrets.key' 文件，进而无法读取更新通道清单目录。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.03,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S19",
+      "note": "端口占用证据充分",
+      "expect_low_confidence": false,
+      "error_type": "AddressAlreadyInUse",
+      "confidence": 0.95,
+      "suspect_files": [
+        "meta-svc/app/main.py",
+        "meta-svc/config/app_config.py",
+        "meta-svc/utils/network_utils.py"
+      ],
+      "summary": "实例启动失败是由于端口 8080 被占用，导致健康检查不通过。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.08,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S20",
+      "note": "数组越界证据充分",
+      "expect_low_confidence": false,
+      "error_type": "ArrayIndexOutOfBoundsException",
+      "confidence": 0.95,
+      "suspect_files": [
+        "batch-report/src/main/java/com/example/batch/RecordParser.java"
+      ],
+      "summary": "批处理作业因数组越界异常导致批量失败，错误发生在RecordParser类的parse方法中。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 0.9,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S21",
+      "note": "类型转换异常证据充分",
+      "expect_low_confidence": false,
+      "error_type": "ClassCastException",
+      "confidence": 0.95,
+      "suspect_files": [
+        "event-consumer/src/main/java/com/example/mq/Consumer.java"
+      ],
+      "summary": "消费失败率升高是由于消息内容类型不匹配，尝试将字符串强制转换为整数导致 ClassCastException。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 0.9,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S22",
+      "note": "栈溢出证据充分",
+      "expect_low_confidence": false,
+      "error_type": "StackOverflowError",
+      "confidence": 0.95,
+      "suspect_files": [
+        "route-planner/src/main/java/com/example/graph/PathFinder.java"
+      ],
+      "summary": "路径规划接口因递归深度过大导致 StackOverflowError，可能与 DFS 算法未设置终止条件或图结构异常有关。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 0.97,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S23",
+      "note": "Broken pipe 客户端断连证据充分",
+      "expect_low_confidence": false,
+      "error_type": "Broken Pipe",
+      "confidence": 0.95,
+      "suspect_files": [
+        "stream-api/src/main/java/com/example/stream/StreamPusher.java",
+        "stream-api/src/main/java/com/example/stream/ClientHandler.java",
+        "stream-api/src/main/java/com/example/stream/ConnectionManager.java"
+      ],
+      "summary": "推送服务出现 Broken Pipe 异常，表明客户端在服务端响应完成前断开连接，可能与连接管理或流处理逻辑相关。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.31,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S24",
+      "note": "熔断器打开证据充分",
+      "expect_low_confidence": false,
+      "error_type": "CircuitBreakerOpenError",
+      "confidence": 0.95,
+      "suspect_files": [
+        "src/main/java/com/ordercenter/service/OrderService.java",
+        "src/main/java/com/ordercenter/dependency/DependencyManager.java",
+        "src/main/java/com/ordercenter/fallback/DefaultFallbackHandler.java"
+      ],
+      "summary": "支付网关依赖的断路器因失败率超过阈值而打开，导致所有相关请求被拒绝并触发降级逻辑。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.41,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S25",
+      "note": "401 认证失败风暴证据充分",
+      "expect_low_confidence": false,
+      "error_type": "TokenSignatureMismatchError",
+      "confidence": 0.95,
+      "suspect_files": [
+        "auth/service/auth-service.go",
+        "gateway/middleware/auth-middleware.go",
+        "config/auth-config.yaml"
+      ],
+      "summary": "大量请求被拒是由于 token 签名不匹配导致的 401 Unauthorized 错误，可能与认证服务配置或签名密钥变更相关。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.22,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S26",
+      "note": "数字格式异常证据充分",
+      "expect_low_confidence": false,
+      "error_type": "NumberFormatException",
+      "confidence": 0.95,
+      "suspect_files": [
+        "/pricing-svc/src/main/java/com/example/pricing/PriceCalculator.java"
+      ],
+      "summary": "价格计算接口因接收到非法数字格式字符串 \"12.3.4\" 导致 NumberFormatException，引发大量 500 错误。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.04,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S27",
+      "note": "变更关联：发布后 Redis 连接故障（changes 高度相关）",
+      "expect_low_confidence": false,
+      "error_type": "ConnectionRefusedError",
+      "confidence": 0.95,
+      "suspect_files": [
+        "src/main/java/com/ordercenter/config/RedisConfig.java",
+        "src/main/java/com/ordercenter/service/OrderService.java",
+        "src/main/java/com/ordercenter/dao/OrderDao.java"
+      ],
+      "summary": "发布 v2026.10.1 后 redis.host 配置切换至 redis-cache-new，导致连接拒绝错误，引发下单错误率激增。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.39,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S28",
+      "note": "变更干扰：发布存在但日志证据指向磁盘（时间线索不得虚增 confidence）",
+      "expect_low_confidence": false,
+      "error_type": "No space left on device",
+      "confidence": 0.95,
+      "suspect_files": [
+        "/var/data/search/index/seg-<NUM>.idx",
+        "/var/data/search/index/commit",
+        "/var/data/search/index/segments"
+      ],
+      "summary": "磁盘空间不足导致写入失败率升高，索引部分不可用，与最近的检索排序权重调整发布无直接关联。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.24,
+      "keyword_hit": true,
+      "gate": "auto_proceed（放行）",
+      "correct": true
+    },
+    {
+      "id": "S29",
+      "note": "证据不足：仅启动与健康检查日志",
+      "expect_low_confidence": true,
+      "error_type": "TimeoutError",
+      "confidence": 0.65,
+      "suspect_files": [
+        "health_check.go",
+        "server.go"
+      ],
+      "summary": "健康检查探针偶发超时，可能与探针配置或服务响应延迟有关，但无明确日志证据指向具体原因。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 0.96,
+      "keyword_hit": false,
+      "gate": "escalate（转人工）",
+      "correct": true
+    },
+    {
+      "id": "S30",
+      "note": "证据不足：仅一条弃用告警，无故障信号",
+      "expect_low_confidence": true,
+      "error_type": "ConfigDeprecationWarning",
+      "confidence": 0.65,
+      "suspect_files": [
+        "config/auth_config.go",
+        "config/legacy_mode.go",
+        "config/upgrade_utils.go"
+      ],
+      "summary": "灰度环境检测到使用已弃用的 auth.legacy_mode 配置项，可能影响后续版本兼容性。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.09,
+      "keyword_hit": false,
+      "gate": "escalate（转人工）",
+      "correct": true
+    },
+    {
+      "id": "S31",
+      "note": "证据不足：指标型波动，日志全部正常",
+      "expect_low_confidence": true,
+      "error_type": "P99 延迟升高",
+      "confidence": 0.6,
+      "suspect_files": [
+        "src/main/java/com/example/queryapi/endpoint/QueryEndpoint.java",
+        "src/main/java/com/example/queryapi/cache/CacheManager.java",
+        "src/main/java/com/example/queryapi/utils/RequestUtils.java"
+      ],
+      "summary": "接口 P99 延迟轻微升高，但日志无异常，可能与请求处理逻辑或缓存效率相关。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.47,
+      "keyword_hit": false,
+      "gate": "escalate（转人工）",
+      "correct": true
+    },
+    {
+      "id": "S32",
+      "note": "证据不足：日志疑似截断，仅有请求开始行",
+      "expect_low_confidence": true,
+      "error_type": "BatchProcessTimeout",
+      "confidence": 0.65,
+      "suspect_files": [
+        "batch-worker/src/main/java/com/example/batch/worker/ChunkFetcher.java",
+        "batch-worker/src/main/java/com/example/batch/worker/PartitionProcessor.java"
+      ],
+      "summary": "批处理耗时异常，疑似因日志截断导致数据采集不全，影响耗时分析。",
+      "degraded": false,
+      "reason": "",
+      "elapsed_seconds": 1.19,
+      "keyword_hit": false,
+      "gate": "escalate（转人工）",
+      "correct": true
+    }
+  ]
+}

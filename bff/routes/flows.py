@@ -19,7 +19,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from aiops_agent import metrics
 from aiops_agent.models import Alert
 
-from .. import aggregator, audit, runs_store
+from .. import aggregator, audit, escalations, runs_store
 from ..deps import ApiError, close_dt, gw, log, ok
 from ..temporal_gateway import check_stage_allowed
 
@@ -29,6 +29,20 @@ router = APIRouter()
 # ----------------------------------------------------------------------
 # 读侧：总览 / 列表 / 详情 / 结果
 # ----------------------------------------------------------------------
+
+
+def _open_escalations(items: list[dict]) -> int:
+    """转人工待办未闭环数（侧栏角标，P1-3）。
+
+    顺带幂等登记本批流程中的 ESCALATED 条目，保证角标与待办页同源；
+    存储暂不可读时回退 0——巡检类派生计数不应阻塞总览。
+    """
+    try:
+        escalations.sync_from_flows(items)
+        stats = escalations.stats()
+        return stats["open"] + stats["assigned"]
+    except Exception:  # noqa: BLE001 - 存储故障不阻塞总览
+        return 0
 
 
 @router.get("/api/overview")
@@ -50,8 +64,9 @@ async def api_overview() -> dict:
                 today_failed += 1
 
     week_ago = datetime.now(timezone.utc) - timedelta(days=7)
-    # FAILED 为「硬失败/超时」终态（见 temporal_gateway.stage_from_exec_status），单独成类
-    dist = {"DONE": 0, "ESCALATED": 0, "CANCELLED": 0, "FAILED": 0}
+    # FAILED 为「硬失败/超时」终态（见 temporal_gateway.stage_from_exec_status），单独成类；
+    # SHADOWED 为 P1-2 影子档终态（只建议不执行）
+    dist = {"DONE": 0, "ESCALATED": 0, "CANCELLED": 0, "FAILED": 0, "SHADOWED": 0}
     for item in closed:
         closed_at = close_dt(item)
         if closed_at and closed_at >= week_ago and item["stage"] in dist:
@@ -64,6 +79,7 @@ async def api_overview() -> dict:
         "today_done": today_done,
         "today_escalated": today_escalated,
         "today_failed": today_failed,
+        "escalations_open": _open_escalations(items),
     }
     return ok({"counts": counts, "running": running, "terminal_dist_7d": dist})
 

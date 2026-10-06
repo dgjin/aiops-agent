@@ -108,6 +108,36 @@ class TestBroadcastAndEscalation(unittest.TestCase):
             self.assertIn("金丝雀劣化自动回滚", _card_text(card))
 
 
+class TestShadowCard(unittest.TestCase):
+    """P1-2 影子档建议卡片：只建议不执行（无审批按钮，明确标注未执行）。"""
+
+    def test_feishu_no_buttons_and_note(self) -> None:
+        card = notify.render_shadow_card(ALERT, ROOT_CAUSE, PATCH, REPORT)
+        self.assertEqual(card["msg_type"], "interactive")
+        self.assertIn("shadow", card["card"]["header"]["title"]["content"])
+        self.assertNotEqual(card["card"]["elements"][-1]["tag"], "action")  # 无审批按钮
+        text = _card_text(card)
+        self.assertIn("未创建 MR", text)
+        self.assertIn("if coupon else 0", text)  # 完整 diff 仍供人工参考
+
+    def test_dingtalk_markdown(self) -> None:
+        card = notify.render_shadow_card(
+            ALERT, ROOT_CAUSE, PATCH, REPORT, provider="dingtalk"
+        )
+        self.assertEqual(card["msgtype"], "markdown")
+        self.assertIn("未创建 MR", card["markdown"]["text"])
+
+    def test_activity_records_trace(self) -> None:
+        tmp = Path(tempfile.mkdtemp(prefix="wp-shadow-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        with mock.patch.object(notify, "NOTIFY_DIR", tmp / "notify"):
+            result = asyncio.run(
+                activities.notify_shadow_suggestion(ALERT, ROOT_CAUSE, PATCH, REPORT)
+            )
+        self.assertEqual(result["msg_id"], "shadow-p-nt-1-r1")
+        self.assertTrue(Path(result["path"]).is_file())
+
+
 class TestSenderRecorded(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="wp8-notify-"))

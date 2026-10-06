@@ -19,6 +19,7 @@ from temporalio.client import Client, WorkflowExecution, WorkflowExecutionStatus
 from aiops_agent.workflows import AIOpsFixWorkflow
 
 WF_TYPE = "AIOpsFixWorkflow"
+TASK_QUEUE = "aiops-tasks"  # 与 worker.py / alert_webhook.py 一致
 _QUERY_TIMEOUT = timedelta(seconds=5)
 _LIST_CACHE_TTL = 3.0
 _LIST_MAX_FETCH = 200
@@ -81,13 +82,22 @@ def _item_from_status(base: dict, status: dict) -> None:
 def _item_from_result(base: dict, result: dict) -> None:
     base.update(
         stage=result.get("stage"),
-        alert={"alert_id": result.get("alert_id"), "service": result.get("service")},
+        alert={
+            "alert_id": result.get("alert_id"),
+            "service": result.get("service"),
+            # description/severity 供重试构造原告警（P1-3）
+            "description": (result.get("alert") or {}).get("description") or "",
+            "severity": (result.get("alert") or {}).get("severity") or "critical",
+        },
         duration_seconds=result.get("duration_seconds"),
         confidence=result.get("confidence"),
         model_version=result.get("model_version"),
         patch_id=result.get("patch_id"),
         patch=result.get("patch"),
         test_report=result.get("test_report"),
+        # 闸门事件链（P1-3 升级原因摘要 / P1-4 拦截率统计的数据源）
+        gate_events=result.get("gate_events") or [],
+        root_cause=result.get("root_cause"),
         queued_patches=[
             {"workflow_id": None, "alert_id": alert_id}
             for alert_id in result.get("queued_patches") or []
@@ -241,6 +251,32 @@ class TemporalGateway:
 
     async def signal_queue_patch(self, wf_id: str, new_wf_id: str, alert) -> None:
         await self.handle(wf_id).signal(AIOpsFixWorkflow.submit_patch, args=[new_wf_id, alert])
+
+    async def start_flow(self, alert, wf_id: str) -> str:
+        """以指定幂等键启动修复流程（P1-3 重试修复）；已存在同 ID 流程时抛 ValueError。
+
+        策略快照在启动时读取（与 webhook/demo_cli 同约定：启动方决定快照）。
+        """
+        from temporalio.client import WorkflowAlreadyStartedError
+        from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+
+        from aiops_agent.config import load_policy, snapshot_for_workflow
+
+        snapshot = snapshot_for_workflow(load_policy())
+        client = await self.client()
+        try:
+            handle = await client.start_workflow(
+                AIOpsFixWorkflow.run,
+                args=[alert, snapshot],
+                id=wf_id,
+                task_queue=TASK_QUEUE,
+                id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+                id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
+            )
+        except WorkflowAlreadyStartedError as exc:
+            raise ValueError(f"流程已存在（幂等拒绝）：{wf_id}") from exc
+        self.invalidate_cache()
+        return handle.id
 
     def invalidate_cache(self) -> None:
         self._list_cache = None

@@ -10,6 +10,10 @@
     - 闸门 2：驳回 / 超时 → ESCALATED
     - 窗口内 cancel → CANCELLED（排队补丁保留，队首补丁自动开启新周期）
     - 金丝雀劣化 → 回滚 + ESCALATED
+
+渐进信任档（P1-2）：
+    - shadow_mode 开启时，测试通过后不创建 MR、不进入审批/发布，
+      仅生成建议卡片留痕后以 SHADOWED 终态结束（只建议不执行）。
 """
 
 from __future__ import annotations
@@ -187,6 +191,16 @@ class AIOpsFixWorkflow:
             await self._call(
                 activities.escalate_to_human, alert,
                 f"沙箱测试回炉重试 {max_retries + 1} 次仍失败，转人工",
+            )
+            return self._final(alert, root_cause, patch, None, started)
+
+        # ---------- SHADOW（渐进信任档）：只建议不执行（P1-2） ----------
+        # 读取用 .get 兜底：运行中旧流程的快照无此键时行为不变（replay 安全）。
+        if policy.get("shadow_mode", False):
+            self.stage = "SHADOWED"
+            self._gate_events.append("shadow:suggestion-only")
+            await self._call(
+                activities.notify_shadow_suggestion, alert, root_cause, patch, test_report
             )
             return self._final(alert, root_cause, patch, None, started)
 

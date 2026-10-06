@@ -1,0 +1,519 @@
+{
+  "description": "Triage 离线评测样本（P1-5 扩样：26 条证据充分 + 6 条证据不足，共 32 条）。clustered 字段为 Drain3 聚类输出的模拟形态（pattern 已掩码）；S27/S28 附带 changes（P1-1 变更关联）用于验证变更相关性判定。",
+  "samples": [
+    {
+      "id": "S01",
+      "note": "NPE 证据充分",
+      "alert": {"alert_id": "eval-s01", "service": "nl2sql", "severity": "critical", "description": "近 1 分钟 ERROR 日志 800 条（1 小时前基线 40 条），超过环比阈值"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] java.lang.NullPointerException: coupon is null at com.example.service.OrderService.submit(OrderService.java:<NUM>) user_id=<NUM>", "count": 760},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] request failed endpoint=/query code=<NUM> duration_ms=<NUM> retries=<NUM>", "count": 240}
+        ],
+        "compression_ratio": 0.0025,
+        "total_lines": 800
+      },
+      "trace_ids": ["trace-1a2b3c4d-001", "trace-5e6f7a8b-002"],
+      "expected_keywords": ["NullPointerException", "NPE", "空指针"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S02",
+      "note": "超时证据充分",
+      "alert": {"alert_id": "eval-s02", "service": "nl2sql", "severity": "critical", "description": "接口 P99 超过 3s，错误日志突增"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] upstream request timeout service=coupon-mock url=/api/coupon elapsed_ms=<NUM> threshold_ms=<NUM>", "count": 520},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] fallback triggered reason=upstream_error order_id=ORD<NUM>", "count": 180}
+        ],
+        "compression_ratio": 0.0029,
+        "total_lines": 700
+      },
+      "trace_ids": ["trace-11aa22bb-003"],
+      "expected_keywords": ["timeout", "超时", "timed out"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S03",
+      "note": "OOM 证据充分",
+      "alert": {"alert_id": "eval-s03", "service": "nl2sql", "severity": "critical", "description": "进程频繁 Full GC，实例重启"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] java.lang.OutOfMemoryError: Java heap space", "count": 430},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] GC overhead limit exceeded pause_ms=<NUM>", "count": 210}
+        ],
+        "compression_ratio": 0.0031,
+        "total_lines": 640
+      },
+      "trace_ids": [],
+      "expected_keywords": ["OutOfMemory", "OOM", "heap"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S04",
+      "note": "死锁证据充分",
+      "alert": {"alert_id": "eval-s04", "service": "nl2sql", "severity": "critical", "description": "写接口超时率升高，数据库告警"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] deadlock detected: transaction <NUM> waiting for lock on table orders", "count": 380},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] transaction rolled back tx_id=<NUM> retry=<NUM>", "count": 120}
+        ],
+        "compression_ratio": 0.004,
+        "total_lines": 500
+      },
+      "trace_ids": ["trace-dead0001-004"],
+      "expected_keywords": ["Deadlock", "死锁"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S05",
+      "note": "证据不足：混合正常日志，无明确异常",
+      "alert": {"alert_id": "eval-s05", "service": "nl2sql", "severity": "warning", "description": "错误率轻微波动（缺乏明确异常信号）"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "INFO [<TRACEID>] request completed endpoint=/query status=<NUM> duration_ms=<NUM>", "count": 12},
+          {"id": "tpl-2", "pattern": "WARN [<TRACEID>] llm retry attempt=<NUM> engine=ollama", "count": 3}
+        ],
+        "compression_ratio": 0.12,
+        "total_lines": 15
+      },
+      "trace_ids": [],
+      "expected_keywords": [],
+      "expect_low_confidence": true
+    },
+    {
+      "id": "S06",
+      "note": "证据不足：完全无日志",
+      "alert": {"alert_id": "eval-s06", "service": "nl2sql", "severity": "warning", "description": "分钟级抖动告警，采集侧无对应日志"},
+      "clustered": {
+        "templates": [],
+        "compression_ratio": 0.0,
+        "total_lines": 0
+      },
+      "trace_ids": [],
+      "expected_keywords": [],
+      "expect_low_confidence": true
+    },
+    {
+      "id": "S07",
+      "note": "Redis 连接拒绝证据充分",
+      "alert": {"alert_id": "eval-s07", "service": "session-api", "severity": "critical", "description": "登录成功率骤降至 42%，大量会话读取失败"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] redis connection refused host=redis-cache:6379 op=GET key=session:<NUM>", "count": 640},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] fallback to db session store reason=redis_unavailable", "count": 210}
+        ],
+        "compression_ratio": 0.0031,
+        "total_lines": 850
+      },
+      "trace_ids": ["trace-redis001-007"],
+      "expected_keywords": ["ConnectionRefused", "ConnectError", "Redis", "refused"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S08",
+      "note": "数据库连接池耗尽证据充分",
+      "alert": {"alert_id": "eval-s08", "service": "order-center", "severity": "critical", "description": "下单接口大面积超时，大量线程等待数据库连接"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] HikariPool-1 connection pool exhausted: total=10, active=10, waiting=23, reject_policy=abort", "count": 480},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] cannot acquire connection from pool db=mysql-main", "count": 190}
+        ],
+        "compression_ratio": 0.0034,
+        "total_lines": 670
+      },
+      "trace_ids": ["trace-pool0002-008"],
+      "expected_keywords": ["pool", "连接池", "Hikari", "数据库连接"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S09",
+      "note": "DNS 解析失败证据充分",
+      "alert": {"alert_id": "eval-s09", "service": "payment-gateway", "severity": "critical", "description": "支付成功率断崖式下跌，下游全部不可达"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] resolve failed service=payment-gateway: lookup payment-gateway on 10.96.0.10:53: no such host", "count": 530},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] dial tcp: lookup api.partner.example.com: i/o timeout", "count": 320}
+        ],
+        "compression_ratio": 0.0028,
+        "total_lines": 850
+      },
+      "trace_ids": ["trace-dns0003-009"],
+      "expected_keywords": ["DNS", "lookup", "resolve", "解析"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S10",
+      "note": "TLS 证书过期证据充分",
+      "alert": {"alert_id": "eval-s10", "service": "partner-bridge", "severity": "critical", "description": "与外部合作方调用全部失败，握手异常"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] x509: certificate has expired or is not yet valid: current time 2026-10-01T08:00:00Z is after 2026-09-30T00:00:00Z", "count": 410},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] TLS handshake failed peer=partner-api cert=expired", "count": 260}
+        ],
+        "compression_ratio": 0.0033,
+        "total_lines": 670
+      },
+      "trace_ids": ["trace-tls0004-010"],
+      "expected_keywords": ["certificate", "Cert", "x509", "TLS"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S11",
+      "note": "网关 502 上游失联证据充分",
+      "alert": {"alert_id": "eval-s11", "service": "edge-gateway", "severity": "critical", "description": "订单查询页面大面积 502"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] upstream connect error or disconnect/reset before headers. reset reason: connection failure upstream=orders:8080", "count": 590},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] 502 Bad Gateway client=<IP> path=/api/v1/orders", "count": 430}
+        ],
+        "compression_ratio": 0.0036,
+        "total_lines": 1020
+      },
+      "trace_ids": ["trace-gw0005-011"],
+      "expected_keywords": ["502", "BadGateway", "Bad Gateway", "upstream", "Upstream"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S12",
+      "note": "限流 429 证据充分",
+      "alert": {"alert_id": "eval-s12", "service": "query-api", "severity": "warning", "description": "合作方反馈大量请求被拒绝"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "WARN [<TRACEID>] rate limit exceeded api_key=partner-<NUM> limit=<NUM>rps", "count": 380},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] upstream returned 429 Too Many Requests endpoint=/v1/query retry_after=60", "count": 290}
+        ],
+        "compression_ratio": 0.0041,
+        "total_lines": 670
+      },
+      "trace_ids": ["trace-rl0006-012"],
+      "expected_keywords": ["429", "RateLimit", "rate limit", "Throttl", "限流"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S13",
+      "note": "Kafka 消费滞后/再平衡证据充分",
+      "alert": {"alert_id": "eval-s13", "service": "event-consumer", "severity": "critical", "description": "订单事件积压，下游账务延迟升高"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] consumer group order-cg rebalance timeout, member kicked", "count": 340},
+          {"id": "tpl-2", "pattern": "WARN [<TRACEID>] lag exceeds threshold topic=orders partition=<NUM> lag=<NUM>", "count": 420}
+        ],
+        "compression_ratio": 0.0035,
+        "total_lines": 760
+      },
+      "trace_ids": ["trace-kafka007-013"],
+      "expected_keywords": ["Kafka", "rebalance", "lag", "消费"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S14",
+      "note": "磁盘写满证据充分",
+      "alert": {"alert_id": "eval-s14", "service": "order-center", "severity": "critical", "description": "下单落库失败，数据目录告警"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] OSError: [Errno 28] No space left on device: /var/data/wal/segment-<NUM>.log", "count": 610},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] failed to flush write-ahead log: disk full (usage 100%)", "count": 240}
+        ],
+        "compression_ratio": 0.003,
+        "total_lines": 850
+      },
+      "trace_ids": ["trace-disk008-014"],
+      "expected_keywords": ["OSError", "No space", "ENOSPC", "disk", "磁盘"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S15",
+      "note": "配置解析失败 CrashLoop 证据充分",
+      "alert": {"alert_id": "eval-s15", "service": "report-svc", "severity": "critical", "description": "报表服务实例反复重启，无法就绪"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] yaml.parser.ParserError: while parsing config/app.yaml line 42, column 7: mapping values are not allowed here", "count": 180},
+          {"id": "tpl-2", "pattern": "INFO [<TRACEID>] container exited with code 1 (reason=CrashLoopBackOff) restarts=<NUM>", "count": 210}
+        ],
+        "compression_ratio": 0.006,
+        "total_lines": 390
+      },
+      "trace_ids": ["trace-cfg0009-015"],
+      "expected_keywords": ["YAML", "ParserError", "Config", "配置"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S16",
+      "note": "线程池拒绝证据充分",
+      "alert": {"alert_id": "eval-s16", "service": "sync-worker", "severity": "critical", "description": "同步任务大量丢弃，积压任务无进展"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] java.util.concurrent.RejectedExecutionException: Task com.example.jobs.SyncTask@<NUM> rejected from ThreadPoolExecutor[Running, pool size = 64, active threads = 64, queued tasks = 512]", "count": 520},
+          {"id": "tpl-2", "pattern": "WARN [<TRACEID>] queue full task_type=sync dropping", "count": 380}
+        ],
+        "compression_ratio": 0.0032,
+        "total_lines": 900
+      },
+      "trace_ids": ["trace-thr0010-016"],
+      "expected_keywords": ["RejectedExecution", "ThreadPool", "线程池", "Executor"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S17",
+      "note": "JSON 反序列化失败证据充分",
+      "alert": {"alert_id": "eval-s17", "service": "ingest-api", "severity": "critical", "description": "事件入库接口错误率飙升"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0) endpoint=/api/ingest", "count": 470},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] failed to deserialize event payload event_id=<NUM>", "count": 260}
+        ],
+        "compression_ratio": 0.0038,
+        "total_lines": 730
+      },
+      "trace_ids": ["trace-json011-017"],
+      "expected_keywords": ["JSONDecode", "DecodeError", "deserial", "序列化"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S18",
+      "note": "文件权限拒绝证据充分",
+      "alert": {"alert_id": "eval-s18", "service": "updater", "severity": "critical", "description": "升级通道读取失败，发布无法进行"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] PermissionError: [Errno 13] Permission denied: '/etc/aiops/secrets.key'", "count": 340},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] cannot read update channel manifest dir=/var/lib/updater", "count": 160}
+        ],
+        "compression_ratio": 0.0044,
+        "total_lines": 500
+      },
+      "trace_ids": ["trace-perm012-018"],
+      "expected_keywords": ["PermissionError", "Permission denied", "Errno 13", "权限"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S19",
+      "note": "端口占用证据充分",
+      "alert": {"alert_id": "eval-s19", "service": "meta-svc", "severity": "critical", "description": "实例启动失败，健康检查不通过"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] OSError: [Errno 48] Address already in use: ('0.0.0.0', 8080)", "count": 220},
+          {"id": "tpl-2", "pattern": "INFO [<TRACEID>] retrying bind in <NUM>s attempt=<NUM>", "count": 180}
+        ],
+        "compression_ratio": 0.0052,
+        "total_lines": 400
+      },
+      "trace_ids": ["trace-port013-019"],
+      "expected_keywords": ["Address already in use", "AddressAlreadyInUse", "EADDRINUSE", "Errno 48", "端口"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S20",
+      "note": "数组越界证据充分",
+      "alert": {"alert_id": "eval-s20", "service": "batch-report", "severity": "critical", "description": "批处理作业批量失败"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] java.lang.ArrayIndexOutOfBoundsException: Index 12 out of bounds for length 10 at com.example.batch.RecordParser.parse(RecordParser.java:<NUM>)", "count": 380},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] batch job aborted parsed=<NUM>/<NUM>", "count": 150}
+        ],
+        "compression_ratio": 0.0037,
+        "total_lines": 530
+      },
+      "trace_ids": ["trace-idx014-020"],
+      "expected_keywords": ["IndexOutOfBounds", "ArrayIndex", "越界"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S21",
+      "note": "类型转换异常证据充分",
+      "alert": {"alert_id": "eval-s21", "service": "event-consumer", "severity": "critical", "description": "消息消费失败率升高，事件被拒收"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] java.lang.ClassCastException: class java.lang.String cannot be cast to class java.lang.Integer at com.example.mq.Consumer.onMessage(Consumer.java:<NUM>)", "count": 410},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] message rejected schema mismatch topic=events", "count": 230}
+        ],
+        "compression_ratio": 0.0034,
+        "total_lines": 640
+      },
+      "trace_ids": ["trace-cast015-021"],
+      "expected_keywords": ["ClassCast", "CastException", "cast"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S22",
+      "note": "栈溢出证据充分",
+      "alert": {"alert_id": "eval-s22", "service": "route-planner", "severity": "critical", "description": "路径规划接口 100% 失败"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] java.lang.StackOverflowError at com.example.graph.PathFinder.dfs(PathFinder.java:<NUM>)", "count": 290},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] plan request failed node_count=<NUM>", "count": 120}
+        ],
+        "compression_ratio": 0.0046,
+        "total_lines": 410
+      },
+      "trace_ids": ["trace-stk016-022"],
+      "expected_keywords": ["StackOverflow", "RecursionError", "递归"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S23",
+      "note": "Broken pipe 客户端断连证据充分",
+      "alert": {"alert_id": "eval-s23", "service": "stream-api", "severity": "warning", "description": "推送服务错误日志增多"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] java.io.IOException: Broken pipe at sun.nio.ch.SocketDispatcher.write", "count": 350},
+          {"id": "tpl-2", "pattern": "WARN [<TRACEID>] client disconnected before response completed stream_id=<NUM>", "count": 280}
+        ],
+        "compression_ratio": 0.0042,
+        "total_lines": 630
+      },
+      "trace_ids": ["trace-pipe017-023"],
+      "expected_keywords": ["Broken pipe", "BrokenPipe", "SocketException", "Disconnect", "断连"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S24",
+      "note": "熔断器打开证据充分",
+      "alert": {"alert_id": "eval-s24", "service": "order-center", "severity": "critical", "description": "支付依赖相关请求全部快速失败"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "WARN [<TRACEID>] circuit breaker OPEN for dependency=payment-gateway failure_rate=0.87 threshold=0.5", "count": 440},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] request rejected by circuit breaker fallback=degrade", "count": 380}
+        ],
+        "compression_ratio": 0.0039,
+        "total_lines": 820
+      },
+      "trace_ids": ["trace-cb018-024"],
+      "expected_keywords": ["CircuitBreaker", "circuit breaker", "Breaker", "熔断"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S25",
+      "note": "401 认证失败风暴证据充分",
+      "alert": {"alert_id": "eval-s25", "service": "api-gateway", "severity": "critical", "description": "大量请求被拒，合作方无法访问"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "WARN [<TRACEID>] authentication failed reason=token_signature_mismatch ip=<IP>", "count": 720},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] 401 Unauthorized burst detected count=<NUM> window=60s", "count": 510}
+        ],
+        "compression_ratio": 0.0029,
+        "total_lines": 1230
+      },
+      "trace_ids": ["trace-auth019-025"],
+      "expected_keywords": ["401", "Unauthorized", "Authentication", "Auth", "Token", "认证"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S26",
+      "note": "数字格式异常证据充分",
+      "alert": {"alert_id": "eval-s26", "service": "pricing-svc", "severity": "critical", "description": "价格计算接口大量 500"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] java.lang.NumberFormatException: For input string: \"12.3.4\" at java.base/java.lang.Integer.parseInt", "count": 460},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] price calc failed sku=<NUM> raw=<NUM>", "count": 190}
+        ],
+        "compression_ratio": 0.0036,
+        "total_lines": 650
+      },
+      "trace_ids": ["trace-num020-026"],
+      "expected_keywords": ["NumberFormat", "Format"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S27",
+      "note": "变更关联：发布后 Redis 连接故障（changes 高度相关）",
+      "alert": {"alert_id": "eval-s27", "service": "order-center", "severity": "critical", "description": "发布 v2026.10.1 后 5 分钟内下单错误率从 0.2% 升至 18%"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] connection refused host=redis-cache-new:6379 op=GET key=order:lock:<NUM> (after config reload)", "count": 520},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] config reload applied keys=[redis.host] version=v2026.10.1", "count": 60}
+        ],
+        "compression_ratio": 0.003,
+        "total_lines": 580
+      },
+      "trace_ids": ["trace-chg021-027"],
+      "changes": [
+        {"ts": "2026-10-06T09:55:00Z", "version": "v2026.10.1", "kind": "deploy", "summary": "发布 v2026.10.1：redis.host 配置切换至新集群 redis-cache-new", "source": "ci"}
+      ],
+      "expected_keywords": ["ConnectionRefused", "ConnectError", "Redis", "Config", "配置"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S28",
+      "note": "变更干扰：发布存在但日志证据指向磁盘（时间线索不得虚增 confidence）",
+      "alert": {"alert_id": "eval-s28", "service": "search-api", "severity": "critical", "description": "写入失败率升高，索引部分不可用"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "ERROR [<TRACEID>] OSError: [Errno 28] No space left on device: /var/data/search/index/seg-<NUM>.idx", "count": 610},
+          {"id": "tpl-2", "pattern": "ERROR [<TRACEID>] commit failed: shard write error disk usage=100%", "count": 240}
+        ],
+        "compression_ratio": 0.0032,
+        "total_lines": 850
+      },
+      "trace_ids": ["trace-chg022-028"],
+      "changes": [
+        {"ts": "2026-10-06T08:30:00Z", "version": "v2026.9.30", "kind": "deploy", "summary": "发布 v2026.9.30：检索排序权重调整（不涉及存储与磁盘配置）", "source": "ci"}
+      ],
+      "expected_keywords": ["OSError", "No space", "ENOSPC", "disk", "磁盘"],
+      "expect_low_confidence": false
+    },
+    {
+      "id": "S29",
+      "note": "证据不足：仅启动与健康检查日志",
+      "alert": {"alert_id": "eval-s29", "service": "edge-gateway", "severity": "warning", "description": "实例存活探针偶发超时一次，随后自愈"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "INFO [<TRACEID>] server started port=8080 version=v2026.9.30", "count": 3},
+          {"id": "tpl-2", "pattern": "INFO [<TRACEID>] health check ok latency_ms=<NUM>", "count": 22}
+        ],
+        "compression_ratio": 0.08,
+        "total_lines": 25
+      },
+      "trace_ids": [],
+      "expected_keywords": [],
+      "expect_low_confidence": true
+    },
+    {
+      "id": "S30",
+      "note": "证据不足：仅一条弃用告警，无故障信号",
+      "alert": {"alert_id": "eval-s30", "service": "auth-service", "severity": "warning", "description": "灰度环境配置巡检告警（非生产影响）"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "WARN [<TRACEID>] deprecated config key auth.legacy_mode (will be removed in v2027)", "count": 2}
+        ],
+        "compression_ratio": 0.15,
+        "total_lines": 13
+      },
+      "trace_ids": [],
+      "expected_keywords": [],
+      "expect_low_confidence": true
+    },
+    {
+      "id": "S31",
+      "note": "证据不足：指标型波动，日志全部正常",
+      "alert": {"alert_id": "eval-s31", "service": "query-api", "severity": "warning", "description": "接口 P99 延迟轻微升高（+8%），日志无异常"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "INFO [<TRACEID>] request completed endpoint=/query status=200 duration_ms=<NUM>", "count": 44},
+          {"id": "tpl-2", "pattern": "INFO [<TRACEID>] cache hit ratio=0.93", "count": 12}
+        ],
+        "compression_ratio": 0.09,
+        "total_lines": 56
+      },
+      "trace_ids": [],
+      "expected_keywords": [],
+      "expect_low_confidence": true
+    },
+    {
+      "id": "S32",
+      "note": "证据不足：日志疑似截断，仅有请求开始行",
+      "alert": {"alert_id": "eval-s32", "service": "batch-worker", "severity": "warning", "description": "批处理耗时超过基线，采集日志疑似被截断"},
+      "clustered": {
+        "templates": [
+          {"id": "tpl-1", "pattern": "INFO [<TRACEID>] batch round begin partition=<NUM>", "count": 38},
+          {"id": "tpl-2", "pattern": "INFO [<TRACEID>] fetch chunk size=<NUM> offset=<NUM>", "count": 35}
+        ],
+        "compression_ratio": 0.11,
+        "total_lines": 73
+      },
+      "trace_ids": [],
+      "expected_keywords": [],
+      "expect_low_confidence": true
+    }
+  ]
+}

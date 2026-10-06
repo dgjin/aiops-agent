@@ -1,11 +1,12 @@
 """Fix 模型对比评估脚本（WP4 增强交付物）：diff 语义正确率 = 校验链 + 真实沙箱单测。
 
 口径（对齐实施计划 WP4 验收「建议 diff 可编译」与增强目标「更大模型提升 diff 语义正确率」）：
-    - 样本来源：data/fix_eval_samples.json（demo-app 注入缺陷的真实可修复场景）；
+    - 样本来源：data/fix_eval_samples.json（评测夹具仓库 data/fix_eval_repo 的真实可修复
+      场景，33 个样本；基线由 scripts/gen_fix_eval_samples.py 实时采集）；
     - 每个样本真实调用 fix_agent.run_fix：LLM 生成 → pydantic schema → 应用 → 编译校验；
     - schema_pass = 校验链全过（meta.validated，非降级）；
-    - sandbox_pass = 补丁送入真实沙箱（Docker 隔离运行全量单测）：修复目标用例转为通过
-      且不引入新的失败用例（demo-app 基线注入缺陷为已知失败，其余用例作回归保护）
+    - sandbox_pass = 补丁送入真实沙箱（Docker 隔离运行夹具仓库全量单测）：修复目标用例
+      转为通过且不引入新的失败用例（夹具基线缺陷为已知失败，其余用例作回归保护）
       ——diff 语义正确率主指标；
     - 支持多模型对比：--model 可重复传入，报告按模型汇总对比。
 
@@ -34,6 +35,7 @@ BASE_DIR = Path(__file__).resolve().parent
 SAMPLES_PATH = BASE_DIR / "data" / "fix_eval_samples.json"
 REPORT_PATH = BASE_DIR / "data" / "fix_eval_report.json"
 EVAL_SANDBOX_ROOT = BASE_DIR / "data" / "sandbox-eval"
+EVAL_REPO_DIR = BASE_DIR / "data" / "fix_eval_repo"
 
 
 def _parse_failed_tests(details: str) -> set[str] | None:
@@ -68,7 +70,13 @@ def evaluate_sample(sample: dict, model: str, timeout: int) -> dict:
     alert = Alert(**sample["alert"])
     root_cause = RootCause(**sample["root_cause"])
     patch, meta = fix_agent.run_fix(
-        alert, root_cause, sample.get("references", []), attempt=0, model=model, timeout=timeout
+        alert,
+        root_cause,
+        sample.get("references", []),
+        attempt=0,
+        repo_dir=EVAL_REPO_DIR,
+        model=model,
+        timeout=timeout,
     )
     schema_pass = bool(meta["validated"]) and not meta["degraded"]
     row: dict = {
@@ -87,7 +95,9 @@ def evaluate_sample(sample: dict, model: str, timeout: int) -> dict:
         "diff": patch.diff,
     }
     if schema_pass:
-        report = sandbox.run_patch_tests(patch, 0, sandbox_root=EVAL_SANDBOX_ROOT)
+        report = sandbox.run_patch_tests(
+            patch, 0, repo_dir=EVAL_REPO_DIR, sandbox_root=EVAL_SANDBOX_ROOT
+        )
         verdict, verdict_info = _sandbox_verdict(report, sample)
         row.update(
             {
@@ -181,6 +191,7 @@ def main() -> None:
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "models": models,
         "samples_path": str(SAMPLES_PATH),
+        "repo_dir": str(EVAL_REPO_DIR),
         "sandbox_root": str(EVAL_SANDBOX_ROOT),
         "comparison": comparison,
         "results": results,

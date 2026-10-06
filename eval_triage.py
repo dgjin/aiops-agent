@@ -50,10 +50,18 @@ def keyword_hit(error_type: str, keywords: list[str]) -> bool:
 
 
 def evaluate_sample(sample: dict, threshold: float, model: str | None = None) -> dict:
-    """评测单样本：真实调用 triage，返回明细行。"""
+    """评测单样本：真实调用 triage，返回明细行。
+
+    样本可选字段 ``changes``（近发布/配置事件，P1-1 变更关联）同步透传，
+    用于验证「故障与变更相关性」的判定质量。
+    """
     alert = Alert(**sample["alert"])
     root_cause, meta = triage.run_triage(
-        alert, sample["clustered"], sample.get("trace_ids", []), model=model
+        alert,
+        sample["clustered"],
+        sample.get("trace_ids", []),
+        model=model,
+        changes=sample.get("changes"),
     )
     hit = keyword_hit(root_cause.error_type, sample.get("expected_keywords", []))
     expect_low = bool(sample.get("expect_low_confidence"))

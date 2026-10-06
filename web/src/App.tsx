@@ -14,6 +14,7 @@ import { Dashboard } from './pages/Dashboard'
 import { Flows } from './pages/Flows'
 import { FlowDetail } from './pages/FlowDetail'
 import { Approvals } from './pages/Approvals'
+import { Escalations } from './pages/Escalations'
 import { WindowPage } from './pages/WindowPage'
 import { Audit } from './pages/Audit'
 import { MonitoredApps } from './pages/MonitoredApps'
@@ -48,6 +49,7 @@ export default function App() {
         <Route path="flows" element={<Flows />} />
         <Route path="flows/:wfId" element={<FlowDetail />} />
         <Route path="approvals" element={<Approvals />} />
+        <Route path="escalations" element={<Escalations />} />
         <Route path="window" element={<WindowPage />} />
         <Route path="audit" element={<Audit />} />
         <Route path="monitored-apps" element={<MonitoredApps />} />

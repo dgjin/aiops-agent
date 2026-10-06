@@ -23,6 +23,7 @@ from .deps import ok
 _WRITE_ROLE_RULES: list[tuple[str, str]] = [
     ("/api/monitored-apps", "admin"),   # 配置维护
     ("/api/flows/", "operator"),        # 审批 / 发布指令 / 排队补丁
+    ("/api/escalations", "operator"),   # 转人工待办：指派 / 关闭 / 重试修复
     ("/api/users", "admin"),            # 用户管理（CRUD / 重置密码 / 强制下线）
     ("/api/auth/logout", "viewer"),     # 登出：任何已认证角色
     ("/api/auth/password", "viewer"),   # 本人改密：任何已认证角色（需原密码）
