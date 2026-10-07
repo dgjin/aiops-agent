@@ -8,7 +8,6 @@ import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { ExternalLink, Keyboard, ShieldCheck } from 'lucide-react'
 import { Logo } from '../components/Logo'
-import { cn } from '../lib/format'
 import { roleLabel } from '../components/UserMenu'
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -218,6 +217,20 @@ export function Help() {
         </ul>
       </Section>
 
+      <Section title="界面与偏好">
+        <ul className="list-disc space-y-1.5 pl-5">
+          <li>
+            <span className="text-ink">侧栏收起</span>：点击侧栏 logo 行右侧的「收起侧栏」按钮折叠为图标栏；
+            收起后按钮移至 logo 下方，点击「展开侧栏」即可恢复。收起态悬停图标可查看页面名称。
+          </li>
+          <li>
+            <span className="text-ink">主题 / 强调色</span>：在右上角「外观」菜单中切换（深色 / 浅色与强调色），
+            两套主题均通过对比度检查（正文 ≥ AA）。
+          </li>
+          <li>以上偏好与侧栏状态保存在本机浏览器，刷新后保持，不随账号同步。</li>
+        </ul>
+      </Section>
+
       <div className="grid gap-4 lg:grid-cols-2">
         <Section title="快捷键">
           <ul className="space-y-2">
@@ -246,9 +259,6 @@ export function Help() {
               <div className="flex items-center gap-1.5 text-xs">
                 <ShieldCheck size={12} className="text-ok" />
                 全部写操作记入审计（操作者 / 动作 / 对象 / 结果）
-              </div>
-              <div className={cn('text-xs text-idle')}>
-                界面偏好（主题 / 强调色 / 侧栏收缩）保存在本机浏览器，不随账号同步。
               </div>
             </div>
           </div>
