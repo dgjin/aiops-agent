@@ -344,6 +344,49 @@ export interface MonitoredAppsResp extends Timed {
   items: MonitoredApp[]
 }
 
+/** 需求基线数据源（被监控应用清单摘要，供下拉切换）。 */
+export interface RequirementsApp {
+  id: string
+  name: string
+  url: string
+  service: string
+  enabled: boolean
+}
+
+/** 需求基线条目（被监控系统标准导出接口 v1.0 契约，字段说明见 requirements_client）。 */
+export interface RequirementsEntry {
+  id: number | string
+  kind: string
+  title: string
+  content: string
+  status: string
+  priority: string
+  baselineVersion: string
+  assessment: string
+  submitter: string
+  department: string
+  reviewer: string
+  reviewedAt: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+/** 需求基线读接口响应（BFF 代拉标准导出接口；ok=false 时 error 为中文原因）。 */
+export interface RequirementsResp extends Timed {
+  ok: boolean
+  error: string
+  warnings: string[]
+  apps: RequirementsApp[]
+  app: RequirementsApp | null
+  url: string
+  service: string
+  system: string
+  exported_at: string
+  filter: Record<string, unknown>
+  returned: number
+  entries: RequirementsEntry[]
+}
+
 /** 令牌轮换状态（不含令牌值）。 */
 export interface AuthTokenMeta {
   id: string

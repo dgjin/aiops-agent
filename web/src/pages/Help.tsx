@@ -152,6 +152,13 @@ export function Help() {
             就绪度提示会标出缺失的仓库 / 索引 / 日志配置。
           </li>
           <li>
+            <span className="text-ink">需求基线</span>：展示被监控系统「需求收集与反馈」中已由管理员评估并
+            纳入基线的条目（类型 / 优先级 / 提交部门分布与 P0 / P1 高优提示）；需在部署侧为 BFF 配置环境变量
+            <span className="font-mono text-xs"> NL2SQL_OPS_TOKEN</span>
+            （值 = 被监控系统的 <span className="font-mono text-xs">OPS_API_TOKEN</span>）后重启生效；
+            未配置或应用不可达时，页面直接给出中文指引。
+          </li>
+          <li>
             <span className="text-ink">全局熔断（kill switch）</span>：管理员可在「系统状态」页激活，
             激活期间一切写操作被拒绝（横幅常驻提示操作者与原因）；登出、本人改密与关闭熔断本身仍有豁免。
           </li>

@@ -18,6 +18,7 @@ import { Escalations } from './pages/Escalations'
 import { WindowPage } from './pages/WindowPage'
 import { Audit } from './pages/Audit'
 import { MonitoredApps } from './pages/MonitoredApps'
+import { Requirements } from './pages/Requirements'
 import { SystemPage } from './pages/SystemPage'
 import { Users } from './pages/Users'
 import { Help } from './pages/Help'
@@ -53,6 +54,7 @@ export default function App() {
         <Route path="window" element={<WindowPage />} />
         <Route path="audit" element={<Audit />} />
         <Route path="monitored-apps" element={<MonitoredApps />} />
+        <Route path="requirements" element={<Requirements />} />
         <Route path="system" element={<SystemPage />} />
         <Route path="users" element={<Users />} />
         <Route path="help" element={<Help />} />

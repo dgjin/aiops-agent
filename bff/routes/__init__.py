@@ -12,6 +12,7 @@ from . import (
     health,
     monitored_apps,
     ops_metrics,
+    requirements,
     system,
     tokens,
     users,
@@ -29,6 +30,7 @@ def include_routers(app: FastAPI) -> None:
         tokens,
         system,
         monitored_apps,
+        requirements,
         users,
     ):
         app.include_router(module.router)

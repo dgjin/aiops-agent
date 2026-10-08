@@ -18,6 +18,7 @@ import type {
   MonitoredAppWriteResp,
   OpsMetricsResp,
   OverviewResp,
+  RequirementsResp,
   ResultResp,
   SessionItem,
   SubsystemsResp,
@@ -366,4 +367,9 @@ export const api = {
       `/api/monitored-apps/${encodeURIComponent(id)}/rollback`,
       { method: 'POST', body: JSON.stringify({ ts: ts ?? null }) },
     ),
+
+  // ---- 需求基线（代拉被监控系统「需求收集与反馈」标准导出接口）----
+  requirements: (
+    params: { app_id?: string; status?: string; kind?: string; since?: string; limit?: number } = {},
+  ) => request<RequirementsResp>(`/api/requirements${qs(params)}`),
 }

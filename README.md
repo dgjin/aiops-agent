@@ -180,6 +180,8 @@ cd aiops-agent
 
 令牌：`--token` 或环境变量 `NL2SQL_OPS_TOKEN`（值 = 被监控系统的 `OPS_API_TOKEN`）。客户端实现 `aiops_agent/requirements_client.py` 标准库零依赖、永不抛异常；接口自描述见 `GET /.well-known/requirements.json`。
 
+控制台侧另有**「需求基线」页**（侧栏入口，只读、`viewer` 起可访问）：数据源与令牌同上（BFF 读 `NL2SQL_OPS_TOKEN`），支持多被监控应用切换、类型 / 优先级 / 提交部门分布与全清单展示，P0 / P1 高优条目置顶；未配置令牌或应用不可达时，页面直接给出中文配置指引。
+
 ### Qoder 修复引擎（可选）
 
 修复环节默认用本地 Ollama 生成补丁；也可切换为 **Qoder CLI 无头调用**（Qoder 在隔离工作区内自主读代码并改代码，改动经 `git diff` 采集后接入同一套校验/沙箱/闸门）。完整设计见《AIOps 自动运维智能体系统 Qoder 修复引擎接入设计》。
