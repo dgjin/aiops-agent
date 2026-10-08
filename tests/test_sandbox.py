@@ -222,6 +222,128 @@ class TestPrepareWorkspaceAndRunTests(unittest.TestCase):
         self.assertIn("Bandit", report.sast)
 
 
+class TestContractValidation(unittest.TestCase):
+    """契约模式（前端仓库）：补丁后探针关键词「恢复/保留」放行，破坏或未恢复才拦截。"""
+
+    KEYWORD = '<div id="root"'
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="contract-test-"))
+        self.repo = self.tmp / "fe-repo"
+        (self.repo / "src" / "components" / "reports").mkdir(parents=True)
+        (self.repo / "index.html").write_text(
+            '<!doctype html><html><body><div id="root"></div></body></html>\n',
+            encoding="utf-8",
+        )
+        self.component = "src/components/reports/ReportGenerator.tsx"
+        (self.repo / self.component).write_text(
+            "export const Report = () => null;\n", encoding="utf-8"
+        )
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _patch(self, files: list[str], diff: str) -> Patch:
+        return Patch(
+            patch_id="p-contract-1",
+            alert_id="a-contract",
+            files=files,
+            diff=diff,
+            description="契约校验单测",
+            risk="低",
+            model_version="test",
+            confidence=0.9,
+        )
+
+    def _run(self, patch: Patch) -> sandbox.TestReport:
+        return sandbox.run_patch_tests(
+            patch,
+            0,
+            repo_dir=self.repo,
+            sandbox_root=self.tmp,
+            contract={"keyword": self.KEYWORD},
+        )
+
+    def test_component_patch_passes_when_keyword_preserved(self) -> None:
+        """功能类补丁（只改组件、不动入口页）：关键词仍在 → 放行（原误杀场景）。"""
+        diff = (
+            f"--- a/{self.component}\n"
+            f"+++ b/{self.component}\n"
+            "@@ -1,1 +1,2 @@\n"
+            " export const Report = () => null;\n"
+            "+export const REFRESH_INTERVAL = 30_000;\n"
+        )
+        report = self._run(self._patch([self.component], diff))
+        self.assertTrue(report.passed, report.details)
+        self.assertIn("探针关键词保留", report.unit_tests)
+        self.assertIn("index.html", report.details)
+
+    def test_patch_restoring_keyword_passes(self) -> None:
+        """修复场景：入口页缺失关键词，补丁恢复 → 放行（「已恢复」路径）。"""
+        (self.repo / "index.html").write_text(
+            '<!doctype html><html><body><div id="app"></div></body></html>\n',
+            encoding="utf-8",
+        )
+        diff = (
+            "--- a/index.html\n"
+            "+++ b/index.html\n"
+            "@@ -1,1 +1,1 @@\n"
+            '-<!doctype html><html><body><div id="app"></div></body></html>\n'
+            '+<!doctype html><html><body><div id="root"></div></body></html>\n'
+        )
+        report = self._run(self._patch(["index.html"], diff))
+        self.assertTrue(report.passed, report.details)
+        self.assertIn("探针关键词已恢复", report.unit_tests)
+
+    def test_patch_breaking_keyword_host_fails(self) -> None:
+        """破坏性补丁（改坏入口页且全树无关键词）→ 拦截。"""
+        diff = (
+            "--- a/index.html\n"
+            "+++ b/index.html\n"
+            "@@ -1,1 +1,1 @@\n"
+            '-<!doctype html><html><body><div id="root"></div></body></html>\n'
+            '+<!doctype html><html><body></body></html>\n'
+        )
+        report = self._run(self._patch(["index.html"], diff))
+        self.assertFalse(report.passed)
+        self.assertIn("未找到探针关键词", report.unit_tests)
+
+    def test_missing_keyword_config_fails(self) -> None:
+        """契约缺少 keyword → 配置无效拦截（不静默放行）。"""
+        diff = (
+            f"--- a/{self.component}\n"
+            f"+++ b/{self.component}\n"
+            "@@ -1,1 +1,2 @@\n"
+            " export const Report = () => null;\n"
+            "+export const X = 1;\n"
+        )
+        report = sandbox.run_patch_tests(
+            self._patch([self.component], diff),
+            0,
+            repo_dir=self.repo,
+            sandbox_root=self.tmp,
+            contract={"keyword": ""},
+        )
+        self.assertFalse(report.passed)
+        self.assertIn("配置无效", report.details)
+
+    def test_degraded_patch_blocked(self) -> None:
+        """生成降级（Qoder/LLM 失败兜底）的补丁即使不破坏关键词也拦截。"""
+        diff = (
+            f"--- a/{self.component}\n"
+            f"+++ b/{self.component}\n"
+            "@@ -1,1 +1,2 @@\n"
+            " export const Report = () => null;\n"
+            "+export const X = 1;\n"
+        )
+        patch = self._patch([self.component], diff)
+        patch.degraded = True
+        report = self._run(patch)
+        self.assertFalse(report.passed)
+        self.assertIn("降级", report.unit_tests)
+        self.assertIn("降级", report.details)
+
+
 class TestBanditIntegration(unittest.TestCase):
     """Bandit 深度扫描（P2-04）：delta 拦截 / 既有问题豁免 / LOW 记录 / 降级放行。"""
 

@@ -40,6 +40,8 @@ class Patch:
     risk: str
     model_version: str
     confidence: float
+    # 降级兜底标记：生成环节失败后的安全侧兜底产物（非真实修复），前端契约模式据此拦截
+    degraded: bool = False
 
 
 @dataclass

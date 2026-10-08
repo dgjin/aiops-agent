@@ -453,11 +453,13 @@ class TestRunFix(unittest.TestCase):
         self.assertEqual(patch.model_version, fix_agent.DEFAULT_MODEL)
         self.assertIn("if coupon is None", patch.diff)
         self.assertEqual(patch.confidence, ROOT_CAUSE.confidence)
+        self.assertFalse(patch.degraded)
 
     def test_llm_garbage_degrades_to_stub(self) -> None:
         with mock.patch("aiops_agent.fix_agent.call_ollama", return_value="完全不是 JSON"):
             patch, meta = fix_agent.run_fix(ALERT_REAL, ROOT_CAUSE, references=[], attempt=1)
         self.assertTrue(meta["degraded"])
+        self.assertTrue(patch.degraded)  # 兜底补丁携带降级标记（前端契约模式据此拦截）
         self.assertFalse(meta["validated"])
         self.assertEqual(patch.model_version, fix_agent.STUB_MODEL_VERSION)
         self.assertIn("coupon", patch.diff)

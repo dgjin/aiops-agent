@@ -657,6 +657,7 @@ def run_fix(
     # 未定位到目标文件：qoder 走仓库级自主定位模式（不直接降级）；其余提供者安全侧兜底
     if target is None and provider != "qoder":
         patch = fallback_patch(alert, root_cause, attempt, fallback_rel, repo_dir=repo_dir)
+        patch.degraded = True
         meta.update({"degraded": True, "reason": f"未定位到目标文件: {root_cause.suspect_files}"})
         meta["elapsed_seconds"] = round(time.monotonic() - start, 2)
         return patch, meta
@@ -704,6 +705,7 @@ def run_fix(
     except Exception as exc:  # noqa: BLE001 - 一切异常走安全侧兜底，不阻断流程
         meta.update({"degraded": True, "reason": f"{type(exc).__name__}: {exc}"})
         patch = fallback_patch(alert, root_cause, attempt, fallback_rel, repo_dir=repo_dir)
+        patch.degraded = True
 
     meta["elapsed_seconds"] = round(time.monotonic() - start, 2)
     return patch, meta
