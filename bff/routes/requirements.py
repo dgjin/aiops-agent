@@ -17,12 +17,15 @@ from __future__ import annotations
 import asyncio
 import os
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
+from pydantic import BaseModel, Field
 
 from aiops_agent import requirements_client
+from aiops_agent.models import RequirementTask
 
+from .. import audit, requirement_analyses
 from .. import monitored_apps as store
-from ..deps import ApiError, ok
+from ..deps import ApiError, gw, ok
 
 router = APIRouter()
 
@@ -111,3 +114,180 @@ async def api_requirements(
             "entries": result["entries"],
         }
     )
+
+
+# ----------------------------------------------------------------------
+# 智能分析闭环：分析结果查看 → 管理员反馈 → 再次分析 → 批准进入修复工作流
+#
+# 写操作（POST）均为 admin：批准即启动「需求驱动修复工作流」（沙箱验证 / 人工审批 /
+# 公告倒计时 / 金丝雀发布在其内部完整保留，见 AIOpsRequirementWorkflow）。
+# ----------------------------------------------------------------------
+
+# 需求条目快照保留字段（发起分析时由前端携带，避免二次拉取被监控系统）
+_ENTRY_KEEP = (
+    "id",
+    "kind",
+    "title",
+    "content",
+    "status",
+    "priority",
+    "baselineVersion",
+    "assessment",
+    "submitter",
+    "department",
+    "updatedAt",
+)
+
+
+class AnalysisCreateBody(BaseModel):
+    app_id: str = Field(min_length=1, max_length=64)
+    entry: dict = Field(description="需求条目快照（前端从当前列表携带）")
+
+
+class FeedbackBody(BaseModel):
+    feedback: str = Field(min_length=1, max_length=2000)
+
+
+def _entry_snapshot(entry: dict) -> dict:
+    """裁剪并校验需求条目快照（id / title 必备）。"""
+    snapshot = {key: entry.get(key) for key in _ENTRY_KEEP if entry.get(key) is not None}
+    if not str(snapshot.get("id") or "").strip():
+        raise ApiError(400, "需求条目缺少 id，无法发起分析")
+    if not str(snapshot.get("title") or "").strip():
+        raise ApiError(400, "需求条目缺少标题，无法发起分析")
+    return snapshot
+
+
+def _find_analysis(analysis_id: str) -> dict:
+    entry = requirement_analyses.get(analysis_id)
+    if entry is None:
+        raise ApiError(404, f"未找到分析会话：{analysis_id}")
+    return entry
+
+
+def _requirement_text(entry: dict) -> str:
+    """需求原文（标题 + 内容 + 评估意见）：修复工作流的任务描述体。"""
+    snapshot = entry.get("entry_snapshot") or {}
+    parts = [str(snapshot.get("title") or entry.get("entry_title") or "")]
+    if snapshot.get("content"):
+        parts.append(f"内容：{snapshot['content']}")
+    if snapshot.get("assessment"):
+        parts.append(f"需求方评估意见：{snapshot['assessment']}")
+    return "\n".join(parts)
+
+
+@router.get("/api/requirements/analyses")
+async def api_requirement_analysis_list(app_id: str = Query("", max_length=64)) -> dict:
+    """分析会话列表（viewer 起可读；摘要字段，不含版本明细）。"""
+    items = [requirement_analyses.summary(entry) for entry in requirement_analyses.list_all(app_id or None)]
+    return ok({"analyses": items})
+
+
+@router.get("/api/requirements/analyses/{analysis_id}")
+async def api_requirement_analysis_detail(analysis_id: str) -> dict:
+    """分析会话详情（含全部版本、批准信息；viewer 起可读）。"""
+    return ok({"analysis": _find_analysis(analysis_id)})
+
+
+@router.post("/api/requirements/analyses")
+async def api_requirement_analysis_create(request: Request, body: AnalysisCreateBody) -> dict:
+    """发起（或失败重试）智能分析；已完成的分析直接返回既有结果。"""
+    target = next((app for app in store.list_all() if app.get("id") == body.app_id), None)
+    if target is None:
+        raise ApiError(404, f"未找到被监控应用：{body.app_id}")
+    snapshot = _entry_snapshot(body.entry)
+    actor = request.state.identity.user
+    try:
+        entry, need_run = requirement_analyses.create_or_touch(
+            str(target.get("id")), str(target.get("service") or ""), snapshot, actor
+        )
+    except requirement_analyses.RequirementAnalysisError as exc:
+        raise ApiError(409, str(exc)) from exc
+    if need_run:
+        requirement_analyses.start_analysis_thread(
+            entry["id"], int(entry.get("current_version") or 1)
+        )
+        trigger = (entry.get("versions") or [{}])[-1].get("trigger")
+        audit.write_audit(
+            actor=actor,
+            action="requirement:analyze",
+            target=entry["id"],
+            params={"entry_id": entry.get("entry_id"), "trigger": trigger},
+        )
+    return ok({"analysis": entry, "started": need_run})
+
+
+@router.post("/api/requirements/analyses/{analysis_id}/feedback")
+async def api_requirement_analysis_feedback(
+    request: Request, analysis_id: str, body: FeedbackBody
+) -> dict:
+    """管理员反馈（优化建议 / 具体要求）→ 追加版本并提交系统再次分析。"""
+    entry = _find_analysis(analysis_id)
+    actor = request.state.identity.user
+    try:
+        requirement_analyses.apply_feedback(entry, body.feedback, actor)
+        requirement_analyses.persist_entry(entry)
+    except requirement_analyses.RequirementAnalysisError as exc:
+        raise ApiError(409, str(exc)) from exc
+    requirement_analyses.start_analysis_thread(analysis_id, int(entry.get("current_version") or 1))
+    audit.write_audit(
+        actor=actor,
+        action="requirement:feedback",
+        target=analysis_id,
+        params={
+            "version": entry.get("current_version"),
+            "feedback": body.feedback.strip()[:200],
+        },
+    )
+    return ok({"analysis": entry})
+
+
+@router.post("/api/requirements/analyses/{analysis_id}/approve")
+async def api_requirement_analysis_approve(request: Request, analysis_id: str) -> dict:
+    """管理员同意 → 启动需求驱动修复工作流（内部仍保留沙箱验证 / 审批 / 公告链路）。"""
+    entry = _find_analysis(analysis_id)
+    if entry.get("status") == "approved":
+        raise ApiError(409, "该需求已批准，请勿重复操作")
+    if entry.get("status") != "analyzed":
+        raise ApiError(
+            409, f"当前状态 {entry.get('status') or '未知'} 不允许批准（要求分析完成）"
+        )
+    version = int(entry.get("current_version") or 0)
+    analysis = requirement_analyses.latest_analysis(entry) or {}
+    if analysis.get("degraded"):
+        raise ApiError(409, "最新分析未成功完成（无有效结果），请提交反馈或重试后再批准")
+    actor = request.state.identity.user
+    task = RequirementTask(
+        analysis_id=analysis_id,
+        app_id=str(entry.get("app_id") or ""),
+        service=str(entry.get("service") or ""),
+        entry_id=str(entry.get("entry_id") or ""),
+        title=str(entry.get("entry_title") or ""),
+        requirement=_requirement_text(entry),
+        plan="\n".join(
+            f"{index}. {step}" for index, step in enumerate(analysis.get("plan") or [], 1)
+        ),
+        acceptance=[str(item) for item in analysis.get("acceptance") or []],
+        suspect_files=[str(item) for item in analysis.get("suspect_files") or []],
+        version=version,
+        approved_by=actor,
+    )
+    wf_id = f"aiops-req-{analysis_id}-v{version}"
+    try:
+        started = await gw.start_requirement_flow(task, wf_id)
+    except ValueError as exc:
+        raise ApiError(409, str(exc)) from exc
+    try:
+        requirement_analyses.apply_approved(entry, version, started, actor)
+        requirement_analyses.persist_entry(entry)
+    except requirement_analyses.RequirementAnalysisError as exc:
+        # 工作流已启动：状态回写失败不静默——提示运行中流程与人工核对路径
+        raise ApiError(500, f"修复流程已启动（{started}），但会话状态回写失败：{exc}") from exc
+    audit.write_audit(
+        actor=actor,
+        action="requirement:approve",
+        wf_id=started,
+        target=analysis_id,
+        params={"version": version, "entry_id": entry.get("entry_id")},
+    )
+    return ok({"analysis": entry, "wf_id": started})

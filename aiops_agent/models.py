@@ -55,6 +55,27 @@ class TestReport:
 
 
 @dataclass
+class RequirementTask:
+    """需求驱动的修复任务（需求智能分析获批版 → 修复工作流入口）。
+
+    由 BFF 在管理员「同意并进入修复工作流」时构造：携带需求原文与批准版分析方案，
+    工作流据此确定性构造 Alert / RootCause（跳过 TRIAGING，见 AIOpsRequirementWorkflow）。
+    """
+
+    analysis_id: str
+    app_id: str
+    service: str
+    entry_id: str
+    title: str
+    requirement: str
+    plan: str
+    acceptance: list[str]
+    suspect_files: list[str]
+    version: int
+    approved_by: str
+
+
+@dataclass
 class CanaryResult:
     """金丝雀观察结果（设计方案 4.7）。"""
 

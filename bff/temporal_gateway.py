@@ -16,9 +16,11 @@ from datetime import datetime, timedelta, timezone
 
 from temporalio.client import Client, WorkflowExecution, WorkflowExecutionStatus, WorkflowHandle
 
-from aiops_agent.workflows import AIOpsFixWorkflow
+from aiops_agent.workflows import AIOpsFixWorkflow, AIOpsRequirementWorkflow
 
 WF_TYPE = "AIOpsFixWorkflow"
+# 需求驱动修复流程（管理员批准分析结果后启动）；status query / 信号与告警流程按名称绑定，通用
+WF_TYPE_REQUIREMENT = "AIOpsRequirementWorkflow"
 TASK_QUEUE = "aiops-tasks"  # 与 worker.py / alert_webhook.py 一致
 _QUERY_TIMEOUT = timedelta(seconds=5)
 _LIST_CACHE_TTL = 3.0
@@ -147,7 +149,9 @@ class TemporalGateway:
 
         client = await self.client()
         records: list[WorkflowExecution] = []
-        async for wf in client.list_workflows(f'WorkflowType="{WF_TYPE}"'):
+        # 两类工作流同列聚合：告警驱动 + 需求驱动（控制台列表统一展示，审批/发布指令复用同一交互）
+        query = f'WorkflowType="{WF_TYPE}" OR WorkflowType="{WF_TYPE_REQUIREMENT}"'
+        async for wf in client.list_workflows(query):
             records.append(wf)
             if len(records) >= _LIST_MAX_FETCH:
                 break
@@ -257,7 +261,7 @@ class TemporalGateway:
 
         策略快照在启动时读取（与 webhook/demo_cli 同约定：启动方决定快照）。
         """
-        from temporalio.client import WorkflowAlreadyStartedError
+        from temporalio.exceptions import WorkflowAlreadyStartedError
         from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 
         from aiops_agent.config import load_policy, snapshot_for_workflow
@@ -268,6 +272,33 @@ class TemporalGateway:
             handle = await client.start_workflow(
                 AIOpsFixWorkflow.run,
                 args=[alert, snapshot],
+                id=wf_id,
+                task_queue=TASK_QUEUE,
+                id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+                id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
+            )
+        except WorkflowAlreadyStartedError as exc:
+            raise ValueError(f"流程已存在（幂等拒绝）：{wf_id}") from exc
+        self.invalidate_cache()
+        return handle.id
+
+    async def start_requirement_flow(self, task, wf_id: str) -> str:
+        """启动需求驱动修复流程（管理员批准分析结果后）；幂等键 ``aiops-req-{analysis_id}-v{version}``。
+
+        与 :meth:`start_flow` 同约定：策略快照在启动时读取；已存在同 ID 流程时抛 ValueError。
+        工作流内部保留沙箱验证 / 人工审批 / 公告倒计时 / 金丝雀发布全链路。
+        """
+        from temporalio.exceptions import WorkflowAlreadyStartedError
+        from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+
+        from aiops_agent.config import load_policy, snapshot_for_workflow
+
+        snapshot = snapshot_for_workflow(load_policy())
+        client = await self.client()
+        try:
+            handle = await client.start_workflow(
+                AIOpsRequirementWorkflow.run,
+                args=[task, snapshot],
                 id=wf_id,
                 task_queue=TASK_QUEUE,
                 id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,

@@ -18,6 +18,11 @@ import type {
   MonitoredAppWriteResp,
   OpsMetricsResp,
   OverviewResp,
+  RequirementAnalysesResp,
+  RequirementAnalysisApproveResp,
+  RequirementAnalysisCreateResp,
+  RequirementAnalysisResp,
+  RequirementsEntry,
   RequirementsResp,
   ResultResp,
   SessionItem,
@@ -372,4 +377,30 @@ export const api = {
   requirements: (
     params: { app_id?: string; status?: string; kind?: string; since?: string; limit?: number } = {},
   ) => request<RequirementsResp>(`/api/requirements${qs(params)}`),
+
+  // ---- 需求智能分析闭环（发起 / 查看 / 反馈再分析 / 批准进入修复工作流）----
+  /** 分析会话列表（摘要）：用于条目行内展示分析状态，支持按应用过滤。 */
+  requirementAnalyses: (params: { app_id?: string } = {}) =>
+    request<RequirementAnalysesResp>(`/api/requirements/analyses${qs(params)}`),
+  /** 分析会话详情（全部版本 / 批准信息）。 */
+  requirementAnalysis: (id: string) =>
+    request<RequirementAnalysisResp>(`/api/requirements/analyses/${encodeURIComponent(id)}`),
+  /** 发起分析（已完成的直接返回既有结果；失败会以 retry 版本重新分析）。 */
+  startRequirementAnalysis: (appId: string, entry: RequirementsEntry) =>
+    request<RequirementAnalysisCreateResp>('/api/requirements/analyses', {
+      method: 'POST',
+      body: JSON.stringify({ app_id: appId, entry }),
+    }),
+  /** 提交优化建议 / 具体要求 → 系统带反馈再次分析（版本递增）。 */
+  requirementAnalysisFeedback: (id: string, feedback: string) =>
+    request<RequirementAnalysisResp>(
+      `/api/requirements/analyses/${encodeURIComponent(id)}/feedback`,
+      { method: 'POST', body: JSON.stringify({ feedback }) },
+    ),
+  /** 同意分析结果 → 启动需求驱动修复工作流（沙箱验证 / 审批 / 发布全链路）。 */
+  approveRequirementAnalysis: (id: string) =>
+    request<RequirementAnalysisApproveResp>(
+      `/api/requirements/analyses/${encodeURIComponent(id)}/approve`,
+      { method: 'POST' },
+    ),
 }

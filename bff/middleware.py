@@ -22,6 +22,7 @@ from .deps import ok
 # 写接口所需的最低角色（读接口默认 viewer）。未列出的写接口按最高要求（安全默认）。
 _WRITE_ROLE_RULES: list[tuple[str, str]] = [
     ("/api/monitored-apps", "admin"),   # 配置维护
+    ("/api/requirements/analyses", "admin"),  # 需求智能分析：发起 / 反馈 / 批准（批准即启动修复工作流）
     ("/api/flows/", "operator"),        # 审批 / 发布指令 / 排队补丁
     ("/api/escalations", "operator"),   # 转人工待办：指派 / 关闭 / 重试修复
     ("/api/users", "admin"),            # 用户管理（CRUD / 重置密码 / 强制下线）

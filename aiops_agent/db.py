@@ -22,6 +22,7 @@ console_users   控制台用户（密码登录；production 替代 ``data/consol
 console_sessions  登录会话（仅存 sha256 指纹；production 替代 ``data/console_sessions.json``）
 monitored_apps  被监控应用清单（production 替代 ``data/monitored_apps.json``）
 escalations     转人工处置待办（production 替代 ``data/escalations.json``；P1-3）
+requirement_analyses  需求智能分析会话（production 替代 ``data/requirement_analyses.json``）
 audit_events    控制台操作审计（production 替代 JSONL，支持跨实例聚合查询）
 workflow_runs   流程执行速查（BFF 汇总时 upsert，供报表与历史检索）
 =============== ============================================================
@@ -173,6 +174,33 @@ escalations = Table(
     Column("history", JSON, nullable=False),
     Index("idx_escalations_status", "status"),
     Index("idx_escalations_wf", "wf_id"),
+)
+
+requirement_analyses = Table(
+    "requirement_analyses",
+    metadata,
+    Column("id", String(160), primary_key=True),  # ra-<app_id>-<entry_id>
+    Column("app_id", String(64), nullable=False),
+    Column("service", String(128), nullable=False, server_default=""),
+    Column("entry_id", String(64), nullable=False),
+    Column("entry_title", String(512), nullable=False),
+    Column("entry_kind", String(32), nullable=False, server_default=""),
+    Column("entry_priority", String(16), nullable=False, server_default=""),
+    # 需求条目快照（title/content/assessment/...，含全部展示字段；JSON 无 DEFAULT，写入显式提供）
+    Column("entry_snapshot", JSON, nullable=False),
+    Column(
+        "status",
+        Enum("analyzing", "analyzed", "failed", "approved", name="req_analysis_status"),
+        nullable=False,
+        server_default="analyzing",
+    ),
+    Column("current_version", Integer, nullable=False, server_default=text("0")),
+    Column("versions", JSON, nullable=False),
+    Column("approved", JSON),
+    Column("created_at", DateTime, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+    Index("idx_req_analysis_app", "app_id"),
+    Index("idx_req_analysis_status", "status"),
 )
 
 console_users = Table(

@@ -32,5 +32,32 @@ class TestWorkerActivityRegistry(unittest.TestCase):
         self.assertEqual(len(names), len(set(names)))
 
 
+class TestWorkerWorkflowRegistry(unittest.TestCase):
+    """工作流注册守门：_WORKFLOW_LIST 必须覆盖 workflows 模块全部 @workflow.defn。
+
+    背景：新增工作流（如 AIOpsRequirementWorkflow）若漏进注册表，worker 收到任务时
+    会报 NotFoundError 重试耗尽；本测试同活动注册守门，防止再次漏注册。
+    """
+
+    def test_registry_covers_all_workflow_defns(self) -> None:
+        from aiops_agent import workflows
+
+        names: set[str] = set()
+        for name in dir(workflows):
+            obj = getattr(workflows, name)
+            if getattr(obj, "__temporal_workflow_definition", None) is not None:
+                names.add(name)
+        registered = {cls.__name__ for cls in worker._WORKFLOW_LIST}
+        self.assertEqual(names, registered)
+
+    def test_registry_has_no_duplicates(self) -> None:
+        names = [cls.__name__ for cls in worker._WORKFLOW_LIST]
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_requirement_workflow_registered(self) -> None:
+        names = {cls.__name__ for cls in worker._WORKFLOW_LIST}
+        self.assertIn("AIOpsRequirementWorkflow", names)
+
+
 if __name__ == "__main__":
     unittest.main()

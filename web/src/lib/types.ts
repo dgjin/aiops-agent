@@ -387,6 +387,93 @@ export interface RequirementsResp extends Timed {
   entries: RequirementsEntry[]
 }
 
+/** ===== 需求智能分析闭环（查看 / 反馈再分析 / 批准进入修复工作流）===== */
+
+/** LLM 分析结果（risk / complexity 为文本，confidence 0-1；degraded=true 不可批准）。 */
+export interface RequirementAnalysisResult {
+  understanding: string
+  plan: string[]
+  suspect_files: string[]
+  acceptance: string[]
+  risk: string
+  complexity: string
+  confidence: number
+  degraded: boolean
+}
+
+/** 单次分析的元信息（模型 / 降级原因 / 耗时）。 */
+export interface RequirementAnalysisMeta {
+  model?: string
+  degraded?: boolean
+  reason?: string
+  elapsed_seconds?: number
+}
+
+/** 分析版本（逐次追加；trigger=initial / feedback / retry，feedback 为触发它的反馈原文）。 */
+export interface RequirementAnalysisVersion {
+  version: number
+  ts: string
+  trigger: string
+  feedback: string
+  actor: string
+  status: string
+  error: string
+  analysis: RequirementAnalysisResult | null
+  meta: RequirementAnalysisMeta | null
+}
+
+/** 分析会话（一条需求一个会话：analyzing→analyzed→approved，失败可反馈 / 重试）。 */
+export interface RequirementAnalysisEntry {
+  id: string
+  app_id: string
+  service: string
+  entry_id: string
+  entry_title: string
+  entry_kind: string
+  entry_priority: string
+  entry_snapshot: Record<string, unknown>
+  status: string
+  current_version: number
+  versions: RequirementAnalysisVersion[]
+  approved: { version: number; wf_id: string; at: string; actor: string } | null
+  created_at: string
+  updated_at: string
+}
+
+/** 分析会话摘要（列表接口用；不含版本明细）。 */
+export interface RequirementAnalysisSummary {
+  id: string
+  app_id: string
+  service: string
+  entry_id: string
+  entry_title: string
+  entry_kind: string
+  entry_priority: string
+  status: string
+  current_version: number
+  latest_degraded: boolean | null
+  latest_confidence: number | null
+  approved: { version: number; wf_id: string; at: string; actor: string } | null
+  created_at: string
+  updated_at: string
+}
+
+export interface RequirementAnalysesResp extends Timed {
+  analyses: RequirementAnalysisSummary[]
+}
+
+export interface RequirementAnalysisResp extends Timed {
+  analysis: RequirementAnalysisEntry
+}
+
+export interface RequirementAnalysisCreateResp extends RequirementAnalysisResp {
+  started: boolean
+}
+
+export interface RequirementAnalysisApproveResp extends RequirementAnalysisResp {
+  wf_id: string
+}
+
 /** 令牌轮换状态（不含令牌值）。 */
 export interface AuthTokenMeta {
   id: string

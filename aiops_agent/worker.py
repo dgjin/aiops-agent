@@ -20,9 +20,12 @@ from temporalio.worker import Worker
 
 from . import activities, metrics, tracing
 from .config import load_policy
-from .workflows import AIOpsFixWorkflow
+from .workflows import AIOpsFixWorkflow, AIOpsRequirementWorkflow
 
 TASK_QUEUE = "aiops-tasks"
+
+# 工作流注册表：新增工作流类必须同步注册（tests/test_worker_registry 守门断言）
+_WORKFLOW_LIST = [AIOpsFixWorkflow, AIOpsRequirementWorkflow]
 
 _ACTIVITY_LIST = [
     activities.collect_evidence,
@@ -64,7 +67,7 @@ async def main() -> None:
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[AIOpsFixWorkflow],
+        workflows=_WORKFLOW_LIST,
         activities=_ACTIVITY_LIST,
         interceptors=interceptors,
     )

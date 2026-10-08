@@ -5,16 +5,23 @@
  * - 多应用时顶部下拉切换（app_id 显式指定）；单应用直接展示；
  * - BFF 未配置令牌 / 应用不可达 / 401 时返回 ok=false + 中文原因：
  *   原文展示并补充部署侧配置指引，不影响其余功能；
- * - P0 / P1 高优条目置顶卡片突出，全清单表格展示（评估意见随标题小字展示）。
+ * - P0 / P1 高优条目置顶卡片突出，全清单表格展示（评估意见随标题小字展示）；
+ * - 智能分析闭环（弹窗 components/RequirementAnalysisModal）：管理员发起分析 →
+ *   查看结构化结果 → 反馈再分析（版本递增）→ 批准进入需求驱动修复工作流。
  */
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { RefreshCw } from 'lucide-react'
 import { api, describeError } from '../lib/api'
 import { cn, fmtDateTime } from '../lib/format'
 import { EmptyState } from '../components/EmptyState'
-import type { RequirementsEntry } from '../lib/types'
+import { PermissionGate } from '../components/PermissionGate'
+import {
+  ANALYSIS_STATUS_META,
+  RequirementAnalysisModal,
+} from '../components/RequirementAnalysisModal'
+import type { RequirementAnalysisSummary, RequirementsEntry } from '../lib/types'
 
 const KIND_LABELS: Record<string, string> = {
   REQUIREMENT: '功能需求',
@@ -72,14 +79,79 @@ function Distribution({ label, pairs }: { label: string; pairs: [string, number]
   )
 }
 
+/** 智能分析入口：无会话 → admin 发起；有会话 → 任意角色查看（状态徽标按钮）。 */
+function AnalysisButton({
+  summary,
+  onOpen,
+}: {
+  summary?: RequirementAnalysisSummary
+  onOpen: () => void
+}) {
+  if (summary) {
+    const meta = ANALYSIS_STATUS_META[summary.status] ?? {
+      label: summary.status || '未知',
+      cls: 'border-line text-muted',
+    }
+    return (
+      <button
+        type="button"
+        onClick={onOpen}
+        title="查看分析结果 / 提交反馈 / 批准进入修复流程"
+        className={cn(
+          'rounded-lg border px-2 py-1 text-[11px] transition-opacity hover:opacity-80',
+          meta.cls,
+        )}
+      >
+        {meta.label} · v{summary.current_version}
+      </button>
+    )
+  }
+  return (
+    <PermissionGate require="admin" fallback={<span className="text-[11px] text-idle">—</span>}>
+      <button
+        type="button"
+        onClick={onOpen}
+        title="调用 LLM 分析该需求并给出实现方案（可多轮反馈优化后进入修复流程）"
+        className="rounded-lg border border-accent/40 px-2 py-1 text-[11px] text-accent transition-colors hover:bg-accent/10"
+      >
+        智能分析
+      </button>
+    </PermissionGate>
+  )
+}
+
 export function Requirements() {
   const [appId, setAppId] = useState('')
+  const [analysisTarget, setAnalysisTarget] = useState<{
+    entry: RequirementsEntry
+    analysisId: string | null
+  } | null>(null)
   const { data, isError, error, isFetching, refetch } = useQuery({
     queryKey: ['requirements', appId],
     queryFn: () => api.requirements(appId ? { app_id: appId } : {}),
   })
 
   const current = data?.app ?? null
+  const analysisAppId = current?.id ?? ''
+  const analysesQuery = useQuery({
+    queryKey: ['requirement-analyses', analysisAppId],
+    queryFn: () => api.requirementAnalyses(analysisAppId ? { app_id: analysisAppId } : {}),
+    enabled: !!analysisAppId,
+    // 有分析执行中时 3 秒轮询（全部完成后自动停止）
+    refetchInterval: (query) =>
+      (query.state.data?.analyses ?? []).some((item) => item.status === 'analyzing') ? 3000 : false,
+  })
+  const analysisMap = useMemo(() => {
+    const map = new Map<string, RequirementAnalysisSummary>()
+    for (const item of analysesQuery.data?.analyses ?? []) map.set(String(item.entry_id), item)
+    return map
+  }, [analysesQuery.data])
+
+  const openAnalysis = (entry: RequirementsEntry) => {
+    const summary = analysisMap.get(String(entry.id))
+    setAnalysisTarget({ entry, analysisId: summary?.id ?? null })
+  }
+
   const entries = data?.ok ? data.entries : []
   const high = entries.filter((entry) => entry.priority === 'P0' || entry.priority === 'P1')
   const p0 = high.filter((entry) => entry.priority === 'P0').length
@@ -91,7 +163,8 @@ export function Requirements() {
         <div>
           <h1 className="text-lg font-medium">需求基线</h1>
           <p className="mt-1 text-xs text-muted">
-            被监控系统「需求收集与反馈」中已由管理员评估并纳入基线的条目；P0 / P1 高优置顶
+            被监控系统「需求收集与反馈」中已由管理员评估并纳入基线的条目；P0 / P1 高优置顶，
+            管理员可发起智能分析（查看方案 → 反馈优化 → 批准进入修复流程）
           </p>
         </div>
         <button
@@ -165,6 +238,7 @@ export function Requirements() {
             <span>共 {entries.length} 条</span>
             <span className={cn(p0 > 0 && 'text-danger')}>P0 高优 {p0}</span>
             <span className={cn(p1 > 0 && 'text-warn')}>P1 高优 {p1}</span>
+            {analysisMap.size > 0 && <span>智能分析 {analysisMap.size} 条</span>}
             {data.warnings.map((warning) => (
               <span key={warning} className="text-warn">
                 {warning}
@@ -206,6 +280,12 @@ export function Requirements() {
                         {entry.department ? ` · ${entry.department}` : ''}
                       </span>
                       {entry.updatedAt && <span>更新 {fmtDateTime(entry.updatedAt)}</span>}
+                      <span className="ml-auto">
+                        <AnalysisButton
+                          summary={analysisMap.get(String(entry.id))}
+                          onOpen={() => openAnalysis(entry)}
+                        />
+                      </span>
                     </div>
                   </div>
                 ))}
@@ -227,6 +307,7 @@ export function Requirements() {
                       <th className="px-3 py-2 font-medium">基线版本</th>
                       <th className="px-3 py-2 font-medium">提交人 / 部门</th>
                       <th className="px-3 py-2 font-medium">更新时间</th>
+                      <th className="px-3 py-2 font-medium">智能分析</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -257,6 +338,12 @@ export function Requirements() {
                         <td className="px-3 py-2 text-muted">
                           {entry.updatedAt ? fmtDateTime(entry.updatedAt) : '—'}
                         </td>
+                        <td className="px-3 py-2">
+                          <AnalysisButton
+                            summary={analysisMap.get(String(entry.id))}
+                            onOpen={() => openAnalysis(entry)}
+                          />
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -272,6 +359,16 @@ export function Requirements() {
             </div>
           )}
         </>
+      )}
+
+      {analysisTarget && current && (
+        <RequirementAnalysisModal
+          open
+          appId={current.id}
+          entry={analysisTarget.entry}
+          existingId={analysisTarget.analysisId}
+          onClose={() => setAnalysisTarget(null)}
+        />
       )}
     </div>
   )

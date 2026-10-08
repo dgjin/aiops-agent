@@ -27,7 +27,15 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from . import activities
-    from .models import Alert, CanaryResult, Patch, ReleaseResult, RootCause, TestReport
+    from .models import (
+        Alert,
+        CanaryResult,
+        Patch,
+        ReleaseResult,
+        RequirementTask,
+        RootCause,
+        TestReport,
+    )
 
 _ACTIVITY_TIMEOUT = timedelta(seconds=60)
 # 金丝雀发布为长时活动：含镜像构建、容器滚动与真实观测窗口（生产 observe 可达 5m），单独放宽
@@ -157,6 +165,24 @@ class AIOpsFixWorkflow:
             )
             return self._final(alert, root_cause, None, None, started)
 
+        # 闸门 1 通过：修复 → 验证 → 审批 → 发布（与需求流程共用的公共链路）
+        return await self._fix_to_release(alert, root_cause, started)
+
+    # ------------------------------------------------------------------
+    # 内部辅助
+    # ------------------------------------------------------------------
+
+    async def _fix_to_release(self, alert: Alert, root_cause: RootCause, started) -> dict:
+        """FIXING → TESTING → 闸门2（含二级）→ 闸门3（公告倒计时）→ CANARY → 发布。
+
+        告警流程（TRIAGING 产出 root_cause）与需求流程（批准版分析构造 root_cause，
+        见 AIOpsRequirementWorkflow）共用该段；策略配置自 ``self._policy`` 读取。
+        """
+        triage_cfg = self._policy["triage"]
+        approval_cfg = self._policy["approval"]
+        notify_cfg = self._policy["notify_window"]
+        canary_cfg = self._policy["canary"]
+
         # ---------- FIXING / TESTING：补丁生成 + 沙箱验证（回炉限次） ----------
         references = await self._call(
             activities.retrieve_similar_fixes, alert, root_cause, timeout=_RAG_ACTIVITY_TIMEOUT
@@ -196,7 +222,7 @@ class AIOpsFixWorkflow:
 
         # ---------- SHADOW（渐进信任档）：只建议不执行（P1-2） ----------
         # 读取用 .get 兜底：运行中旧流程的快照无此键时行为不变（replay 安全）。
-        if policy.get("shadow_mode", False):
+        if self._policy.get("shadow_mode", False):
             self.stage = "SHADOWED"
             self._gate_events.append("shadow:suggestion-only")
             await self._call(
@@ -347,10 +373,6 @@ class AIOpsFixWorkflow:
         await self._start_next_cycle()
         return self._final(alert, root_cause, patch, release, started)
 
-    # ------------------------------------------------------------------
-    # 内部辅助
-    # ------------------------------------------------------------------
-
     async def _call(self, activity_fn, *args, timeout: timedelta = _ACTIVITY_TIMEOUT):
         return await workflow.execute_activity(
             activity_fn,
@@ -409,3 +431,88 @@ class AIOpsFixWorkflow:
             "duration_seconds": (workflow.now() - started).total_seconds(),
             "queued_patches": [queued_alert.alert_id for _, queued_alert in self._queued_patches],
         }
+
+
+def build_requirement_context(task: RequirementTask) -> tuple[Alert, RootCause]:
+    """把获批需求任务确定性构造为告警/根因上下文（纯函数，供工作流与单测使用）。
+
+    - alert：severity=requirement，description 携带需求原文与批准版方案
+      （修复 Agent 据此走需求实现 prompt 分支生成补丁）；
+    - root_cause：error_type=REQUIREMENT，confidence=1.0 表示「方向已经管理员批准」，
+      不经闸门 1 的置信度拦截；suspect_files 来自分析结果。
+    """
+    acceptance = "\n".join(f"- {item}" for item in task.acceptance) or "- （未列出）"
+    alert = Alert(
+        alert_id=f"req-{task.entry_id}",
+        service=task.service,
+        severity="requirement",
+        description=(
+            f"[需求实现] {task.title}\n"
+            f"需求原文：{task.requirement}\n"
+            f"批准版实现方案（v{task.version}）：\n{task.plan}\n"
+            f"验收要点：\n{acceptance}"
+        ),
+    )
+    root_cause = RootCause(
+        error_type="REQUIREMENT",
+        suspect_files=list(task.suspect_files),
+        confidence=1.0,
+        summary=f"需求「{task.title}」实现方案（批准版 v{task.version}）：{task.plan}",
+    )
+    return alert, root_cause
+
+
+@workflow.defn
+class AIOpsRequirementWorkflow(AIOpsFixWorkflow):
+    """需求驱动修复工作流：已批准的需求分析 → 修复 → 验证 → 审批 → 发布。
+
+    与 AIOpsFixWorkflow 的差异：
+    - 跳过 TRIAGING（日志取证 / 根因分析）——需求场景无故障日志，方向已由管理员批准；
+    - alert / root_cause 由 RequirementTask 确定性构造（见 build_requirement_context），
+      不经闸门 1（confidence=1.0 语义为「人工已确认」）；
+    - FIXING 之后与告警流程完全一致（复用 ``_fix_to_release``）：沙箱验证、闸门 2
+      （受保护目录二级审批）、闸门 3（公告倒计时）、金丝雀发布与自动回滚全部保留；
+    - signal / query 与父类同名（status / submit_approval / submit_deploy_command 等），
+      控制台既有写操作与审批中心对两类流程无需区分。
+
+    启动幂等键：``aiops-req-{analysis_id}-v{version}``（BFF 侧构造）。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._task: RequirementTask | None = None
+
+    @workflow.run
+    async def run(self, task: RequirementTask, policy: dict) -> dict:
+        started = workflow.now()
+        self._policy = policy
+        self._task = task
+        alert, root_cause = build_requirement_context(task)
+        self._alert = alert
+        self._root_cause = root_cause
+        self._gate_events.append(
+            f"requirement:approved:{task.analysis_id}:v{task.version}:by={task.approved_by}"
+        )
+        return await self._fix_to_release(alert, root_cause, started)
+
+    def _final(
+        self,
+        alert: Alert,
+        root_cause: RootCause,
+        patch: Patch | None,
+        release: ReleaseResult | None,
+        started,
+    ) -> dict:
+        """审计记录：父类字段 + 需求溯源（分析会话 / 条目 / 批准版本与操作者）。"""
+        result = super()._final(alert, root_cause, patch, release, started)
+        task = self._task
+        if task is not None:
+            result["requirement"] = {
+                "analysis_id": task.analysis_id,
+                "app_id": task.app_id,
+                "entry_id": task.entry_id,
+                "title": task.title,
+                "version": task.version,
+                "approved_by": task.approved_by,
+            }
+        return result

@@ -217,16 +217,39 @@ def build_fix_prompt(
     file_content: str,
     retry_hint: str = "",
 ) -> str:
-    """构造修复 prompt：根因 + RAG 引用 + 目标文件完整内容（带行号）；retry_hint 供重试强化。"""
+    """构造修复 prompt：根因 + RAG 引用 + 目标文件完整内容（带行号）；retry_hint 供重试强化。
+
+    任务分支：root_cause.error_type == "REQUIREMENT"（需求驱动流程，见
+    AIOpsRequirementWorkflow）时切换为「需求实现」角色与任务段落，其余告警场景行为不变。
+    """
     retry_section = ""
     if retry_hint:
         retry_section = f"\n## 重试强化提示（上一轮候选修复未通过沙箱测试）\n{retry_hint}\n"
-    return f"""你是资深修复工程师。请针对以下故障生成最小化修复补丁（unified diff），只输出一个 JSON 对象。
-
-## 告警
+    if root_cause.error_type == "REQUIREMENT":
+        role_line = (
+            "你是资深开发工程师。请针对以下需求实现任务生成最小化变更补丁（unified diff），"
+            "只输出一个 JSON 对象。"
+        )
+        task_section = f"""## 需求实现任务
+- 任务标识: {alert.alert_id}
+- 目标应用: {alert.service}
+- 需求与批准方案:
+{alert.description}"""
+        scope_line = (
+            "- 以「批准方案」为准实现需求：仅改动实现该需求所必需的代码，"
+            "禁止顺手重构 / 重命名 / 格式化无关代码；\n"
+            "- 允许新增函数 / 分支 / 常量，但须保持既有行为兼容；"
+        )
+    else:
+        role_line = "你是资深修复工程师。请针对以下故障生成最小化修复补丁（unified diff），只输出一个 JSON 对象。"
+        task_section = f"""## 告警
 - alert_id: {alert.alert_id}
 - 服务: {alert.service}
-- 描述: {alert.description}
+- 描述: {alert.description}"""
+        scope_line = "- 仅修改必要行，禁止顺手重构 / 重命名 / 格式化无关代码；"
+    return f"""{role_line}
+
+{task_section}
 
 ## 根因分析（confidence={root_cause.confidence:.2f}）
 - 类型: {root_cause.error_type}
@@ -243,7 +266,7 @@ def build_fix_prompt(
 - 只输出最小化 unified diff：必须含 @@ -start,count +start,count @@ 行；
 - 上下文行必须与「目标文件完整内容」逐字符一致（含缩进、行内注释与空行），禁止省略、合并或改写任何上下文行；
 - 空指针类缺陷（对象可能为 None，且后续存在下标/属性访问）：新增的空值校验必须通过 + 行插入到该下标/属性访问语句之前；
-- 仅修改必要行，禁止顺手重构 / 重命名 / 格式化无关代码；
+{scope_line}
 - diff 文件头使用 a/{target_rel} 与 b/{target_rel}；
 - 保持既有代码风格与类型标注。
 
