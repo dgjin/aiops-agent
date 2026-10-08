@@ -3,7 +3,7 @@
 # 目的：单测不依赖真实 Qoder CLI（未安装也能全绿）。
 #
 # 行为由环境变量驱动：
-#   FAKE_QODER_MODE   = good(默认) | noop | fail | timeout | broken | warn_model
+#   FAKE_QODER_MODE   = good(默认) | noop | fail | timeout | broken | warn_model | newfile
 #   FAKE_QODER_TARGET = 目标文件相对路径（默认 order_service.py）
 #
 #   good       正常路径：对目标文件做语义修复（coupon 空值防护），产生可应用且可编译的改动
@@ -12,6 +12,7 @@
 #   timeout    长时间阻塞（配合 AIOPS_QODER_TIMEOUT 触发超时）
 #   broken     写入语法错误内容（模拟非法改动，应由编译校验拦截）
 #   warn_model 模拟「无效模型名 → 静默回退 auto」：仅 stderr 警告，仍成功产出改动
+#   newfile    新增一个此前不存在的文件（需求实现常见形态，验证 diff 采集含未跟踪文件）
 set -u
 
 # qoder_available 依赖 --version 探测
@@ -71,6 +72,12 @@ case "$mode" in
   broken)
     printf 'def broken(:\n' > "$file"
     echo '{"result":"已编辑（语法错误）"}'
+    exit 0
+    ;;
+  newfile)
+    mkdir -p "$(dirname "$file")"
+    printf 'def guard(coupon):\n    return coupon or 0\n' > "$file"
+    echo '{"result":"已新增文件"}'
     exit 0
     ;;
   warn_model)

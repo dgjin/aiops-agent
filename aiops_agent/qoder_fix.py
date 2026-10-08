@@ -57,7 +57,8 @@ _IGNORE = shutil.ignore_patterns(
     ".agents", ".claude", ".qoder",
 )
 
-# git 全局参数：固定身份、禁用签名、固定默认分支，保证在 CI 无配置环境下可用
+# git 全局参数：固定身份、禁用签名、固定默认分支、文件名不转义，保证在 CI 无配置环境下可用。
+# core.quotepath=false：非 ASCII 文件名不转义（否则 diff 头输出 "a/\346..."，下游按路径应用补丁会找不到文件）。
 _GIT_BASE = [
     "git",
     "-c",
@@ -68,6 +69,8 @@ _GIT_BASE = [
     "commit.gpgsign=false",
     "-c",
     "init.defaultBranch=main",
+    "-c",
+    "core.quotepath=false",
 ]
 
 # 留痕中 stdout/stderr 的最大保留长度
@@ -193,8 +196,9 @@ def build_qoder_prompt(
             "（请自行读取该文件，必要时读取其调用方与既有测试以确认修复位置）"
         )
         scope_rule = (
-            f"- 只修改 `{target_rel}` 这一个文件；"
-            "禁止新增文件、禁止改动测试、禁止重命名、禁止格式化或重构无关代码；"
+            f"- 优先只修改 `{target_rel}` 这一个文件；"
+            "如需新增文件，只允许新增与缺陷/需求直接相关的最小新文件；"
+            "禁止改动测试、禁止重命名、禁止格式化或重构无关代码；"
         )
     else:
         # 自主定位模式：目标文件未能预先确定（如前端仓库），交由 Qoder 在仓库内自行定位
@@ -203,7 +207,8 @@ def build_qoder_prompt(
         )
         scope_rule = (
             "- 只修改与缺陷直接相关的最小文件集合；"
-            "禁止新增文件、禁止改动测试、禁止重命名、禁止格式化或重构无关代码；"
+            "如需新增文件，只允许新增与缺陷/需求直接相关的最小新文件；"
+            "禁止改动测试、禁止重命名、禁止格式化或重构无关代码；"
         )
     return f"""你是资深修复工程师。请修复下面这个线上缺陷，直接修改仓库中的代码文件。
 
@@ -364,10 +369,14 @@ def run_qoder_cli(
     }
 
 
-def collect_diff(workspace: Path, target_rel: str) -> str:
-    """采集 Qoder 对目标文件的改动（unified diff，含 a/ b/ 前缀）。空 diff 返回空串。"""
-    scope = target_rel or "."
-    return _git(workspace, "diff", "--no-color", "HEAD", "--", scope)
+def collect_diff(workspace: Path) -> str:
+    """采集 Qoder 对工作区的全部改动（unified diff，含 a/ b/ 前缀与新增文件）。空 diff 返回空串。
+
+    先 `git add -A` 把未跟踪的新文件纳入索引，再 `git diff --cached HEAD`——
+    否则「新增文件」（需求实现常见形态）不会出现在 diff 中，改动会被误判为「未产生改动」。
+    """
+    _git(workspace, "add", "-A")
+    return _git(workspace, "diff", "--cached", "--no-color", "HEAD")
 
 
 def _write_run_record(record_dir: Path, patch_id: str, payload: dict) -> str:
@@ -455,7 +464,7 @@ def propose_patch(
     meta["model"] = resolve_model(model)
     meta["model_warning"] = _detect_model_warning(run["stderr"])
 
-    diff = collect_diff(workspace, target_rel)
+    diff = collect_diff(workspace)
 
     record_dir = Path(workspace_root) if workspace_root else Path(_env("AIOPS_QODER_ROOT", str(DEFAULT_QODER_ROOT)))
     meta["run_record"] = _write_run_record(

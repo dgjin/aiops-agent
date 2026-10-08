@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import code_rag, metrics
-from .fix_agent import _normalize_rel, apply_unified_diff, split_unified_diff
+from .fix_agent import _normalize_rel, apply_unified_diff, is_new_file_diff, split_unified_diff
 from .models import Patch, TestReport
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -59,15 +59,40 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"(?i)\b(?:password|passwd|api_key|apikey|secret|token)\s*=\s*[\"'][^\"']+[\"']"), "硬编码敏感信息"),
 ]
 
+# 前端/浏览器侧文件扩展名：补丁文件全为此类时改用前端模式集（见 scan_patch_diff）。
+# 大小写不敏感（.TS/.Ts 等一律归入）。
+_FRONTEND_SUFFIXES = {
+    ".html", ".htm", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
+    ".vue", ".svelte", ".css", ".scss",
+}
+
+# 前端文件的高危模式：通用集里的 exec(/socket/requests 在 JS 生态属常见写法
+# （regex.exec(、socket.io 变量、requests 变量名），直接套用会把正常需求改动误判拦截；
+# 前端集聚焦浏览器代码中真实危险的行为：动态执行、系统命令后门、外泄口令。
+_FRONTEND_DANGEROUS_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\beval\s*\("), "eval()"),
+    (re.compile(r"\bnew\s+Function\s*\("), "new Function()"),
+    (re.compile(r"\bos\.system\s*\("), "os.system()"),
+    (re.compile(r"\bchild_process\b"), "child_process"),
+    (re.compile(r"\brm\s+-rf\b"), "rm -rf"),
+    (re.compile(r"(?i)\b(?:password|passwd|api_key|apikey|secret|token)\s*=\s*[\"'][^\"']+[\"']"), "硬编码敏感信息"),
+]
+
 _IGNORE = shutil.ignore_patterns(
     "__pycache__", "*.pyc", ".venv", ".git", "data",
     "node_modules", "dist", "build", "coverage", ".next", "out", "logs",
 )
 
-# 契约模式全树扫描范围：源码类文本扩展名 + 单文件大小上限（防超大文件拖慢）
-_CONTRACT_SCAN_SUFFIXES = {
-    ".html", ".htm", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".vue",
-    ".svelte", ".css", ".scss", ".json", ".md", ".txt", ".py", ".yml", ".yaml",
+# 契约模式全树扫描范围：跳过二进制/媒体扩展名 + 单文件大小上限（防超大文件拖慢）。
+# 不用源码白名单：非典型模板宿主（.ejs/.pug/无扩展名入口等）会被白名单漏掉，
+# 导致「关键词明明在树上却判失败」的误拦；凡文本文件一律参与扫描。
+_CONTRACT_SKIP_SUFFIXES = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp", ".ico", ".tiff", ".psd",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".mp3", ".mp4", ".mov", ".avi", ".webm", ".wav", ".ogg", ".flac",
+    ".pdf", ".zip", ".gz", ".tar", ".rar", ".7z", ".bz2", ".xz",
+    ".exe", ".dll", ".so", ".dylib", ".node", ".wasm", ".class", ".jar", ".pyc",
+    ".map", ".rdb", ".snap", ".lock",
 }
 _CONTRACT_MAX_FILE_BYTES = 512 * 1024
 
@@ -104,18 +129,28 @@ class SandboxOutcome:
     stderr: str = ""
 
 
-def scan_patch_diff(diff: str) -> tuple[bool, str]:
-    """SAST 第一道（快速正则）：扫描 diff 新增行中的高危模式。返回 (ok, detail)。"""
+def scan_patch_diff(diff: str, files: list[str] | None = None) -> tuple[bool, str]:
+    """SAST 第一道（快速正则）：扫描 diff 新增行中的高危模式。返回 (ok, detail)。
+
+    files 为补丁涉及的文件列表：全为前端扩展名时改用前端模式集——通用集会把 JS 生态
+    的常见写法当成高危模式（regex.exec( → 命令执行、socket/requests 变量名 → 原生网络
+    调用），使正常需求改动在 SAST 第一道就被误判拦截。
+    """
     added = [
         line[1:] for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++")
     ]
+    frontend = bool(files) and all(
+        Path(str(name)).suffix.lower() in _FRONTEND_SUFFIXES for name in files
+    )
+    patterns = _FRONTEND_DANGEROUS_PATTERNS if frontend else _DANGEROUS_PATTERNS
     hits: list[str] = []
-    for pattern, label in _DANGEROUS_PATTERNS:
+    for pattern, label in patterns:
         if any(pattern.search(line) for line in added):
             hits.append(label)
     if hits:
         return False, f"命中高危模式：{'、'.join(hits)}"
-    return True, f"无高危模式，无硬编码敏感信息（新增 {len(added)} 行已扫描）"
+    scope = "，前端模式集" if frontend else ""
+    return True, f"无高危模式，无硬编码敏感信息（新增 {len(added)} 行已扫描{scope}）"
 
 
 # Bandit 第二道（AST 深度扫描，P2-04）：拦截补丁**新引入**的 HIGH/MEDIUM 问题
@@ -200,37 +235,48 @@ def run_bandit(workspace: Path, baseline: Path) -> tuple[bool, str]:
 def prepare_workspace(
     patch: Patch, repo_dir: Path, sandbox_root: Path
 ) -> tuple[Path | None, str]:
-    """复制 demo-app 到独立工作区并应用补丁 diff。返回 (workspace, error)。"""
+    """复制被监控仓库到独立工作区并应用补丁 diff（支持修改与新增文件）。"""
     workspace = sandbox_root / patch.patch_id
     if workspace.exists():
         shutil.rmtree(workspace)
     shutil.copytree(repo_dir, workspace, ignore=_IGNORE)
+    error = _apply_patch_to_workspace(patch, workspace)
+    if error:
+        return None, error
+    return workspace, ""
 
-    # 多文件补丁（如受保护目录场景需同时改动 auth/** 与应用文件）：逐文件分别应用
+
+def _apply_patch_to_workspace(patch: Patch, workspace: Path) -> str:
+    """把补丁 diff 应用到工作区（返回错误信息，空串即成功）。
+
+    多文件补丁（如受保护目录场景/需求实现同时改多个文件）按文件头切分逐文件应用；
+    ``--- /dev/null`` 的新增文件以空原文应用并自动创建父目录——否则「需求实现新增
+    组件/工具文件」会被误判为「目标文件不存在」而错误拦截。
+    """
     sections = split_unified_diff(patch.diff)
     if len(sections) > 1:
-        for rel, file_diff in sections.items():
-            rel = _normalize_rel(rel)
-            target = workspace / rel
-            if not target.is_file():
-                return None, f"工作区中目标文件不存在: {rel}"
+        plan = list(sections.items())
+    else:
+        target_rel = _normalize_rel(patch.files[0]) if patch.files else ""
+        plan = [(target_rel, patch.diff)]
+    for rel, file_diff in plan:
+        rel = _normalize_rel(rel)
+        target = workspace / rel
+        new_file = is_new_file_diff(file_diff)
+        if target.is_file():
+            if new_file:
+                return f"新增文件 diff 指向工作区已存在的文件: {rel}"
             original = target.read_text(encoding="utf-8")
-            new_text = apply_unified_diff(original, file_diff)
-            if new_text is None:
-                return None, f"补丁 diff 无法应用（上下文不匹配）: {rel}"
-            target.write_text(new_text, encoding="utf-8")
-        return workspace, ""
-
-    target_rel = _normalize_rel(patch.files[0]) if patch.files else ""
-    target = workspace / target_rel
-    if not target.is_file():
-        return None, f"工作区中目标文件不存在: {target_rel}"
-    original = target.read_text(encoding="utf-8")
-    new_text = apply_unified_diff(original, patch.diff)
-    if new_text is None:
-        return None, f"补丁 diff 无法应用（上下文不匹配）: {target_rel}"
-    target.write_text(new_text, encoding="utf-8")
-    return workspace, ""
+        elif new_file:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            original = ""
+        else:
+            return f"工作区中目标文件不存在: {rel}"
+        new_text = apply_unified_diff(original, file_diff)
+        if new_text is None:
+            return f"补丁 diff 无法应用（上下文不匹配）: {rel}"
+        target.write_text(new_text, encoding="utf-8")
+    return ""
 
 
 def parse_unittest_output(text: str) -> dict:
@@ -471,12 +517,13 @@ def _contract_report(
 def _scan_keyword_files(workspace: Path, keyword: str, *, skip: set[str]) -> list[str]:
     """在工作区源码树中扫描含关键词的文本文件（返回工作区相对路径列表）。
 
-    只扫源码类扩展名（_CONTRACT_SCAN_SUFFIXES）且单文件大小不超上限；
+    只跳过二进制/媒体扩展名（_CONTRACT_SKIP_SUFFIXES）与超大小上限的文件——
+    不限定源码白名单，保证 .ejs/.pug/无扩展名等非典型宿主也能被检出；
     node_modules / dist / .git 等大型目录已在工作区准备阶段随 _IGNORE 排除。
     """
     found: list[str] = []
     for path in sorted(workspace.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in _CONTRACT_SCAN_SUFFIXES:
+        if not path.is_file() or path.suffix.lower() in _CONTRACT_SKIP_SUFFIXES:
             continue
         rel = path.relative_to(workspace).as_posix()
         if rel in skip:
@@ -510,7 +557,7 @@ def run_patch_tests(
     repo_dir = Path(repo_dir) if repo_dir else code_rag.DEFAULT_REPO_DIR
     sandbox_root = Path(sandbox_root) if sandbox_root else DEFAULT_SANDBOX_ROOT
 
-    sast_ok, sast_detail = scan_patch_diff(patch.diff)
+    sast_ok, sast_detail = scan_patch_diff(patch.diff, files=patch.files)
     if not sast_ok:
         return TestReport(
             patch_id=patch.patch_id,

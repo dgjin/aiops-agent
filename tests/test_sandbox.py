@@ -45,6 +45,41 @@ class TestScanPatchDiff(unittest.TestCase):
         self.assertTrue(ok, detail)
         self.assertIn("已扫描", detail)
 
+    def test_frontend_files_use_frontend_patterns(self) -> None:
+        """前端补丁：regex.exec( / socket 变量 / requests 变量等 JS 常见写法不再误报。"""
+        diff = (
+            "--- a/src/util/parse.ts\n+++ b/src/util/parse.ts\n@@ -1,1 +1,3 @@\n"
+            "+const m = pattern.exec(text);\n"
+            "+const socket = io('/live');\n"
+            "+const requests = items.map(toRequest);\n"
+        )
+        ok, detail = sandbox.scan_patch_diff(diff, files=["src/util/parse.ts"])
+        self.assertTrue(ok, detail)
+        self.assertIn("前端模式集", detail)
+
+    def test_frontend_files_still_block_real_danger(self) -> None:
+        """前端模式集仍拦截真实危险：动态执行 / Node 后门 / 硬编码口令。"""
+        eval_diff = "--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n+eval(userInput)\n"
+        ok, detail = sandbox.scan_patch_diff(eval_diff, files=["x.ts"])
+        self.assertFalse(ok)
+        self.assertIn("eval()", detail)
+
+        child_diff = "--- a/y.ts\n+++ b/y.ts\n@@ -1 +1 @@\n+const cp = require('child_process');\n"
+        ok2, detail2 = sandbox.scan_patch_diff(child_diff, files=["y.ts"])
+        self.assertFalse(ok2)
+        self.assertIn("child_process", detail2)
+
+        secret_diff = "--- a/z.ts\n+++ b/z.ts\n@@ -1 +1 @@\n+const apiKey = 'sk-live-123';\n"
+        ok3, detail3 = sandbox.scan_patch_diff(secret_diff, files=["z.ts"])
+        self.assertFalse(ok3)
+        self.assertIn("硬编码敏感信息", detail3)
+
+    def test_mixed_files_keep_default_patterns(self) -> None:
+        """混合补丁（含非前端文件）沿用通用模式集：socket 等仍拦截。"""
+        diff = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n+import socket\n"
+        ok, _ = sandbox.scan_patch_diff(diff, files=["x.py", "ui.tsx"])
+        self.assertFalse(ok)
+
 
 class TestParseUnittestOutput(unittest.TestCase):
     OK_OUTPUT = (
@@ -157,6 +192,28 @@ class TestPrepareWorkspaceAndRunTests(unittest.TestCase):
         workspace, error = sandbox.prepare_workspace(patch, code_rag.DEFAULT_REPO_DIR, self.tmp)
         self.assertIsNone(workspace)
         self.assertIn("无法应用", error)
+
+    def test_prepare_workspace_creates_new_file(self) -> None:
+        """新增文件（--- /dev/null）：自动创建父目录并写入内容（需求实现常见形态）。"""
+        patch = Patch(
+            patch_id="wp6-newfile",
+            alert_id="a-newfile",
+            files=["utils/guard.py"],
+            diff=(
+                "--- /dev/null\n+++ b/utils/guard.py\n@@ -0,0 +1,2 @@\n"
+                "+def guard(coupon):\n+    return coupon or 0\n"
+            ),
+            description="新增工具模块",
+            risk="低",
+            model_version="test",
+            confidence=0.9,
+        )
+        workspace, error = sandbox.prepare_workspace(patch, code_rag.DEFAULT_REPO_DIR, self.tmp)
+        self.assertEqual(error, "")
+        self.assertIsNotNone(workspace)
+        created = workspace / "utils" / "guard.py"
+        self.assertTrue(created.is_file())
+        self.assertIn("def guard", created.read_text(encoding="utf-8"))
 
     def test_run_patch_tests_maps_runner_outcome(self) -> None:
         patch = _patch_for("wp6-map")
@@ -342,6 +399,48 @@ class TestContractValidation(unittest.TestCase):
         self.assertFalse(report.passed)
         self.assertIn("降级", report.unit_tests)
         self.assertIn("降级", report.details)
+
+    def test_requirement_patch_with_new_file_passes(self) -> None:
+        """需求实现含新增组件文件（多文件补丁）→ 应用成功且关键词保留 → 放行。"""
+        new_rel = "src/components/reports/ExportButton.tsx"
+        diff = (
+            f"--- a/{self.component}\n"
+            f"+++ b/{self.component}\n"
+            "@@ -1,1 +1,2 @@\n"
+            " export const Report = () => null;\n"
+            "+export const EXPORT_ENABLED = true;\n"
+            "--- /dev/null\n"
+            f"+++ b/{new_rel}\n"
+            "@@ -0,0 +1,2 @@\n"
+            "+export const ExportButton = () => null;\n"
+            "+export const EXPORT_LABEL = '导出';\n"
+        )
+        report = self._run(self._patch([self.component, new_rel], diff))
+        self.assertTrue(report.passed, report.details)
+        self.assertIn("探针关键词保留", report.unit_tests)
+        self.assertTrue((self.tmp / "p-contract-1" / new_rel).is_file())
+
+    def test_template_host_outside_old_whitelist_detected(self) -> None:
+        """关键词宿主为非典型模板（.ejs，旧白名单之外）→ 仍能检出，不误拦。"""
+        (self.repo / "index.html").write_text(
+            '<!doctype html><html><body><div id="app"></div></body></html>\n',
+            encoding="utf-8",
+        )
+        (self.repo / "views").mkdir()
+        (self.repo / "views" / "layout.ejs").write_text(
+            '<!doctype html><html><body><div id="root"></div></body></html>\n',
+            encoding="utf-8",
+        )
+        diff = (
+            f"--- a/{self.component}\n"
+            f"+++ b/{self.component}\n"
+            "@@ -1,1 +1,2 @@\n"
+            " export const Report = () => null;\n"
+            "+export const X = 1;\n"
+        )
+        report = self._run(self._patch([self.component], diff))
+        self.assertTrue(report.passed, report.details)
+        self.assertIn("layout.ejs", report.details)
 
 
 class TestBanditIntegration(unittest.TestCase):

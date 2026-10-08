@@ -84,7 +84,7 @@ class TestBuildPrompt(unittest.TestCase):
     def test_contains_target_and_guardrails(self) -> None:
         prompt = qoder_fix.build_qoder_prompt(ALERT, ROOT_CAUSE, [], "order_service.py")
         self.assertIn("order_service.py", prompt)
-        self.assertIn("禁止新增文件", prompt)
+        self.assertIn("新增与缺陷/需求直接相关的最小新文件", prompt)
         self.assertIn("重构无关代码", prompt)
         self.assertIn("不要输出 diff", prompt)
         self.assertIn("NullPointerException", prompt)
@@ -125,6 +125,17 @@ class TestQoderRunFix(QoderTestBase):
         self.assertTrue(patch.model_version.startswith("qoder-cli:"), patch.model_version)
         self.assertIn("if coupon else 0", patch.diff)
         self.assertEqual(patch.confidence, ROOT_CAUSE.confidence)
+
+    def test_new_file_collected_and_validated(self) -> None:
+        """需求实现常见形态：Qoder 新增文件（未跟踪）→ diff 采集含 /dev/null 段且校验通过。"""
+        os.environ["AIOPS_FIX_PROVIDER"] = "qoder"
+        os.environ["FAKE_QODER_MODE"] = "newfile"
+        os.environ["FAKE_QODER_TARGET"] = "utils/guard.py"
+        patch, meta = fix_agent.run_fix(ALERT, ROOT_CAUSE, references=[], attempt=0)
+        self.assertTrue(meta["validated"], meta["reason"])
+        self.assertFalse(meta["degraded"])
+        self.assertIn("utils/guard.py", patch.files)
+        self.assertIn("/dev/null", patch.diff)
 
     def test_missing_cli_degrades(self) -> None:
         os.environ["AIOPS_FIX_PROVIDER"] = "qoder"

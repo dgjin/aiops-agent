@@ -404,6 +404,12 @@ def split_unified_diff(diff_text: str) -> dict[str, str]:
     return {path: "\n".join(lines) + "\n" for path, lines in sections.items()}
 
 
+def is_new_file_diff(file_diff: str) -> bool:
+    """判断 diff 段是否为「新增文件」（old 侧为 /dev/null 的标准 git 形态）。"""
+    lines = file_diff.lstrip().splitlines()
+    return bool(lines) and lines[0].startswith("--- ") and "/dev/null" in lines[0]
+
+
 def validate_source(new_text: str, filename: str) -> tuple[bool, str]:
     """编译校验（对应验收「建议 diff 可编译」）。"""
     try:
@@ -420,6 +426,7 @@ def _validate_patch_diff(
 
     多文件 diff 按标准文件头切分逐文件校验（被监控应用场景可能出现多文件改动）；
     无文件头（LLM 偶发 hunk-only 输出）时退化为按已定位目标文件单文件校验（兼容既有行为）。
+    ``--- /dev/null`` 的新增文件以空原文应用（需求实现常见形态，直接拒绝会把正常需求误判降级）。
     非 Python 文件（前端 .ts/.html 等）无法用 compile() 校验，仅做应用校验。
     """
     sections = split_unified_diff(diff)
@@ -428,9 +435,14 @@ def _validate_patch_diff(
         for rel, file_diff in sections.items():
             rel = _normalize_rel(rel)
             target = repo_dir / rel
-            if not target.is_file():
-                return [], f"补丁指向仓库中不存在的文件: {rel}（禁止新增文件）"
-            new_text = apply_unified_diff(target.read_text(encoding="utf-8"), file_diff)
+            original = ""
+            if target.is_file():
+                if is_new_file_diff(file_diff):
+                    return [], f"新增文件 diff 指向仓库中已存在的文件: {rel}"
+                original = target.read_text(encoding="utf-8")
+            elif not is_new_file_diff(file_diff):
+                return [], f"补丁指向仓库中不存在的文件: {rel}（且非新增文件 diff）"
+            new_text = apply_unified_diff(original, file_diff)
             if new_text is None:
                 return [], f"diff 无法应用到目标文件（上下文不匹配）: {rel}"
             if rel.endswith(".py"):

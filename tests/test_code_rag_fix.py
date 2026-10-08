@@ -455,6 +455,30 @@ class TestRunFix(unittest.TestCase):
         self.assertEqual(patch.confidence, ROOT_CAUSE.confidence)
         self.assertFalse(patch.degraded)
 
+    def test_llm_new_file_patch_validated(self) -> None:
+        """需求实现常见形态：修改现有文件 + 新增文件（--- /dev/null）→ 校验通过不降级。"""
+        new_section = (
+            "--- /dev/null\n"
+            "+++ b/utils/guard.py\n"
+            "@@ -0,0 +1,2 @@\n"
+            "+def guard(coupon):\n"
+            "+    return coupon or 0\n"
+        )
+        response = json.dumps(
+            {
+                "diff": _real_diff_for_order_service() + new_section,
+                "description": "增加 coupon 空值防护并抽出公共守卫",
+                "risk": "低：单点防御",
+            },
+            ensure_ascii=False,
+        )
+        with mock.patch("aiops_agent.fix_agent.call_ollama", return_value=response):
+            patch, meta = fix_agent.run_fix(ALERT_REAL, ROOT_CAUSE, references=[], attempt=0)
+        self.assertTrue(meta["validated"], meta["reason"])
+        self.assertIn("utils/guard.py", patch.files)
+        self.assertIn("/dev/null", patch.diff)
+        self.assertFalse(patch.degraded)
+
     def test_llm_garbage_degrades_to_stub(self) -> None:
         with mock.patch("aiops_agent.fix_agent.call_ollama", return_value="完全不是 JSON"):
             patch, meta = fix_agent.run_fix(ALERT_REAL, ROOT_CAUSE, references=[], attempt=1)
