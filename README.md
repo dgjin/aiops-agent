@@ -107,6 +107,7 @@ cd aiops-agent
 | 环境自检 | `demo_cli.py doctor` |
 | 突增检测（单轮） | `log_surge_detector.py --once` |
 | 组件守护状态 | `python3 scripts/aiops-watchdog.py --status` |
+| 需求基线分析 | `analyze_requirements.py --url http://localhost:3000` |
 | 灌演示日志 | `demo_log_generator.py --service order --mode surge --count 800` |
 
 演示分支（`start --description` 带关键词）：`low-conf`（置信度不足转人工）、`protected`（受保护目录需二级审批）、`test-fail`（测试首败回炉）、`test-always-fail`（重试耗尽转人工）、`canary-bad`（金丝雀劣化自动回滚）。
@@ -165,6 +166,20 @@ cd aiops-agent
 
 一键脚本已常驻拉起上述两件套：**被监控应用日志 → Loki → 突增检测 → 自动发起修复流程** 全链路无需人工干预。演示突增灵敏度为 `--min-lines 5 --factor 2`，生产建议 `--min-lines 100 --factor 3`。
 
+### 主动需求分析（可选）
+
+被监控应用部署「需求收集与反馈」能力后（标准导出接口 `GET /api/requirements/export`，Manifest 以 `requirements_path` 声明，见[改造方案第七章](../AIOps%20被监控系统标准接口改造方案.md)），AIOps 可拉取**已由管理员评估并纳入基线**的需求 / 建议条目做主动分析（优先级研判 / 实现建议 / 排期参考）：
+
+```bash
+# 拉取基线需求 → 本地分析（类型 / 优先级分布、P0/P1 高优提示）→ Markdown 报告（data/requirements_report.md）
+.venv/bin/python analyze_requirements.py --url http://localhost:3000
+
+# 机器可读：stdout 输出 JSON（不写报告文件）；--since 增量拉取（>= 语义）
+.venv/bin/python analyze_requirements.py --url http://localhost:3000 --since 2026-10-01 --json
+```
+
+令牌：`--token` 或环境变量 `NL2SQL_OPS_TOKEN`（值 = 被监控系统的 `OPS_API_TOKEN`）。客户端实现 `aiops_agent/requirements_client.py` 标准库零依赖、永不抛异常；接口自描述见 `GET /.well-known/requirements.json`。
+
 ### Qoder 修复引擎（可选）
 
 修复环节默认用本地 Ollama 生成补丁；也可切换为 **Qoder CLI 无头调用**（Qoder 在隔离工作区内自主读代码并改代码，改动经 `git diff` 采集后接入同一套校验/沙箱/闸门）。完整设计见《AIOps 自动运维智能体系统 Qoder 修复引擎接入设计》。
@@ -199,15 +214,16 @@ export AIOPS_QODER_BIN="$HOME/.local/bin/qodercli"   # 建议显式指定
 
 ```
 aiops-agent/
-├── aiops_agent/        # 核心包：workflows / activities / config / mode / db / models / sandbox / metrics / kill_switch / cleanup / git_integration / release / notify / code_rag / fix_agent / qoder_fix / triage / logs
+├── aiops_agent/        # 核心包：workflows / activities / config / mode / db / models / sandbox / metrics / kill_switch / cleanup / git_integration / release / notify / code_rag / fix_agent / qoder_fix / triage / logs / requirements_client
 ├── bff/                # 运维控制台 BFF（FastAPI；routes/ 按域拆分 + middleware 鉴权/限速/指标）
 ├── web/                # 运维控制台前端（React 19 + Vite + TS + Tailwind 深色主题）
 ├── demo-app/           # 被修复的示例应用（order 服务）
-├── tests/              # 单元测试（unittest；471 用例）
+├── tests/              # 单元测试（unittest；663 用例）
 ├── data/               # 运行产物（索引 / 沙箱 / 留痕 / 审计）；生产数据在 data/prod/ 或 MySQL
 ├── scripts/            # 演示脚本 + production-smoke.py（生产冒烟）+ security-scan.sh（SAST）
 ├── deploy/             # 生产交付物：Dockerfile / k8s manifests / prometheus / grafana
 ├── demo_cli.py         # 演示 CLI（启动流程 / 发信号 / 自检）
+├── analyze_requirements.py # 需求基线主动分析 CLI（拉取基线条目 → 报告 / JSON）
 ├── demo_log_generator.py  # 演示日志生成器
 ├── demo-policy.yaml    # 演示加速策略
 └── release-gate-policy.yaml  # 生产闸门策略

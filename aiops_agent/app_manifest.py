@@ -18,6 +18,7 @@ metrics_path              Prometheus 指标路径（观测增强，可空）
 log_path                  应用日志文件路径（支持 ``*`` 通配，采集器据此监听）
 protected_paths           受保护路径模式列表（命中 → 补丁走二级审批）
 test_command              沙箱回归建议命令（信息性；策略文件优先）
+requirements_path         需求基线条目导出路径（供主动需求分析，见 requirements_client.py）
 ================  =======  ==================================================
 
 本模块只做「探测 + 校验」：不落盘、不引入第三方依赖（标准库 urllib 实现），
@@ -36,7 +37,15 @@ DEFAULT_TIMEOUT = 3.0
 # 防御性上限：控制台探测不应被（错误配置的）大响应拖垮
 MAX_BODY = 256 * 1024
 
-_STR_FIELDS = ("name", "probe_keyword", "health_path", "metrics_path", "log_path", "test_command")
+_STR_FIELDS = (
+    "name",
+    "probe_keyword",
+    "health_path",
+    "metrics_path",
+    "log_path",
+    "test_command",
+    "requirements_path",
+)
 
 
 def manifest_url(base_url: str) -> str:
