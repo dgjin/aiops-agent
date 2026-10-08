@@ -14,7 +14,7 @@
 | Node 18+ | 前端构建 | — | 仅首次构建需要 |
 | Temporal server | 工作流编排 | `localhost:7233` | `docker compose up -d temporal` |
 | Loki | 日志存储 | `localhost:3101` | `docker compose up -d loki` |
-| Ollama | 本地 LLM | `localhost:11434` | `ollama pull qwen3:8b && ollama serve` |
+| Ollama | 本地 LLM | `localhost:11434` | `ollama pull qwen3.8:27b-mlx && ollama serve` |
 | Docker | 沙箱测试 / 金丝雀发布 | — | 本机已装（colima 或 Docker Desktop） |
 
 > 依赖是否就绪，可随时运行 `python demo_cli.py doctor` 一键自检（见下文）。

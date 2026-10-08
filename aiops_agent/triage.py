@@ -13,7 +13,7 @@
 
 环境变量：
     AIOPS_OLLAMA_URL     Ollama 地址（默认 http://localhost:11434）
-    AIOPS_TRIAGE_MODEL   triage 模型（默认 qwen3:8b；本地模型，无需外网）
+    AIOPS_TRIAGE_MODEL   triage 模型（默认 qwen3.8:27b-mlx；本地模型，无需外网）
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .models import Alert, RootCause
 
 DEFAULT_OLLAMA_URL = os.environ.get("AIOPS_OLLAMA_URL", "http://localhost:11434")
-DEFAULT_MODEL = os.environ.get("AIOPS_TRIAGE_MODEL", "qwen3:8b")
+DEFAULT_MODEL = os.environ.get("AIOPS_TRIAGE_MODEL", "qwen3.8:27b-mlx")
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 

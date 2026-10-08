@@ -13,7 +13,7 @@
 能否进入修复工作流由管理员批准（approve）决定，LLM 不直接触发任何执行。
 
 环境变量：
-    AIOPS_REQUIREMENT_MODEL   分析模型（缺省复用 triage 默认模型，如 qwen3:8b）。
+    AIOPS_REQUIREMENT_MODEL   分析模型（缺省复用 triage 默认模型，如 qwen3.8:27b-mlx）。
 """
 
 from __future__ import annotations

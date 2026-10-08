@@ -21,7 +21,7 @@
     AIOPS_FIX_PROVIDER  修复提供者：ollama（默认，本地 LLM 单次生成）|
                         qoder（Qoder CLI 无头调用，仓库级自主修复；见 qoder_fix.py）
     AIOPS_FIX_MODEL     生成模型（仅 ollama 提供者使用；默认复用 triage 默认模型，
-                        可指向更大模型提升 diff 语义正确率，如 qwen3.8:27b-mlx）
+                        可切换更轻量模型加速，如 qwen3:8b）
 
 提供者抽象：两个实现产出同构的最小化 diff（下游应用/编译校验/沙箱/审批完全无感知）；
 qoder 提供者的变更由隔离工作区的 ``git diff`` 确定性采集，失败一律回落确定性兜底补丁。

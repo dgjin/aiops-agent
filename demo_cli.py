@@ -227,7 +227,7 @@ def _check_ollama() -> tuple[bool, str]:
     base = triage.DEFAULT_OLLAMA_URL
     data = _http_json(f"{base.rstrip('/')}/api/tags")
     if data is None:
-        return False, f"{base} 不可达 → ollama serve（并 ollama pull qwen3:8b）"
+        return False, f"{base} 不可达 → ollama serve（并 ollama pull qwen3.8:27b-mlx）"
     models = [m.get("name", "") for m in data.get("models", [])]
     wanted = os.environ.get("AIOPS_TRIAGE_MODEL", triage.DEFAULT_MODEL)
     hit = any(m == wanted or m.startswith(wanted.split(":")[0]) for m in models)
