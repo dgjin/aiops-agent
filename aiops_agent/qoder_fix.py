@@ -17,6 +17,9 @@
     - 只在 data/qoder/<patch_id>/ 副本内改动，绝不触碰真实代码目录；
     - --permission-mode accept_edits（非 bypass_permissions），配合工具白/黑名单；
     - --max-turns + 子进程超时双限；--no-session-persistence 保证无状态可复现；
+    - 服务端瞬时故障快速重试：仅限「会话初始化被拒」签名（error_during_execution/500/
+      num_turns=0）且快速失败（wall<60s）的调用，退避 15s/45s；慢失败与任务类失败不重试
+      （见常量注释与 _is_server_transient_failure）；
     - 子进程以新会话 + /dev/null stdin 运行（脱离控制终端）：后台作业启动的 worker
       场景下，防 qodercli 读终端被 SIGTTIN 停止而永不退出（详见 run_qoder_cli 注释）；
     - 子进程环境经 sanitize_env() 清洗，剔除继承自 Qoder 进程的 Agent-SDK 变量
@@ -48,14 +51,43 @@ DEFAULT_DISALLOWED_TOOLS = "Bash"
 DEFAULT_TIMEOUT = 180
 DEFAULT_MAX_TURNS = 20
 
+# 服务端瞬时故障「快速重试」参数（2026-10-09 排查结论）：
+# Qoder 服务端在会话初始化阶段会间歇性返回 500（subtype=error_during_execution、
+# num_turns=0、duration_ms=0），呈短时窗口（实测约 30s~数分钟）反复出现；窗口内对
+# 「快速失败」的调用做短退避重试有较高恢复概率。仅重试该签名且 wall<SERVER_FAST_FAIL
+# 的调用；慢失败（>60s，多为大上下文处理后才报错、单次计费高）不重试，避免无效重复计费。
+SERVER_RETRY_BACKOFF_SECONDS = (15, 45)
+SERVER_FAST_FAIL_SECONDS = 60
+
 # 工作区复制过滤（与 sandbox 一致：排除缓存/虚拟环境/外层仓库数据/前端依赖与产物目录）
-_IGNORE = shutil.ignore_patterns(
+_IGNORE_PATTERNS = shutil.ignore_patterns(
     "__pycache__", "*.pyc", ".venv", ".git", "data",
     "node_modules", "dist", "build", "coverage", ".next", "out", "logs",
     # skill 目录：工作区携带多来源同名 skill（如 archify）会让 qodercli 无头会话以
     # "skill name conflict" 中断（exit=1、零改动）；排除后仅剩用户级源，与 demo-app 行为一致。
     ".agents", ".claude", ".qoder",
+    # 备份/归档目录：数据库全量备份等恢复点数据（实测 1.9GB）对代码修复无价值
+    "backups",
 )
+
+# 工作区单文件体积上限：超过该阈值的文件不进工作区（SQL 全量备份、超大运行转录等）。
+# 实测 2.2GB 工作区会话初始化启动约 28s、失败计费显著放大；过滤后启动约 2s。
+MAX_WORKSPACE_FILE_BYTES = 20 * 1024 * 1024
+
+
+def _ignore_workspace(dir_path: str, names: list[str]) -> set[str]:
+    """工作区复制过滤：名称模式 + 超大文件（>MAX_WORKSPACE_FILE_BYTES）双层。"""
+    ignored = set(_IGNORE_PATTERNS(dir_path, names))
+    for name in names:
+        if name in ignored:
+            continue
+        path = os.path.join(dir_path, name)
+        try:
+            if os.path.isfile(path) and os.path.getsize(path) > MAX_WORKSPACE_FILE_BYTES:
+                ignored.add(name)
+        except OSError:
+            continue
+    return ignored
 
 # git 全局参数：固定身份、禁用签名、固定默认分支、文件名不转义，保证在 CI 无配置环境下可用。
 # core.quotepath=false：非 ASCII 文件名不转义（否则 diff 头输出 "a/\346..."，下游按路径应用补丁会找不到文件）。
@@ -259,7 +291,7 @@ def prepare_qoder_workspace(repo_dir: Path, patch_id: str, root: Path | None = N
     if workspace.exists():
         shutil.rmtree(workspace)
     workspace.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(repo_dir, workspace, ignore=_IGNORE)
+    shutil.copytree(repo_dir, workspace, ignore=_ignore_workspace)
     if not any(workspace.iterdir()):
         raise QoderFixError(f"仓库目录为空，无法建立工作区: {repo_dir}")
     _git(workspace, "init", "-q")
@@ -312,7 +344,7 @@ def run_qoder_cli(
         "--max-turns",
         str(max_turns),
         "--no-session-persistence",
-        # 仅加载用户级设置源：项目级 skill 源不参与加载，从加载层消除同名 skill 冲突（与 _IGNORE 双保险）
+        # 仅加载用户级设置源：项目级 skill 源不参与加载，从加载层消除同名 skill 冲突（与工作区复制过滤双保险）
         "--setting-sources",
         "user",
     ]
@@ -390,6 +422,47 @@ def _write_run_record(record_dir: Path, patch_id: str, payload: dict) -> str:
         return ""
 
 
+def _parse_result_json(stdout: str) -> dict:
+    """解析 CLI stdout 中的 result JSON（仅供「是否值得快速重试」决策）。
+
+    模块契约上不依赖 CLI 的 JSON 字段结构（见模块 docstring「两个不依赖」）；本函数
+    只做故障分类，任何解析失败都安全退化为「不重试」。
+    """
+    for line in reversed((stdout or "").strip().splitlines()):
+        line = line.strip()
+        if not (line.startswith("{") and line.endswith("}")):
+            continue
+        try:
+            data = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def _is_server_transient_failure(run: dict) -> bool:
+    """识别 Qoder 服务端「会话初始化被拒」的瞬时故障（决定是否快速重试）。
+
+    签名（2026-10-09 实测 12/12 一致）：subtype=error_during_execution + error_code=500
+    + num_turns=0；且整次调用 wall < SERVER_FAST_FAIL_SECONDS——仅「快速失败」重试（边际
+    成本低、窗口内恢复概率高）。超时、慢失败、任务类失败（max_turns/无改动）不重试。
+    """
+    if run.get("timed_out"):
+        return False
+    try:
+        if float(run.get("duration_seconds") or 0) >= SERVER_FAST_FAIL_SECONDS:
+            return False
+        result = _parse_result_json(run.get("stdout", ""))
+        return (
+            result.get("subtype") == "error_during_execution"
+            and int(result.get("error_code") or 0) == 500
+            and int(result.get("num_turns") or 0) == 0
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def propose_patch(
     alert: Alert,
     root_cause: RootCause,
@@ -418,6 +491,7 @@ def propose_patch(
         "provider": "qoder",
         "stub": False,
         "generations": 1,
+        "server_retry_attempts": 0,
         "reason": "",
         "cli_version": "",
         "exit_code": None,
@@ -448,21 +522,33 @@ def propose_patch(
         target_rel,
         retry_hint=_retry_hint(attempt),
     )
-    run = run_qoder_cli(
-        workspace,
-        prompt,
-        exe=exe,
-        model=model,
-        timeout=timeout,
-        max_turns=max_turns,
-        permission_mode=permission_mode,
-        allowed_tools=allowed_tools,
-        disallowed_tools=disallowed_tools,
-    )
-    meta["exit_code"] = run["exit_code"]
-    meta["timed_out"] = run["timed_out"]
-    meta["model"] = resolve_model(model)
-    meta["model_warning"] = _detect_model_warning(run["stderr"])
+    run: dict = {}
+    server_retries = 0
+    for round_no in range(1 + len(SERVER_RETRY_BACKOFF_SECONDS)):
+        run = run_qoder_cli(
+            workspace,
+            prompt,
+            exe=exe,
+            model=model,
+            timeout=timeout,
+            max_turns=max_turns,
+            permission_mode=permission_mode,
+            allowed_tools=allowed_tools,
+            disallowed_tools=disallowed_tools,
+        )
+        meta["exit_code"] = run["exit_code"]
+        meta["timed_out"] = run["timed_out"]
+        meta["model"] = resolve_model(model)
+        meta["model_warning"] = _detect_model_warning(run["stderr"])
+        if round_no >= len(SERVER_RETRY_BACKOFF_SECONDS):
+            break
+        if not _is_server_transient_failure(run):
+            break
+        # 服务端瞬时故障（会话初始化被拒的快速失败签名）：短退避后快速重试
+        time.sleep(SERVER_RETRY_BACKOFF_SECONDS[round_no])
+        server_retries += 1
+    meta["generations"] = 1 + server_retries
+    meta["server_retry_attempts"] = server_retries
 
     diff = collect_diff(workspace)
 
@@ -482,6 +568,7 @@ def propose_patch(
             "exit_code": run["exit_code"],
             "timed_out": run["timed_out"],
             "duration_seconds": run["duration_seconds"],
+            "server_retry_attempts": server_retries,
             "changed": bool(diff.strip()),
             "diff_stat": _diff_stat(diff),
             "stdout_tail": run["stdout"][-1000:],
@@ -492,8 +579,14 @@ def propose_patch(
     if run["timed_out"]:
         raise QoderFixError(f"Qoder CLI 超时（>{timeout if timeout is not None else _env('AIOPS_QODER_TIMEOUT', str(DEFAULT_TIMEOUT))}s）")
     if not diff.strip():
+        retry_note = (
+            "（疑似 Qoder 服务端瞬时故障 error_during_execution/500，"
+            f"已快速重试 {server_retries} 次）"
+            if server_retries
+            else ""
+        )
         raise QoderFixError(
-            f"Qoder 未对 {target_display} 产生改动（exit={run['exit_code']}）；"
+            f"Qoder 未对 {target_display} 产生改动{retry_note}（exit={run['exit_code']}）；"
             f"输出摘要: {(run['stderr'] or run['stdout'] or '').strip()[:160]}"
         )
 
@@ -502,6 +595,8 @@ def propose_patch(
     meta["reason"] = (
         f"Qoder CLI {version}/{meta['model']} 自主修复完成（changed={_diff_stat(diff)}）"
     )
+    if server_retries:
+        meta["reason"] += f"；服务端瞬时故障重试 {server_retries} 次后成功"
     if meta["model_warning"]:
         meta["reason"] += f"；⚠ 模型回退警告：{meta['model_warning']}"
     meta["elapsed_seconds"] = round(time.monotonic() - start, 2)

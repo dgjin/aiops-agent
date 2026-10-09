@@ -41,10 +41,11 @@ _ACTIVITY_TIMEOUT = timedelta(seconds=60)
 # 金丝雀发布为长时活动：含镜像构建、容器滚动与真实观测窗口（生产 observe 可达 5m），单独放宽
 _CANARY_ACTIVITY_TIMEOUT = timedelta(seconds=600)
 # 修复活动超时：Qoder 提供者为仓库级多轮自主修复（实测约 50s 起），显著长于本地 LLM 单次生成。
-# 约束：必须 **大于** 提供者自身的子进程超时（qoder_fix.DEFAULT_TIMEOUT=180s），
-# 这样超时会在活动内部触发优雅降级（QoderFixError → 兜底补丁），而不是被 Temporal 取消
-# ——被取消会一路冒泡为活动失败并触发重试，最终无法降级。
-_FIX_ACTIVITY_TIMEOUT = timedelta(seconds=300)
+# 约束：必须 **大于** 提供者内部最坏耗时（子进程超时 180s + 服务端瞬时故障快速重试预算：
+# 退避 15s+45s + 快速失败上限 60s×2 ≈ 360s），这样超时会在活动内部触发优雅降级
+# （QoderFixError → 兜底补丁），而不是被 Temporal 取消——被取消会一路冒泡为活动失败并
+# 触发重试，最终无法降级。
+_FIX_ACTIVITY_TIMEOUT = timedelta(seconds=480)
 # RAG 检索活动：首次接入的应用在检索前会自动构建专属索引（嵌入批量请求，分钟级），
 # 单独放宽；构建在独立线程内完成且不随活动取消，超时重试时命中已完成索引。
 _RAG_ACTIVITY_TIMEOUT = timedelta(seconds=300)

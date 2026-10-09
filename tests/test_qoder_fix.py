@@ -6,7 +6,10 @@
     - 默认提供者为 ollama（零行为变更）；
     - 演示分支短路优先于提供者分发；
     - 隔离性：真实 demo-app/ 不被改动，工作区落在 AIOPS_QODER_ROOT；
-    - 留痕、鉴权转写、prompt 约束。
+    - 留痕、鉴权转写、prompt 约束；
+    - 服务端瞬时故障快速重试：仅限快速失败的 error_during_execution/500 签名（退避 15s/45s），
+      慢失败/任务类失败不重试；
+    - 工作区复制瘦身：backups/ 目录与超大文件（>MAX_WORKSPACE_FILE_BYTES）不进工作区。
 
 运行：
     .venv/bin/python -m unittest tests.test_qoder_fix -v
@@ -45,6 +48,7 @@ _ENV_KEYS = (
     "AIOPS_QODER_TOKEN",
     "FAKE_QODER_MODE",
     "FAKE_QODER_TARGET",
+    "FAKE_QODER_MARKER",
     "QODER_PERSONAL_ACCESS_TOKEN",
 )
 
@@ -237,6 +241,153 @@ class TestProposePatch(QoderTestBase):
             self._propose()
 
 
+class TestServerTransientRetry(QoderTestBase):
+    """回归防护：服务端「会话初始化被拒」500 签名的快速重试（2026-10-09 排查结论）。
+
+    实测：Qoder 服务端会话初始化阶段会间歇返回 500（error_during_execution、num_turns=0），
+    呈短时窗口出现（约 30s~数分钟）。仅对「快速失败」签名做 15s/45s 退避重试；
+    慢失败/任务类失败不重试，避免无效重复计费。
+    """
+
+    def _run_dict(self, **over) -> dict:
+        base = {
+            "timed_out": False,
+            "exit_code": 1,
+            "duration_seconds": 19.8,
+            "stdout": (
+                '{"type":"result","subtype":"error_during_execution","error_code":500,'
+                '"num_turns":0,"duration_ms":0,"is_error":true}'
+            ),
+            "stderr": "",
+        }
+        base.update(over)
+        return base
+
+    def _propose(self):
+        return qoder_fix.propose_patch(
+            ALERT,
+            ROOT_CAUSE,
+            [],
+            0,
+            "order_service.py",
+            repo_dir=code_rag.DEFAULT_REPO_DIR,
+            workspace_root=self.root / "qoder",
+        )
+
+    def test_detects_transient_signature(self) -> None:
+        self.assertTrue(qoder_fix._is_server_transient_failure(self._run_dict()))
+
+    def test_rejects_slow_failure(self) -> None:
+        """慢失败（>SERVER_FAST_FAIL_SECONDS）：大上下文处理后才报错、单次计费高，不重试。"""
+        self.assertFalse(
+            qoder_fix._is_server_transient_failure(self._run_dict(duration_seconds=120.0))
+        )
+
+    def test_rejects_other_failures(self) -> None:
+        self.assertFalse(qoder_fix._is_server_transient_failure(self._run_dict(timed_out=True)))
+        self.assertFalse(
+            qoder_fix._is_server_transient_failure(
+                self._run_dict(stdout='{"subtype":"error_during_execution","error_code":500,"num_turns":2}')
+            )
+        )
+        self.assertFalse(qoder_fix._is_server_transient_failure(self._run_dict(stdout="not json")))
+        self.assertFalse(
+            qoder_fix._is_server_transient_failure(
+                self._run_dict(exit_code=0, stdout='{"result":"ok"}')
+            )
+        )
+
+    def test_fast_retry_then_success(self) -> None:
+        """首次命中瞬时故障签名 → 15s 退避重试 → 第二次成功产出改动。"""
+        os.environ["FAKE_QODER_MODE"] = "server_flaky_once"
+        os.environ["FAKE_QODER_MARKER"] = str(self.root / "flaky-once.marker")
+        with mock.patch("aiops_agent.qoder_fix.time.sleep") as sleep:
+            diff, _desc, _risk, meta = self._propose()
+        self.assertIn("if coupon else 0", diff)
+        self.assertEqual(meta["server_retry_attempts"], 1)
+        self.assertEqual(sleep.call_args_list, [mock.call(15)])
+        self.assertIn("重试 1 次后成功", meta["reason"])
+        record = json.loads(Path(meta["run_record"]).read_text(encoding="utf-8"))
+        self.assertEqual(record["server_retry_attempts"], 1)
+        self.assertTrue(record["changed"])
+
+    def test_retries_exhausted_reports_server_fault(self) -> None:
+        """持续瞬时故障：共 3 次调用（首次+2 次重试，退避 15s/45s），报错含服务端故障提示。"""
+        os.environ["FAKE_QODER_MODE"] = "server_fail"
+        with mock.patch("aiops_agent.qoder_fix.time.sleep") as sleep, mock.patch(
+            "aiops_agent.qoder_fix.run_qoder_cli", wraps=qoder_fix.run_qoder_cli
+        ) as cli:
+            with self.assertRaises(qoder_fix.QoderFixError) as ctx:
+                self._propose()
+        self.assertEqual(cli.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [mock.call(15), mock.call(45)])
+        self.assertIn("快速重试 2 次", str(ctx.exception))
+        self.assertIn("未对", str(ctx.exception))
+
+    def test_slow_failure_not_retried(self) -> None:
+        os.environ["FAKE_QODER_MODE"] = "server_fail"
+        with mock.patch.object(qoder_fix, "SERVER_FAST_FAIL_SECONDS", 0), mock.patch(
+            "aiops_agent.qoder_fix.time.sleep"
+        ) as sleep, mock.patch(
+            "aiops_agent.qoder_fix.run_qoder_cli", wraps=qoder_fix.run_qoder_cli
+        ) as cli:
+            with self.assertRaises(qoder_fix.QoderFixError):
+                self._propose()
+        self.assertEqual(cli.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_plain_failure_not_retried(self) -> None:
+        """非签名失败（如普通调用失败）不重试，维持现状行为。"""
+        os.environ["FAKE_QODER_MODE"] = "fail"
+        with mock.patch("aiops_agent.qoder_fix.time.sleep") as sleep, mock.patch(
+            "aiops_agent.qoder_fix.run_qoder_cli", wraps=qoder_fix.run_qoder_cli
+        ) as cli:
+            with self.assertRaises(qoder_fix.QoderFixError):
+                self._propose()
+        self.assertEqual(cli.call_count, 1)
+        sleep.assert_not_called()
+
+
+class TestWorkspaceSlimming(QoderTestBase):
+    """回归防护：工作区复制瘦身（2026-10-09 排查结论）。
+
+    实测：目标仓库副本携带 1.9GB SQL 备份与超大运行转录时工作区达 2.2GB，会话初始化
+    启动约 28s、失败计费显著放大；过滤后约 0.3GB、启动约 2s。
+    """
+
+    def _make_repo(self) -> Path:
+        repo = self.root / "repo"
+        (repo / "src").mkdir(parents=True)
+        (repo / "backups").mkdir()
+        (repo / "docs").mkdir()
+        (repo / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
+        (repo / "README.md").write_text("readme\n", encoding="utf-8")
+        (repo / "backups" / "dump.sql").write_text("-- small dump\n", encoding="utf-8")
+        (repo / "blob.bin").write_bytes(b"x" * 2048)
+        (repo / "docs" / "huge.jsonl").write_bytes(b"x" * 2048)
+        return repo
+
+    def test_backups_dir_always_excluded(self) -> None:
+        repo = self._make_repo()
+        workspace = qoder_fix.prepare_qoder_workspace(repo, "p-slim-1", root=self.root / "qoder")
+        self.assertTrue((workspace / "src" / "app.py").is_file())
+        self.assertTrue((workspace / "README.md").is_file())
+        self.assertFalse((workspace / "backups").exists())
+        # 默认 20MB 阈值下，小体量普通文件保留（不被尺寸规则误杀）
+        self.assertTrue((workspace / "blob.bin").is_file())
+
+    def test_oversized_files_excluded(self) -> None:
+        repo = self._make_repo()
+        with mock.patch.object(qoder_fix, "MAX_WORKSPACE_FILE_BYTES", 1024):
+            workspace = qoder_fix.prepare_qoder_workspace(repo, "p-slim-2", root=self.root / "qoder")
+        self.assertTrue((workspace / "src" / "app.py").is_file())
+        self.assertFalse((workspace / "blob.bin").exists())
+        self.assertFalse((workspace / "docs" / "huge.jsonl").exists())
+
+    def test_default_threshold_is_20mb(self) -> None:
+        self.assertEqual(qoder_fix.MAX_WORKSPACE_FILE_BYTES, 20 * 1024 * 1024)
+
+
 class TestEnvSanitization(unittest.TestCase):
     """回归防护：继承自 Qoder 进程的 Agent-SDK 变量必须被剔除。
 
@@ -341,19 +492,23 @@ class TestModelFallbackWarning(QoderTestBase):
 
 
 class TestActivityTimeoutInvariant(unittest.TestCase):
-    """回归防护：修复活动的 Temporal 超时必须 > Qoder 子进程超时。
+    """回归防护：修复活动的 Temporal 超时必须 > Qoder 提供者内部最坏耗时。
 
     实测教训：generate_patch 原用默认 60s，真实 Qoder 修复（约 50s 起）超时后被 Temporal
-    直接取消，异常一路冒泡为活动失败并重试，**无法**降级为兜底补丁。子进程超时先触发时，
+    直接取消，异常一路冒泡为活动失败并重试，**无法**降级为兜底补丁。内部耗时先触发时，
     propose_patch 抛 QoderFixError → run_fix 捕获 → 回落兜底补丁，活动正常成功。
+    最坏耗时 = 子进程超时 + 服务端快速重试预算（退避和 + 快速失败上限×重试次数）。
     """
 
-    def test_fix_activity_timeout_exceeds_provider_subprocess_timeout(self) -> None:
+    def test_fix_activity_timeout_exceeds_provider_worst_case(self) -> None:
         from aiops_agent import workflows
 
+        retry_budget = sum(qoder_fix.SERVER_RETRY_BACKOFF_SECONDS) + (
+            len(qoder_fix.SERVER_RETRY_BACKOFF_SECONDS) * qoder_fix.SERVER_FAST_FAIL_SECONDS
+        )
         self.assertGreater(
             workflows._FIX_ACTIVITY_TIMEOUT.total_seconds(),
-            float(qoder_fix.DEFAULT_TIMEOUT),
+            float(qoder_fix.DEFAULT_TIMEOUT) + retry_budget,
         )
 
 

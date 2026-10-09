@@ -4,7 +4,9 @@
 #
 # 行为由环境变量驱动：
 #   FAKE_QODER_MODE   = good(默认) | noop | fail | timeout | broken | warn_model | newfile
+#                       | server_fail | server_flaky_once
 #   FAKE_QODER_TARGET = 目标文件相对路径（默认 order_service.py）
+#   FAKE_QODER_MARKER = server_flaky_once 的跨进程状态文件（首次失败后创建）
 #
 #   good       正常路径：对目标文件做语义修复（coupon 空值防护），产生可应用且可编译的改动
 #   noop       不产生任何改动（空 diff）
@@ -13,6 +15,8 @@
 #   broken     写入语法错误内容（模拟非法改动，应由编译校验拦截）
 #   warn_model 模拟「无效模型名 → 静默回退 auto」：仅 stderr 警告，仍成功产出改动
 #   newfile    新增一个此前不存在的文件（需求实现常见形态，验证 diff 采集含未跟踪文件）
+#   server_fail       模拟服务端瞬时故障：error_during_execution/500/num_turns=0，非零退出
+#   server_flaky_once 首次调用复现该瞬时故障，之后恢复（验证快速重试后成功路径）
 set -u
 
 # qoder_available 依赖 --version 探测
@@ -85,6 +89,23 @@ case "$mode" in
     do_edit
     echo '{"result":"已修复（模型已静默回退）"}'
     exit 0
+    ;;
+  server_fail)
+    # 服务端瞬时故障签名（会话初始化被拒）：error_during_execution + 500 + num_turns=0
+    echo '{"type":"result","subtype":"error_during_execution","duration_ms":0,"duration_api_ms":0,"is_error":true,"num_turns":0,"error_code":500,"errors":["Sorry, something went wrong. Please try again."]}'
+    exit 1
+    ;;
+  server_flaky_once)
+    # 首次调用复现服务端瞬时故障，之后恢复。状态用 FAKE_QODER_MARKER 指向的文件跨进程传递
+    # （不放入工作区，避免污染 git diff）。
+    if [ -n "${FAKE_QODER_MARKER:-}" ] && [ -f "${FAKE_QODER_MARKER}" ]; then
+      do_edit
+      echo '{"result":"已修复（重试后成功）"}'
+      exit 0
+    fi
+    [ -n "${FAKE_QODER_MARKER:-}" ] && : > "${FAKE_QODER_MARKER}"
+    echo '{"type":"result","subtype":"error_during_execution","duration_ms":0,"duration_api_ms":0,"is_error":true,"num_turns":0,"error_code":500,"errors":["Sorry, something went wrong. Please try again."]}'
+    exit 1
     ;;
   *)
     do_edit
