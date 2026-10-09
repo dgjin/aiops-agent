@@ -609,6 +609,12 @@ def fallback_patch(
     )
 
 
+def _clip_reason(reason: str, limit: int = 200) -> str:
+    """压平空白并截断降级原因（防 payload 膨胀；完整文本仍留在 meta['reason'] 与日志）。"""
+    flat = " ".join(str(reason).split())
+    return flat if len(flat) <= limit else flat[:limit] + "…"
+
+
 def run_fix(
     alert: Alert,
     root_cause: RootCause,
@@ -670,7 +676,9 @@ def run_fix(
     if target is None and provider != "qoder":
         patch = fallback_patch(alert, root_cause, attempt, fallback_rel, repo_dir=repo_dir)
         patch.degraded = True
-        meta.update({"degraded": True, "reason": f"未定位到目标文件: {root_cause.suspect_files}"})
+        reason = f"未定位到目标文件: {root_cause.suspect_files}"
+        patch.degrade_reason = _clip_reason(reason)
+        meta.update({"degraded": True, "reason": reason})
         meta["elapsed_seconds"] = round(time.monotonic() - start, 2)
         return patch, meta
 
@@ -715,9 +723,11 @@ def run_fix(
         )
         meta["validated"] = True
     except Exception as exc:  # noqa: BLE001 - 一切异常走安全侧兜底，不阻断流程
-        meta.update({"degraded": True, "reason": f"{type(exc).__name__}: {exc}"})
+        reason = f"{type(exc).__name__}: {exc}"
+        meta.update({"degraded": True, "reason": reason})
         patch = fallback_patch(alert, root_cause, attempt, fallback_rel, repo_dir=repo_dir)
         patch.degraded = True
+        patch.degrade_reason = _clip_reason(reason)
 
     meta["elapsed_seconds"] = round(time.monotonic() - start, 2)
     return patch, meta

@@ -60,6 +60,20 @@ class PureFunctionTest(unittest.TestCase):
         self.assertIn("回炉", esc.auto_reason_from_events(["tests:failed:3"]))
         self.assertIn("回滚", esc.auto_reason_from_events(["canary:degraded:1"]))
 
+    def test_auto_reason_tests_failed_with_detail(self) -> None:
+        """新格式携带单轮失败摘要：升级原因具体到真实原因（如生成环节降级）。"""
+        reason = esc.auto_reason_from_events(
+            [
+                "tests:failed:attempt=0:补丁生成失败（生成环节降级）：QoderFixError: 未产生改动（exit=1）",
+                "tests:failed:attempt=2:补丁生成失败（生成环节降级）：QoderFixError: 未产生改动（exit=1）",
+            ]
+        )
+        self.assertIn("回炉重试耗尽", reason)
+        self.assertIn("补丁生成失败", reason)
+        self.assertIn("exit=1", reason)
+        # 中间版本格式（attempt=N 无详情）仍回退概述（前缀兼容）
+        self.assertIn("回炉重试耗尽", esc.auto_reason_from_events(["tests:failed:attempt=1"]))
+
     def test_new_entry_shape(self) -> None:
         entry = esc.new_entry(_flow())
         self.assertEqual(entry["id"], "esc-aiops-fix-order-a1")

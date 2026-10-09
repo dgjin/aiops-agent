@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import unittest
 
-from aiops_agent.models import RequirementTask
+from aiops_agent import models
+from aiops_agent.models import Patch, RequirementTask
 from aiops_agent.workflows import (
     AIOpsFixWorkflow,
     AIOpsRequirementWorkflow,
+    _attempt_failure_summary,
     build_requirement_context,
 )
 
@@ -47,6 +49,75 @@ class BuildRequirementContextTest(unittest.TestCase):
         task = RequirementTask(**{**_TASK.__dict__, "acceptance": []})
         alert, _ = build_requirement_context(task)
         self.assertIn("（未列出）", alert.description)
+
+
+class AttemptFailureSummaryTest(unittest.TestCase):
+    """升级提示具体化：单轮失败摘要按真实原因分类（生成降级 / SAST / 契约 / 真实测试）。"""
+
+    @staticmethod
+    def _patch(**overrides) -> Patch:
+        base = dict(
+            patch_id="p-req-7-r2",
+            alert_id="req-7",
+            files=["server/query/metrics.ts"],
+            diff="",
+            description="",
+            risk="",
+            model_version="qoder",
+            confidence=1.0,
+        )
+        return Patch(**{**base, **overrides})
+
+    def test_degraded_patch_summary_carries_reason(self) -> None:
+        """生成环节降级（如 Qoder 服务端故障）：摘要必须区分于「沙箱测试未通过」。"""
+        patch = self._patch(
+            degraded=True,
+            degrade_reason="QoderFixError: Qoder 未对 server/query/metrics.ts 产生改动（exit=1）",
+        )
+        report = models.TestReport(
+            patch_id=patch.patch_id,
+            passed=False,
+            unit_tests="未执行（补丁生成降级，非真实修复）",
+        )
+        summary = _attempt_failure_summary(patch, report)
+        self.assertIn("补丁生成失败", summary)
+        self.assertIn("exit=1", summary)
+        self.assertNotIn("沙箱测试未通过", summary)
+
+    def test_sast_report_summary(self) -> None:
+        report = models.TestReport(
+            patch_id="p1",
+            passed=False,
+            unit_tests="未执行（SAST 拦截）",
+            details="静态扫描失败：eval 执行风险（attempt=0）",
+        )
+        self.assertIn("静态扫描拦截", _attempt_failure_summary(None, report))
+
+    def test_contract_report_summary(self) -> None:
+        report = models.TestReport(
+            patch_id="p1",
+            passed=False,
+            unit_tests="契约校验失败（补丁后未找到探针关键词）",
+            details="契约校验失败：补丁应用后工作区中未出现探针关键词 'disabled'（attempt=2）",
+        )
+        self.assertIn("契约校验未通过", _attempt_failure_summary(None, report))
+
+    def test_real_test_failure_summary(self) -> None:
+        report = models.TestReport(
+            patch_id="p1",
+            passed=False,
+            unit_tests="FAILED tests/test_x.py::test_y - assert 1 == 2",
+        )
+        summary = _attempt_failure_summary(None, report)
+        self.assertIn("沙箱测试未通过", summary)
+        self.assertIn("test_y", summary)
+
+    def test_summary_is_single_line_and_clipped(self) -> None:
+        """超长 / 含换行的降级原因：摘要压平为单行并截断（事件串与升级文案保持可读）。"""
+        patch = self._patch(degraded=True, degrade_reason=("x" * 500) + "\n第二行")
+        summary = _attempt_failure_summary(patch, None)
+        self.assertNotIn("\n", summary)
+        self.assertLess(len(summary), 260)
 
 
 class SignalCompatTest(unittest.TestCase):

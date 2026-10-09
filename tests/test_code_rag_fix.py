@@ -484,6 +484,7 @@ class TestRunFix(unittest.TestCase):
             patch, meta = fix_agent.run_fix(ALERT_REAL, ROOT_CAUSE, references=[], attempt=1)
         self.assertTrue(meta["degraded"])
         self.assertTrue(patch.degraded)  # 兜底补丁携带降级标记（前端契约模式据此拦截）
+        self.assertIn("ValidationError", patch.degrade_reason)  # 降级原因随补丁透出（升级提示具体化）
         self.assertFalse(meta["validated"])
         self.assertEqual(patch.model_version, fix_agent.STUB_MODEL_VERSION)
         self.assertIn("coupon", patch.diff)

@@ -55,6 +55,38 @@ _RETRY_POLICY = RetryPolicy(
 )
 
 
+def _clip_event_text(text: str, limit: int = 180) -> str:
+    """压平空白并截断文本（确定性纯函数；事件串/升级文案保持单行且不过长）。"""
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[:limit] + "…"
+
+
+def _attempt_failure_summary(patch: Patch | None, report: TestReport | None) -> str:
+    """单轮修复失败的确定性摘要（gate_events 与转人工原因共用，使升级提示具体到真实原因）。
+
+    分类优先级对应失败现场：
+    1. 补丁生成降级（degraded）——生成环节失败（服务端故障 / diff 校验拒绝 /
+       未定位目标文件），而非沙箱测试结论；附降级原因摘要；
+    2. 静态扫描（SAST / Bandit）拦截；
+    3. 工作区准备失败 / 契约校验未通过（含探针关键词缺失与配置无效）；
+    4. 真实测试失败——取单测结论文本。
+    """
+    if patch is not None and patch.degraded:
+        detail = patch.degrade_reason or "详见沙箱报告"
+        return f"补丁生成失败（生成环节降级）：{_clip_event_text(detail)}"
+    if report is not None:
+        unit = (report.unit_tests or "").strip()
+        details = (report.details or "").strip()
+        if "SAST" in unit or "Bandit" in unit:
+            return f"静态扫描拦截：{_clip_event_text(details or unit)}"
+        if "工作区准备失败" in unit:
+            return f"工作区准备失败：{_clip_event_text(details or unit)}"
+        if "契约校验失败" in unit or "契约缺少" in unit:
+            return f"契约校验未通过：{_clip_event_text(details or unit)}"
+        return f"沙箱测试未通过：{_clip_event_text(unit or details or '无详情')}"
+    return "失败原因未知（沙箱报告缺失）"
+
+
 @workflow.defn
 class AIOpsFixWorkflow:
     """监控 → 分析 → 修复 → 测试 → 审批 → 延迟发布 全链路工作流。"""
@@ -190,6 +222,7 @@ class AIOpsFixWorkflow:
         patch: Patch | None = None
         test_report: TestReport | None = None
         max_retries = triage_cfg["max_fix_retries"]
+        failures: list[str] = []  # 每轮失败的确定性摘要（升级提示与事件流共用）
         for attempt in range(max_retries + 1):
             self.stage = "FIXING"
             patch = await self._call(
@@ -210,13 +243,16 @@ class AIOpsFixWorkflow:
             if test_report.passed:
                 self._gate_events.append(f"tests:passed:attempt={attempt}")
                 break
-            self._gate_events.append(f"tests:failed:attempt={attempt}")
+            failures.append(_attempt_failure_summary(patch, test_report))
+            self._gate_events.append(f"tests:failed:attempt={attempt}:{failures[-1]}")
         else:
-            # 回炉重试耗尽，防 token/资源雪崩，转人工
+            # 回炉重试耗尽，防 token/资源雪崩，转人工；
+            # 升级原因附最后一轮具体失败摘要（避免笼统的「测试失败」掩盖生成环节故障）
             self.stage = "ESCALATED"
             await self._call(
                 activities.escalate_to_human, alert,
-                f"沙箱测试回炉重试 {max_retries + 1} 次仍失败，转人工",
+                f"沙箱测试回炉重试 {max_retries + 1} 次仍失败，转人工；"
+                f"最后一轮失败原因：{failures[-1]}",
             )
             return self._final(alert, root_cause, patch, None, started)
 

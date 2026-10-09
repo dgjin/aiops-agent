@@ -86,7 +86,12 @@ def auto_reason_from_events(gate_events: list[str] | None) -> str:
         if event.startswith("gate2:"):
             return f"闸门2：人工审批未通过（{event.split(':', 1)[1]}）"
         if event.startswith("tests:failed"):
-            return "沙箱测试回炉重试耗尽（多轮补丁均未通过）"
+            # 新格式 tests:failed:attempt=N:<具体失败摘要>（生成环节降级 / 静态扫描拦截 /
+            # 契约校验未通过等）→ 升级原因直达真实原因；旧格式无第 4 段时回退概述
+            base = "沙箱测试回炉重试耗尽（多轮补丁均未通过）"
+            parts = event.split(":", 3)
+            detail = parts[3].strip() if len(parts) > 3 else ""
+            return f"{base}；最后一轮失败原因：{detail}" if detail else base
         if event.startswith("canary:degraded"):
             return "金丝雀劣化自动回滚"
     return "转人工（原因见流程详情与审计记录）"

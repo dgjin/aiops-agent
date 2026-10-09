@@ -42,6 +42,9 @@ class Patch:
     confidence: float
     # 降级兜底标记：生成环节失败后的安全侧兜底产物（非真实修复），前端契约模式据此拦截
     degraded: bool = False
+    # 降级原因摘要（生成环节失败的原始异常文本，空串=非降级）：
+    # 转人工提示 / 控制台升级中心据此具体化（避免笼统的「测试失败」掩盖生成环节故障）
+    degrade_reason: str = ""
 
 
 @dataclass
