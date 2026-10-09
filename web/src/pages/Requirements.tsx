@@ -7,7 +7,8 @@
  *   原文展示并补充部署侧配置指引，不影响其余功能；
  * - P0 / P1 高优条目置顶卡片突出，全清单表格展示（评估意见随标题小字展示）；
  * - 智能分析闭环（弹窗 components/RequirementAnalysisModal）：管理员发起分析 →
- *   查看结构化结果 → 反馈再分析（版本递增）→ 批准进入需求驱动修复工作流。
+ *   查看结构化结果 → 反馈再分析（版本递增）→ 同步被监控系统最新评估结论（refresh）→
+ *   批准进入需求驱动修复工作流。
  */
 
 import { useMemo, useState } from 'react'
@@ -270,7 +271,14 @@ export function Requirements() {
                     </div>
                     {entry.content && <p className="mt-2 text-xs text-muted">{entry.content}</p>}
                     {entry.assessment && (
-                      <p className="mt-1.5 text-xs text-idle">评估意见：{entry.assessment}</p>
+                      <p className="mt-1.5 text-xs text-idle">
+                        评估意见：{entry.assessment}
+                        {(entry.revisions?.length ?? 0) > 1 && (
+                          <span className="ml-1.5 text-[10px] text-muted">
+                            （已评估 {entry.revisions?.length} 次）
+                          </span>
+                        )}
+                      </p>
                     )}
                     <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-muted">
                       <span className="font-mono">#{entry.id}</span>

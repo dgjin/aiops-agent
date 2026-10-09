@@ -353,6 +353,18 @@ export interface RequirementsApp {
   enabled: boolean
 }
 
+/** 需求评估历史条目（被监控系统 v0.9.102：继续评估的每次结论；时间升序）。 */
+export interface RequirementRevision {
+  id: number
+  entryId: number
+  action: string
+  priority: string
+  baselineVersion: string
+  assessment: string
+  reviewer: string
+  createdAt: string | null
+}
+
 /** 需求基线条目（被监控系统标准导出接口 v1.0 契约，字段说明见 requirements_client）。 */
 export interface RequirementsEntry {
   id: number | string
@@ -369,6 +381,8 @@ export interface RequirementsEntry {
   reviewedAt: string | null
   createdAt: string | null
   updatedAt: string | null
+  /** 评估历史（可能缺省：老版本被监控系统不带该字段）。 */
+  revisions?: RequirementRevision[]
 }
 
 /** 需求基线读接口响应（BFF 代拉标准导出接口；ok=false 时 error 为中文原因）。 */
@@ -409,7 +423,7 @@ export interface RequirementAnalysisMeta {
   elapsed_seconds?: number
 }
 
-/** 分析版本（逐次追加；trigger=initial / feedback / retry，feedback 为触发它的反馈原文）。 */
+/** 分析版本（逐次追加；trigger=initial / feedback / retry / refresh，feedback 为触发它的反馈原文）。 */
 export interface RequirementAnalysisVersion {
   version: number
   ts: string
@@ -467,6 +481,11 @@ export interface RequirementAnalysisResp extends Timed {
 }
 
 export interface RequirementAnalysisCreateResp extends RequirementAnalysisResp {
+  started: boolean
+}
+
+/** 同步被监控系统最新内容：started=true 表示已追加 refresh 版本重新分析（终态会话仅刷新快照）。 */
+export interface RequirementAnalysisSyncResp extends RequirementAnalysisResp {
   started: boolean
 }
 

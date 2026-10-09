@@ -150,6 +150,50 @@ class StateMachineTest(unittest.TestCase):
         feedbacks = store.feedbacks_upto(entry, 2)
         self.assertEqual([item["feedback"] for item in feedbacks], ["反馈一"])
 
+    def test_refresh_updates_snapshot_and_reanalyzes(self) -> None:
+        entry = self._entry()
+        store.complete_version(entry, 1, _ANALYSIS, _META)
+        updated = dict(
+            _SNAPSHOT, updatedAt="2026-10-09T02:00:00Z", assessment="继续评估：补充验收口径"
+        )
+        self.assertTrue(store.apply_refresh(entry, updated, "admin1"))
+        self.assertEqual(entry["status"], "analyzing")
+        self.assertEqual(entry["current_version"], 2)
+        self.assertEqual(entry["versions"][1]["trigger"], "refresh")
+        self.assertEqual(entry["entry_snapshot"]["assessment"], "继续评估：补充验收口径")
+
+    def test_refresh_same_updated_at_rejected(self) -> None:
+        entry = self._entry()
+        store.complete_version(entry, 1, _ANALYSIS, _META)
+        updated = dict(_SNAPSHOT, updatedAt="2026-10-09T02:00:00Z")
+        store.apply_refresh(entry, dict(updated), "admin1")
+        store.complete_version(entry, 2, _ANALYSIS, _META)
+        with self.assertRaises(store.RequirementAnalysisError):
+            store.apply_refresh(entry, dict(updated), "admin1")
+
+    def test_refresh_rejected_while_analyzing(self) -> None:
+        entry = self._entry()
+        with self.assertRaises(store.RequirementAnalysisError):
+            store.apply_refresh(
+                entry, dict(_SNAPSHOT, updatedAt="2026-10-09T02:00:00Z"), "admin1"
+            )
+
+    def test_refresh_approved_only_updates_snapshot(self) -> None:
+        entry = self._entry()
+        store.complete_version(entry, 1, _ANALYSIS, _META)
+        store.apply_approved(entry, 1, "wf-1", "admin1")
+        updated = dict(
+            _SNAPSHOT,
+            updatedAt="2026-10-09T02:00:00Z",
+            priority="P0",
+            assessment="继续评估：补充验收口径",
+        )
+        self.assertFalse(store.apply_refresh(entry, updated, "admin1"))
+        self.assertEqual(entry["status"], "approved")
+        self.assertEqual(entry["current_version"], 1)  # 终态不追加版本
+        self.assertEqual(entry["entry_priority"], "P0")
+        self.assertEqual(entry["entry_snapshot"]["assessment"], "继续评估：补充验收口径")
+
 
 class DemoFileStoreTest(unittest.TestCase):
     """demo 后端：文件读写 / create_or_touch 分派 / 执行线程体写回。"""

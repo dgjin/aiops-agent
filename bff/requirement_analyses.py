@@ -15,8 +15,10 @@
         analyzed → analyzing（反馈 / 重试 → 追加新版本）
         analyzed → approved（管理员批准并已启动修复工作流，终态）
 
-    versions：逐次分析版本（append-only），每次携带触发方式（initial/feedback/retry）
+    versions：逐次分析版本（append-only），每次携带触发方式（initial/feedback/retry/refresh）
     与触发它的反馈原文；最新版本的分析结果即「当前分析结果」。
+    refresh：被监控系统侧「继续评估」等更新后，经 :func:`apply_refresh` 刷新快照并重分析
+    （approved 终态仅刷新快照留档）。
 
 分析执行在 BFF 后台线程（:func:`execute_analysis`）：
     代码引用检索（可选，失败降级）→ requirement_agent 分析（LLM + 兜底）→ 写回版本。
@@ -43,7 +45,7 @@ DATA_PATH = DATA_DIR / "requirement_analyses.json"
 
 STATUSES = ("analyzing", "analyzed", "failed", "approved")
 VERSION_STATUSES = ("running", "done", "failed")
-TRIGGERS = ("initial", "feedback", "retry")
+TRIGGERS = ("initial", "feedback", "retry", "refresh")
 
 # 分析会话卡死判定的默认阈值（秒）：超过视为执行中断（如 BFF 重启），转 failed 可重试
 DEFAULT_STALE_SECONDS = 900
@@ -214,6 +216,35 @@ def apply_feedback(entry: dict, feedback: str, actor: str) -> dict:
 def apply_retry(entry: dict, actor: str) -> dict:
     """失败重试：以相同输入追加 retry 版本再分析。"""
     return begin_version(entry, "retry", actor=actor)
+
+
+def apply_refresh(entry: dict, snapshot: dict, actor: str) -> bool:
+    """同步被监控系统最新条目内容（「继续评估」后的新结论 / 优先级变化等）。
+
+    - 以被监控系统为权威源刷新 ``entry_snapshot``（标题 / 类型 / 优先级同步）；
+    - 快照 ``updatedAt`` 与会话内快照一致 → 无更新，抛校验错误（路由转 409）；
+    - analyzed / failed → 追加 refresh 版本并进入再分析（新评估结论进入分析输入）；
+    - approved（终态）→ 仅刷新快照留档，不重开分析。
+
+    返回是否需启动分析线程（approved 为 False）。
+    """
+    status = entry.get("status")
+    if status == "analyzing":
+        raise RequirementAnalysisError("分析进行中，请等待当前分析完成后同步更新")
+    old = entry.get("entry_snapshot") or {}
+    old_updated = str(old.get("updatedAt") or "")
+    new_updated = str(snapshot.get("updatedAt") or "")
+    if old_updated and new_updated and old_updated == new_updated:
+        raise RequirementAnalysisError("条目内容无更新，无需同步")
+    entry["entry_snapshot"] = snapshot
+    entry["entry_title"] = str(snapshot.get("title") or "")
+    entry["entry_kind"] = str(snapshot.get("kind") or "")
+    entry["entry_priority"] = str(snapshot.get("priority") or "")
+    if status == "approved":
+        entry["updated_at"] = _now()
+        return False
+    begin_version(entry, "refresh", actor=actor)
+    return True
 
 
 def apply_approved(entry: dict, version: int, wf_id: str, actor: str) -> dict:

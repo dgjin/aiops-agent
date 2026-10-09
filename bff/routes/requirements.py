@@ -148,6 +148,10 @@ class FeedbackBody(BaseModel):
     feedback: str = Field(min_length=1, max_length=2000)
 
 
+class SyncBody(BaseModel):
+    entry: dict = Field(description="被监控系统当前条目快照（含最新评估结论与 updatedAt）")
+
+
 def _entry_snapshot(entry: dict) -> dict:
     """裁剪并校验需求条目快照（id / title 必备）。"""
     snapshot = {key: entry.get(key) for key in _ENTRY_KEEP if entry.get(key) is not None}
@@ -240,6 +244,41 @@ async def api_requirement_analysis_feedback(
         },
     )
     return ok({"analysis": entry})
+
+
+@router.post("/api/requirements/analyses/{analysis_id}/sync")
+async def api_requirement_analysis_sync(
+    request: Request, analysis_id: str, body: SyncBody
+) -> dict:
+    """同步被监控系统最新条目内容（「继续评估」后的结论 / 优先级变化）→ 按需重分析。
+
+    - 快照无变化 → 409；分析进行中 → 409；
+    - analyzed / failed → 刷新快照并追加 refresh 版本重分析（started=True）；
+    - approved（终态）→ 仅刷新快照留档（started=False）。
+    """
+    entry = _find_analysis(analysis_id)
+    snapshot = _entry_snapshot(body.entry)
+    actor = request.state.identity.user
+    try:
+        need_run = requirement_analyses.apply_refresh(entry, snapshot, actor)
+        requirement_analyses.persist_entry(entry)
+    except requirement_analyses.RequirementAnalysisError as exc:
+        raise ApiError(409, str(exc)) from exc
+    if need_run:
+        requirement_analyses.start_analysis_thread(
+            analysis_id, int(entry.get("current_version") or 1)
+        )
+    audit.write_audit(
+        actor=actor,
+        action="requirement:sync",
+        target=analysis_id,
+        params={
+            "entry_id": entry.get("entry_id"),
+            "updated_at": snapshot.get("updatedAt"),
+            "restarted": need_run,
+        },
+    )
+    return ok({"analysis": entry, "started": need_run})
 
 
 @router.post("/api/requirements/analyses/{analysis_id}/approve")

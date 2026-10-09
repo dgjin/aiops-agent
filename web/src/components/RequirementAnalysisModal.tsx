@@ -3,8 +3,9 @@
  * 闭环（契约见 BFF /api/requirements/analyses）：
  *   发起分析（后台 LLM + 代码引用检索，3s 轮询）→ 查看结构化结果 →
  *   管理员提交优化建议 / 具体要求 → 系统带反馈再次分析（版本递增）→
+ *   被监控系统「继续评估」后经「同步最新内容」刷新快照并重分析（refresh 版本）→
  *   「同意」→ 启动需求驱动修复工作流（沙箱验证 / 审批 / 发布全链路）。
- * 权限与后端同源（middleware）：发起 / 反馈 / 批准需 admin；查看全部角色可读。
+ * 权限与后端同源（middleware）：发起 / 反馈 / 同步 / 批准需 admin；查看全部角色可读。
  */
 
 import { useEffect, useRef, useState } from 'react'
@@ -20,6 +21,7 @@ import type {
   RequirementAnalysisMeta,
   RequirementAnalysisResult,
   RequirementAnalysisVersion,
+  RequirementRevision,
   RequirementsEntry,
 } from '../lib/types'
 
@@ -35,6 +37,14 @@ const TRIGGER_LABELS: Record<string, string> = {
   initial: '初始分析',
   feedback: '反馈再分析',
   retry: '失败重试',
+  refresh: '同步最新内容',
+}
+
+/** 需求方评估动作徽标（被监控系统 revisions：纳入基线 / 拒绝 / 退回待评）。 */
+const REVISION_ACTION_META: Record<string, { label: string; cls: string }> = {
+  BASELINE: { label: '纳入基线', cls: 'text-ok' },
+  REJECT: { label: '已拒绝', cls: 'text-danger' },
+  PENDING: { label: '退回待评', cls: 'text-warn' },
 }
 
 const VERSION_STATUS_META: Record<string, { label: string; cls: string }> = {
@@ -134,6 +144,43 @@ function ResultSection({
   )
 }
 
+/** 需求方评估记录（被监控系统「继续评估」留痕；最新在前，超过 2 条可展开）。 */
+function RevisionList({ revisions }: { revisions: RequirementRevision[] }) {
+  const [showAll, setShowAll] = useState(false)
+  const ordered = [...revisions].reverse()
+  const visible = showAll ? ordered : ordered.slice(0, 2)
+  return (
+    <div className="mt-2 border-t border-line/60 pt-2">
+      <div className="flex flex-wrap items-center gap-x-2 text-[11px] text-idle">
+        <span>需求方评估记录 · 共 {revisions.length} 次</span>
+        {ordered.length > 2 && (
+          <button
+            type="button"
+            className="text-accent transition-opacity hover:opacity-80"
+            onClick={() => setShowAll((value) => !value)}
+          >
+            {showAll ? '收起' : `展开全部 ${revisions.length} 次`}
+          </button>
+        )}
+      </div>
+      <ol className="mt-1.5 space-y-1">
+        {visible.map((rev) => {
+          const meta = REVISION_ACTION_META[rev.action] ?? { label: rev.action, cls: 'text-muted' }
+          return (
+            <li key={rev.id} className="flex flex-wrap items-baseline gap-x-2 text-[11px]">
+              <span className="text-idle">{fmtDateTime(rev.createdAt)}</span>
+              <span className={meta.cls}>{meta.label}</span>
+              {rev.priority && <span className="text-muted">{rev.priority}</span>}
+              <span className="text-muted">{rev.reviewer || '—'}</span>
+              {rev.assessment && <span className="text-muted">：{rev.assessment}</span>}
+            </li>
+          )
+        })}
+      </ol>
+    </div>
+  )
+}
+
 /** 迭代时间线（每版触发方式 / 状态 / 反馈原文；失败版本显示原因）。 */
 function VersionTimeline({
   versions,
@@ -200,6 +247,8 @@ export function RequirementAnalysisModal({
   const [approveOpen, setApproveOpen] = useState(false)
   const [approveBusy, setApproveBusy] = useState(false)
   const [approveError, setApproveError] = useState<string | null>(null)
+  const [syncBusy, setSyncBusy] = useState(false)
+  const [syncNotice, setSyncNotice] = useState<string | null>(null)
   const startedRef = useRef(false)
 
   // 打开时重置状态（existingId 有值直接进入查看；无值则自动发起）
@@ -210,6 +259,7 @@ export function RequirementAnalysisModal({
     setFeedbackText('')
     setApproveOpen(false)
     setApproveError(null)
+    setSyncNotice(null)
     startedRef.current = false
   }, [open, existingId])
 
@@ -297,6 +347,32 @@ export function RequirementAnalysisModal({
     }
   }
 
+  // 快照新鲜度：被监控系统条目 updatedAt 与会话快照不一致 → 可同步最新内容（继续评估的新结论）
+  const snapshotUpdatedAt = String(session?.entry_snapshot?.updatedAt ?? '')
+  const entryUpdatedAt = String(entry?.updatedAt ?? '')
+  const stale = !!entry && !!session && !!entryUpdatedAt && entryUpdatedAt !== snapshotUpdatedAt
+
+  const syncEntry = async () => {
+    if (!analysisId || !entry) return
+    setSyncBusy(true)
+    setActionError(null)
+    setSyncNotice(null)
+    try {
+      const resp = await api.syncRequirementAnalysis(analysisId, entry)
+      setSyncNotice(
+        resp.started
+          ? '已同步最新内容，正在基于新结论重新分析（版本递增）…'
+          : '已同步最新内容（会话为终态，仅刷新快照留档）',
+      )
+      await queryClient.invalidateQueries({ queryKey: ['requirement-analyses'] })
+      await detail.refetch()
+    } catch (err) {
+      setActionError(describeError(err))
+    } finally {
+      setSyncBusy(false)
+    }
+  }
+
   return (
     <>
       <Modal
@@ -339,6 +415,9 @@ export function RequirementAnalysisModal({
               {entry.assessment && (
                 <p className="mt-1 text-idle">需求方评估意见：{entry.assessment}</p>
               )}
+              {entry.revisions && entry.revisions.length > 0 && (
+                <RevisionList revisions={entry.revisions} />
+              )}
             </div>
           )}
 
@@ -369,6 +448,41 @@ export function RequirementAnalysisModal({
               <span>当前版本 v{session.current_version}</span>
               <span>服务 {session.service || '—'}</span>
               <span>更新 {fmtDateTime(session.updated_at)}</span>
+            </div>
+          )}
+
+          {stale && session && (
+            <div className="rounded-lg border border-warn/40 bg-warn/10 px-3 py-2.5 text-xs">
+              <div className="font-medium text-warn">被监控系统已更新该需求</div>
+              <p className="mt-1 text-muted">
+                需求内容（可能含继续评估后的新结论）已变化，当前分析基于旧快照（快照时间
+                {snapshotUpdatedAt ? fmtDateTime(snapshotUpdatedAt) : '未知'}）
+                {approved
+                  ? '；会话已批准（终态）：同步仅刷新快照留档，不重开分析。'
+                  : '；同步后将基于最新内容重新分析（版本递增）。'}
+              </p>
+              <div className="mt-2 flex justify-end">
+                <PermissionGate
+                  require="admin"
+                  fallback={<span className="text-[11px] text-idle">需要管理员权限同步最新内容</span>}
+                >
+                  <button
+                    type="button"
+                    className={primaryButtonClass}
+                    disabled={syncBusy || analyzing}
+                    title={analyzing ? '分析执行中，完成后可同步' : undefined}
+                    onClick={syncEntry}
+                  >
+                    {syncBusy ? '同步中…' : '同步最新内容'}
+                  </button>
+                </PermissionGate>
+              </div>
+            </div>
+          )}
+
+          {syncNotice && (
+            <div className="rounded-lg border border-ok/40 bg-ok/10 px-3 py-2 text-xs text-ok">
+              {syncNotice}
             </div>
           )}
 

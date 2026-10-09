@@ -28,6 +28,11 @@ _ENTRY = {
     "baselineVersion": "v1.2",
 }
 
+# 被监控系统「继续评估」后的最新条目（updatedAt 变化 + 新结论）
+_ENTRY_SYNCED = dict(
+    _ENTRY, updatedAt="2026-10-09T02:00:00Z", assessment="继续评估：补充验收口径"
+)
+
 _OK_RESULT = {
     "url": "http://b.test/api/requirements/export?status=BASELINED&limit=200",
     "ok": True,
@@ -282,6 +287,72 @@ class AnalysisRoutesTest(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.status_code, 409)
 
+    # ---- 同步被监控系统最新内容（继续评估后的结论） ----
+
+    def test_sync_updates_snapshot_and_restarts(self) -> None:
+        self._create()
+        self._finish("ra-app-b-7")
+        body = routes.SyncBody(entry=dict(_ENTRY_SYNCED))
+        data = asyncio.run(
+            routes.api_requirement_analysis_sync(self._request(), "ra-app-b-7", body)
+        )
+        self.assertTrue(data["started"])
+        self.assertEqual(data["analysis"]["current_version"], 2)
+        self.assertEqual(data["analysis"]["versions"][1]["trigger"], "refresh")
+        self.assertEqual(
+            data["analysis"]["entry_snapshot"]["assessment"], "继续评估：补充验收口径"
+        )
+        self.assertEqual(self.thread.call_args_list[-1].args, ("ra-app-b-7", 2))
+        self.assertEqual(self.audit.call_args.kwargs["action"], "requirement:sync")
+        self.assertTrue(self.audit.call_args.kwargs["params"]["restarted"])
+
+    def test_sync_no_change_409(self) -> None:
+        body0 = routes.AnalysisCreateBody(app_id="app-b", entry=dict(_ENTRY_SYNCED))
+        asyncio.run(routes.api_requirement_analysis_create(self._request(), body0))
+        self._finish("ra-app-b-7")
+        body = routes.SyncBody(entry=dict(_ENTRY_SYNCED))
+        with self.assertRaises(ApiError) as ctx:
+            asyncio.run(
+                routes.api_requirement_analysis_sync(self._request(), "ra-app-b-7", body)
+            )
+        self.assertEqual(ctx.exception.status_code, 409)
+
+    def test_sync_while_analyzing_409(self) -> None:
+        self._create()
+        body = routes.SyncBody(entry=dict(_ENTRY_SYNCED))
+        with self.assertRaises(ApiError) as ctx:
+            asyncio.run(
+                routes.api_requirement_analysis_sync(self._request(), "ra-app-b-7", body)
+            )
+        self.assertEqual(ctx.exception.status_code, 409)
+
+    def test_sync_unknown_404(self) -> None:
+        body = routes.SyncBody(entry=dict(_ENTRY_SYNCED))
+        with self.assertRaises(ApiError) as ctx:
+            asyncio.run(routes.api_requirement_analysis_sync(self._request(), "ra-nope-1", body))
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_sync_approved_only_refreshes_snapshot(self) -> None:
+        self._create()
+        self._finish("ra-app-b-7")
+        with mock.patch.object(
+            routes.gw,
+            "start_requirement_flow",
+            new_callable=mock.AsyncMock,
+            return_value="aiops-req-ra-app-b-7-v1",
+        ):
+            asyncio.run(routes.api_requirement_analysis_approve(self._request(), "ra-app-b-7"))
+        body = routes.SyncBody(entry=dict(_ENTRY_SYNCED))
+        data = asyncio.run(
+            routes.api_requirement_analysis_sync(self._request(), "ra-app-b-7", body)
+        )
+        self.assertFalse(data["started"])
+        self.assertEqual(data["analysis"]["status"], "approved")
+        self.assertEqual(data["analysis"]["current_version"], 1)  # 终态不追加版本
+        self.assertEqual(
+            data["analysis"]["entry_snapshot"]["assessment"], "继续评估：补充验收口径"
+        )
+
     # ---- 批准进入修复工作流 ----
 
     def test_approve_starts_requirement_workflow(self) -> None:
@@ -359,6 +430,7 @@ class AnalysisWiringTest(unittest.TestCase):
         self.assertIn("/api/requirements/analyses", paths)
         self.assertIn("/api/requirements/analyses/{analysis_id}", paths)
         self.assertIn("/api/requirements/analyses/{analysis_id}/feedback", paths)
+        self.assertIn("/api/requirements/analyses/{analysis_id}/sync", paths)
         self.assertIn("/api/requirements/analyses/{analysis_id}/approve", paths)
 
     def test_registered_in_app(self) -> None:
@@ -368,6 +440,7 @@ class AnalysisWiringTest(unittest.TestCase):
         self.assertIn("/api/requirements/analyses", paths)
         self.assertIn("/api/requirements/analyses/{analysis_id}", paths)
         self.assertIn("/api/requirements/analyses/{analysis_id}/feedback", paths)
+        self.assertIn("/api/requirements/analyses/{analysis_id}/sync", paths)
         self.assertIn("/api/requirements/analyses/{analysis_id}/approve", paths)
 
     def test_role_rules(self) -> None:
@@ -376,6 +449,9 @@ class AnalysisWiringTest(unittest.TestCase):
         self.assertEqual(required_role("POST", "/api/requirements/analyses"), "admin")
         self.assertEqual(
             required_role("POST", "/api/requirements/analyses/ra-x-1/feedback"), "admin"
+        )
+        self.assertEqual(
+            required_role("POST", "/api/requirements/analyses/ra-x-1/sync"), "admin"
         )
         self.assertEqual(
             required_role("POST", "/api/requirements/analyses/ra-x-1/approve"), "admin"

@@ -22,6 +22,7 @@ import type {
   RequirementAnalysisApproveResp,
   RequirementAnalysisCreateResp,
   RequirementAnalysisResp,
+  RequirementAnalysisSyncResp,
   RequirementsEntry,
   RequirementsResp,
   ResultResp,
@@ -396,6 +397,12 @@ export const api = {
     request<RequirementAnalysisResp>(
       `/api/requirements/analyses/${encodeURIComponent(id)}/feedback`,
       { method: 'POST', body: JSON.stringify({ feedback }) },
+    ),
+  /** 同步被监控系统最新条目内容（继续评估后的新结论）→ 追加 refresh 版本重分析（终态仅刷新快照）。 */
+  syncRequirementAnalysis: (id: string, entry: RequirementsEntry) =>
+    request<RequirementAnalysisSyncResp>(
+      `/api/requirements/analyses/${encodeURIComponent(id)}/sync`,
+      { method: 'POST', body: JSON.stringify({ entry }) },
     ),
   /** 同意分析结果 → 启动需求驱动修复工作流（沙箱验证 / 审批 / 发布全链路）。 */
   approveRequirementAnalysis: (id: string) =>
