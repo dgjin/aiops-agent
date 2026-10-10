@@ -206,7 +206,7 @@ export AIOPS_QODER_BIN="$HOME/.local/bin/qodercli"   # 建议显式指定
 
 安全边界：Qoder 只在 `data/qoder/<patch_id>/` 隔离副本内改动（真实代码目录不被触碰），以 `--permission-mode accept_edits` + 工具白名单运行（不使用 `--yolo`）；其产出的补丁仍须通过编译校验、SAST、沙箱测试与三道闸门。Qoder 不可用/超时/无改动时自动回落到确定性兜底补丁，流程不中断。
 
-> 超时关系（重要）：`AIOPS_QODER_TIMEOUT`（子进程超时，默认 180s）必须 **小于** 修复活动的 Temporal 超时 `_FIX_ACTIVITY_TIMEOUT`（`aiops_agent/workflows.py`，300s），否则会被 Temporal 直接取消（硬失败，无法降级）。
+> 超时关系（重要）：`AIOPS_QODER_TIMEOUT`（子进程超时，默认 600s）必须 **小于** 修复活动的 Temporal 超时 `_FIX_ACTIVITY_TIMEOUT`（`aiops_agent/workflows.py`，660s），否则会被 Temporal 直接取消（硬失败，无法降级）。轮次预算 `AIOPS_QODER_MAX_TURNS` 默认 60——真实前端仓库（约 2.2k 文件）中 20 轮会全部耗于只读探索（自 2026-10-10 实测）。
 
 > 模型（重要）：默认修复模型为 **`DeepSeek-Flash`**，可用 `AIOPS_QODER_MODEL` 覆盖，可选值见 `qodercli --list-models`。模型 ID **区分大小写**：写错（如小写 `deepseek-flash`）不会报错，Qoder 会**静默回退 `auto`**；接入层已捕获该警告并写入 `meta.model_warning` 与运行留痕 `data/qoder/*.run.json`。
 

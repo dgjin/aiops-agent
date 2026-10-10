@@ -48,8 +48,12 @@ DEFAULT_QODER_MODEL = "DeepSeek-Flash"
 DEFAULT_PERMISSION_MODE = "accept_edits"
 DEFAULT_ALLOWED_TOOLS = "Read,Edit,Write,Grep,Glob"
 DEFAULT_DISALLOWED_TOOLS = "Bash"
-DEFAULT_TIMEOUT = 180
-DEFAULT_MAX_TURNS = 20
+# 2026-10-10 实测：DeepSeek-Flash 在真实前端仓库（约 2.2k 文件）中 20 轮全部耗于只读
+# 探索（Glob/Grep/Read）即被 error_max_turns 掐断、从未进入编辑（changed=False），
+# 连续 3 次重试均同一失败模式后转人工。预算上调为 60 轮 / 600s，并在 prompt 中加入
+# 「先锁定、早编辑」效率策略（见 build_qoder_prompt）。
+DEFAULT_TIMEOUT = 600
+DEFAULT_MAX_TURNS = 60
 
 # 服务端瞬时故障「快速重试」参数（2026-10-09 排查结论）：
 # Qoder 服务端在会话初始化阶段会间歇性返回 500（subtype=error_during_execution、
@@ -242,7 +246,7 @@ def build_qoder_prompt(
             "如需新增文件，只允许新增与缺陷/需求直接相关的最小新文件；"
             "禁止改动测试、禁止重命名、禁止格式化或重构无关代码；"
         )
-    return f"""你是资深修复工程师。请修复下面这个线上缺陷，直接修改仓库中的代码文件。
+    return f"""你是资深修复工程师。请完成下面这个修复/实现任务，**必须使用 Edit/Write 工具实际修改仓库中的代码文件**（只读探索不算完成）。
 
 ## 告警
 - alert_id: {alert.alert_id}
@@ -259,11 +263,16 @@ def build_qoder_prompt(
 
 {target_block}
 
+## 效率策略（重要）
+- 先用最少的只读探索（建议不超过 8 次 Glob/Grep/Read，优先直接读取上述嫌疑文件）快速锁定改动文件与具体行号；
+- 锁定后必须立即开始用 Edit/Write 修改，不要继续无目的扫描；工具调用总预算有限，务必预留编辑时间；
+- 禁止重复读取同一文件；禁止对无关目录做大范围扫描。
+
 ## 修复要求
 {scope_rule}
 - 做最小化单点修复，保持既有代码风格与类型标注；
 - 空指针类缺陷（对象可能为 None，随后被下标/属性访问）：空值校验必须插入到该访问语句**之前**，或直接把访问行改为带条件的安全写法；
-- 修改后请运行仓库既有单测确认目标用例转绿（若环境允许），再结束任务；
+- 当前执行环境不提供命令行/测试运行能力，不要尝试运行命令或测试，改动完成即结束（由系统在隔离沙箱中统一验证）；
 - 完成后直接结束，**不要输出 diff 文本**（改动由系统通过 git 自动采集）。
 {retry_section}"""
 
