@@ -606,11 +606,11 @@ export function MonitoredApps() {
                     )}
                   </td>
                   <td className="px-3 py-3">
-                    <div className="truncate text-ink" title={app.name}>
+                    <div className="break-words text-ink" title={app.name}>
                       {app.name}
                     </div>
                     {app.note && (
-                      <div className="mt-0.5 truncate text-xs text-idle" title={app.note}>
+                      <div className="mt-0.5 break-words text-xs text-idle" title={app.note}>
                         {app.note}
                       </div>
                     )}
@@ -619,7 +619,7 @@ export function MonitoredApps() {
                     <ProbeBadge app={app} />
                     {app.enabled && app.watcher && <WatcherLine watcher={app.watcher} />}
                     {!app.probe.running && app.probe.error && app.enabled && (
-                      <div className="mt-0.5 truncate text-[10px] text-idle" title={app.probe.error}>
+                      <div className="mt-0.5 break-words text-[10px] text-idle" title={app.probe.error}>
                         {app.probe.error}
                       </div>
                     )}
@@ -628,20 +628,20 @@ export function MonitoredApps() {
                   <td className="whitespace-nowrap px-3 py-3 font-mono text-xs text-idle">{fmtDateTime(app.updated_at)}</td>
                   <td className="px-3 py-3">
                     <span
-                      className="block truncate font-mono text-xs text-muted"
+                      className="block break-words font-mono text-xs text-muted"
                       title={app.url}
                     >
                       {app.url}
                     </span>
                   </td>
                   <td className="px-3 py-3 font-mono text-xs text-muted">
-                    <span className="block truncate" title={app.service}>
+                    <span className="block break-words" title={app.service}>
                       {app.service}
                     </span>
                   </td>
                   <td className="px-3 py-3">
                     {app.log_path ? (
-                      <span className="block truncate font-mono text-xs text-muted" title={app.log_path}>
+                      <span className="block break-words font-mono text-xs text-muted" title={app.log_path}>
                         {app.log_path}
                       </span>
                     ) : (
@@ -649,7 +649,7 @@ export function MonitoredApps() {
                     )}
                     {app.probe_keyword && (
                       <span
-                        className="mt-0.5 block truncate font-mono text-xs text-muted"
+                        className="mt-0.5 block break-words font-mono text-xs text-muted"
                         title={`页面关键字：${app.probe_keyword}`}
                       >
                         关键字：{app.probe_keyword}
@@ -657,7 +657,7 @@ export function MonitoredApps() {
                     )}
                     {app.repo && (
                       <span
-                        className="mt-0.5 block truncate font-mono text-xs text-muted"
+                        className="mt-0.5 block break-words font-mono text-xs text-muted"
                         title={`修复仓库：${app.repo}`}
                       >
                         仓库：{app.repo}
