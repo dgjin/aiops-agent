@@ -553,16 +553,16 @@ export function MonitoredApps() {
         </div>
       )}
 
-      <div className="mt-5 overflow-x-auto rounded-xl border border-line bg-panel">
+      <div className="mt-5 overflow-hidden rounded-xl border border-line bg-panel">
         {items.length === 0 ? (
           <div className="p-6">
             <EmptyState title="暂无被监控应用" hint="点击右上角「新增」，或用「导入」批量录入" />
           </div>
         ) : (
-          <table className="w-full min-w-[1080px] text-sm">
+          <table className="w-full table-fixed text-sm">
             <thead>
               <tr className="border-b border-line text-left text-xs text-muted">
-                <th className="whitespace-nowrap px-4 py-3 font-medium">
+                <th className="w-[4%] whitespace-nowrap px-3 py-3 font-medium">
                   {canManage && (
                     <input
                       type="checkbox"
@@ -573,13 +573,13 @@ export function MonitoredApps() {
                     />
                   )}
                 </th>
-                <th className="whitespace-nowrap px-4 py-3 font-medium">名称</th>
-                <th className="min-w-[180px] whitespace-nowrap px-4 py-3 font-medium">状态</th>
-                <th className="whitespace-nowrap px-4 py-3 font-medium">更新时间</th>
-                <th className="whitespace-nowrap px-4 py-3 font-medium">地址</th>
-                <th className="whitespace-nowrap px-4 py-3 font-medium">service</th>
-                <th className="whitespace-nowrap px-4 py-3 font-medium">日志路径</th>
-                <th className="sticky right-0 whitespace-nowrap border-l border-line/40 bg-panel px-4 py-3 text-right font-medium">
+                <th className="w-[15.5%] whitespace-nowrap px-3 py-3 font-medium">名称</th>
+                <th className="w-[19%] whitespace-nowrap px-3 py-3 font-medium">状态</th>
+                <th className="w-[12%] whitespace-nowrap px-3 py-3 font-medium">更新时间</th>
+                <th className="w-[12.5%] whitespace-nowrap px-3 py-3 font-medium">地址</th>
+                <th className="w-[7%] whitespace-nowrap px-3 py-3 font-medium">service</th>
+                <th className="w-[17.5%] whitespace-nowrap px-3 py-3 font-medium">日志路径</th>
+                <th className="w-[12.5%] sticky right-0 whitespace-nowrap border-l border-line/40 bg-panel px-3 py-3 text-right font-medium">
                   操作
                 </th>
               </tr>
@@ -590,7 +590,7 @@ export function MonitoredApps() {
                   key={app.id}
                   className="group border-b border-line/60 last:border-0 hover:bg-elevated/60"
                 >
-                  <td className="px-4 py-3">
+                  <td className="px-3 py-3">
                     {canManage && (
                       <input
                         type="checkbox"
@@ -605,39 +605,43 @@ export function MonitoredApps() {
                       />
                     )}
                   </td>
-                  <td className="px-4 py-3">
-                    <div className="max-w-[12rem] truncate text-ink" title={app.name}>
+                  <td className="px-3 py-3">
+                    <div className="truncate text-ink" title={app.name}>
                       {app.name}
                     </div>
                     {app.note && (
-                      <div className="mt-0.5 max-w-[12rem] truncate text-xs text-idle" title={app.note}>
+                      <div className="mt-0.5 truncate text-xs text-idle" title={app.note}>
                         {app.note}
                       </div>
                     )}
                   </td>
-                  <td className="min-w-[180px] px-4 py-3">
+                  <td className="px-3 py-3">
                     <ProbeBadge app={app} />
                     {app.enabled && app.watcher && <WatcherLine watcher={app.watcher} />}
                     {!app.probe.running && app.probe.error && app.enabled && (
-                      <div className="mt-0.5 max-w-[16rem] truncate text-[10px] text-idle" title={app.probe.error}>
+                      <div className="mt-0.5 truncate text-[10px] text-idle" title={app.probe.error}>
                         {app.probe.error}
                       </div>
                     )}
                     {app.readiness && <ReadinessLine readiness={app.readiness} />}
                   </td>
-                  <td className="whitespace-nowrap px-4 py-3 font-mono text-xs text-idle">{fmtDateTime(app.updated_at)}</td>
-                  <td className="px-4 py-3">
+                  <td className="whitespace-nowrap px-3 py-3 font-mono text-xs text-idle">{fmtDateTime(app.updated_at)}</td>
+                  <td className="px-3 py-3">
                     <span
-                      className="block max-w-[13rem] truncate font-mono text-xs text-muted"
+                      className="block truncate font-mono text-xs text-muted"
                       title={app.url}
                     >
                       {app.url}
                     </span>
                   </td>
-                  <td className="whitespace-nowrap px-4 py-3 font-mono text-xs text-muted">{app.service}</td>
-                  <td className="px-4 py-3">
+                  <td className="px-3 py-3 font-mono text-xs text-muted">
+                    <span className="block truncate" title={app.service}>
+                      {app.service}
+                    </span>
+                  </td>
+                  <td className="px-3 py-3">
                     {app.log_path ? (
-                      <span className="block max-w-[13rem] truncate font-mono text-xs text-muted" title={app.log_path}>
+                      <span className="block truncate font-mono text-xs text-muted" title={app.log_path}>
                         {app.log_path}
                       </span>
                     ) : (
@@ -645,7 +649,7 @@ export function MonitoredApps() {
                     )}
                     {app.probe_keyword && (
                       <span
-                        className="mt-0.5 block max-w-[13rem] truncate font-mono text-xs text-muted"
+                        className="mt-0.5 block truncate font-mono text-xs text-muted"
                         title={`页面关键字：${app.probe_keyword}`}
                       >
                         关键字：{app.probe_keyword}
@@ -653,14 +657,14 @@ export function MonitoredApps() {
                     )}
                     {app.repo && (
                       <span
-                        className="mt-0.5 block max-w-[13rem] truncate font-mono text-xs text-muted"
+                        className="mt-0.5 block truncate font-mono text-xs text-muted"
                         title={`修复仓库：${app.repo}`}
                       >
                         仓库：{app.repo}
                       </span>
                     )}
                   </td>
-                  <td className="sticky right-0 border-l border-line/40 bg-panel px-4 py-3 group-hover:bg-elevated">
+                  <td className="sticky right-0 border-l border-line/40 bg-panel px-3 py-3 group-hover:bg-elevated">
                     {canManage ? (
                       <div className="flex justify-end gap-1.5 whitespace-nowrap">
                         <Link
