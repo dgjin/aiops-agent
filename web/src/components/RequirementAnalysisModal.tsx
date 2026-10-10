@@ -3,7 +3,8 @@
  * 闭环（契约见 BFF /api/requirements/analyses）：
  *   发起分析（后台 LLM + 代码引用检索，3s 轮询）→ 查看结构化结果 →
  *   管理员提交优化建议 / 具体要求 → 系统带反馈再次分析（版本递增）→
- *   被监控系统「继续评估」后经「同步最新内容」刷新快照并重分析（refresh 版本）→
+ *   被监控系统「继续评估」后自动同步最新内容并重分析（refresh 版本；管理员打开会话即
+ *   自动执行，「立即同步」保留为兜底重试）→
  *   「同意」→ 启动需求驱动修复工作流（沙箱验证 / 审批 / 发布全链路）。
  * 权限与后端同源（middleware）：发起 / 反馈 / 同步 / 批准需 admin；查看全部角色可读。
  */
@@ -12,8 +13,9 @@ import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
-import { api, describeError } from '../lib/api'
+import { ApiError, api, describeError } from '../lib/api'
 import { cn, fmtDateTime } from '../lib/format'
+import { hasRole, useSelf } from '../lib/permission'
 import { ConfirmDialog } from './ConfirmDialog'
 import { Modal, fieldClass, primaryButtonClass, secondaryButtonClass } from './Modal'
 import { PermissionGate } from './PermissionGate'
@@ -238,6 +240,8 @@ export function RequirementAnalysisModal({
   onClose: () => void
 }) {
   const queryClient = useQueryClient()
+  const self = useSelf()
+  const isAdmin = hasRole(self?.role, 'admin')
   const [analysisId, setAnalysisId] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -250,6 +254,8 @@ export function RequirementAnalysisModal({
   const [syncBusy, setSyncBusy] = useState(false)
   const [syncNotice, setSyncNotice] = useState<string | null>(null)
   const startedRef = useRef(false)
+  // 已自动同步过的条目 updatedAt（防止重复触发）；每次打开弹窗重置，失败由「立即同步」兜底
+  const autoSyncRef = useRef('')
 
   // 打开时重置状态（existingId 有值直接进入查看；无值则自动发起）
   useEffect(() => {
@@ -261,6 +267,7 @@ export function RequirementAnalysisModal({
     setApproveError(null)
     setSyncNotice(null)
     startedRef.current = false
+    autoSyncRef.current = ''
   }, [open, existingId])
 
   // 无既有会话：打开即发起分析（admin 已由入口按钮门控；失败在弹窗内提示）
@@ -352,26 +359,43 @@ export function RequirementAnalysisModal({
   const entryUpdatedAt = String(entry?.updatedAt ?? '')
   const stale = !!entry && !!session && !!entryUpdatedAt && entryUpdatedAt !== snapshotUpdatedAt
 
-  const syncEntry = async () => {
+  const syncEntry = async (auto: boolean) => {
     if (!analysisId || !entry) return
     setSyncBusy(true)
     setActionError(null)
-    setSyncNotice(null)
+    if (!auto) setSyncNotice(null)
     try {
       const resp = await api.syncRequirementAnalysis(analysisId, entry)
       setSyncNotice(
         resp.started
-          ? '已同步最新内容，正在基于新结论重新分析（版本递增）…'
-          : '已同步最新内容（会话为终态，仅刷新快照留档）',
+          ? `${auto ? '已自动' : '已'}同步最新内容，正在基于新结论重新分析（版本递增）…`
+          : `${auto ? '已自动' : '已'}同步最新内容（会话为终态，仅刷新快照留档）`,
       )
       await queryClient.invalidateQueries({ queryKey: ['requirement-analyses'] })
       await detail.refetch()
     } catch (err) {
-      setActionError(describeError(err))
+      if (auto && err instanceof ApiError && err.status === 409) {
+        // 自动同步竞态兜底（其他入口已同步 / 内容恰好无变化）：静默刷新会话，不打扰用户
+        await queryClient.invalidateQueries({ queryKey: ['requirement-analysis', analysisId] })
+      } else {
+        setActionError(describeError(err))
+      }
     } finally {
       setSyncBusy(false)
     }
   }
+
+  // 自动同步：检测到被监控系统条目已更新（如「继续评估」后的新结论）且会话仍基于旧快照 →
+  // 管理员自动拉取最新内容（非终态追加 refresh 版本重分析；终态仅刷新快照）。
+  // 同一 updatedAt 只自动处理一次；分析执行中跳过，完成后由下一次轮询检测触发。
+  useEffect(() => {
+    if (!open || !session || !entry || !stale || analyzing || !isAdmin) return
+    if (!analysisId || !entryUpdatedAt) return
+    if (autoSyncRef.current === entryUpdatedAt) return
+    autoSyncRef.current = entryUpdatedAt
+    void syncEntry(true)
+    // syncEntry 每次渲染重建，不列入依赖：触发完全由下列数据条件决定
+  }, [open, session, entry, stale, analyzing, isAdmin, analysisId, entryUpdatedAt])
 
   return (
     <>
@@ -459,7 +483,9 @@ export function RequirementAnalysisModal({
                 {snapshotUpdatedAt ? fmtDateTime(snapshotUpdatedAt) : '未知'}）
                 {approved
                   ? '；会话已批准（终态）：同步仅刷新快照留档，不重开分析。'
-                  : '；同步后将基于最新内容重新分析（版本递增）。'}
+                  : analyzing
+                    ? '；分析执行中，完成后将自动同步并重新分析。'
+                    : '；将自动同步最新内容并重新分析（版本递增）。'}
               </p>
               <div className="mt-2 flex justify-end">
                 <PermissionGate
@@ -468,12 +494,16 @@ export function RequirementAnalysisModal({
                 >
                   <button
                     type="button"
-                    className={primaryButtonClass}
+                    className={secondaryButtonClass}
                     disabled={syncBusy || analyzing}
-                    title={analyzing ? '分析执行中，完成后可同步' : undefined}
-                    onClick={syncEntry}
+                    title={
+                      analyzing
+                        ? '分析执行中，完成后将自动同步'
+                        : '立即同步最新内容（自动同步的兜底重试）'
+                    }
+                    onClick={() => void syncEntry(false)}
                   >
-                    {syncBusy ? '同步中…' : '同步最新内容'}
+                    {syncBusy ? '同步中…' : '立即同步'}
                   </button>
                 </PermissionGate>
               </div>

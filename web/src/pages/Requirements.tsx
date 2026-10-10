@@ -2,12 +2,14 @@
  *
  * 数据源：BFF `GET /api/requirements`（代拉被监控系统标准导出接口，契约 v1.0，
  * 客户端 aiops_agent.requirements_client，令牌环境变量 NL2SQL_OPS_TOKEN）。
+ * - 自动获取：页面可见时 30s 自动轮询（失焦自动暂停），被监控系统侧新纳入基线 /
+ *   「继续评估」的条目自动出现；打开分析弹窗时立即重拉一次，右上角「刷新」可手动重拉；
  * - 多应用时顶部下拉切换（app_id 显式指定）；单应用直接展示；
  * - BFF 未配置令牌 / 应用不可达 / 401 时返回 ok=false + 中文原因：
  *   原文展示并补充部署侧配置指引，不影响其余功能；
  * - P0 / P1 高优条目置顶卡片突出，全清单表格展示（评估意见随标题小字展示）；
  * - 智能分析闭环（弹窗 components/RequirementAnalysisModal）：管理员发起分析 →
- *   查看结构化结果 → 反馈再分析（版本递增）→ 同步被监控系统最新评估结论（refresh）→
+ *   查看结构化结果 → 反馈再分析（版本递增）→ 自动同步被监控系统最新评估结论（refresh）→
  *   批准进入需求驱动修复工作流。
  */
 
@@ -130,6 +132,9 @@ export function Requirements() {
   const { data, isError, error, isFetching, refetch } = useQuery({
     queryKey: ['requirements', appId],
     queryFn: () => api.requirements(appId ? { app_id: appId } : {}),
+    // 自动获取：页面可见时 30s 轮询（失焦自动暂停）——被监控系统新评估 / 继续评估的
+    // 条目无需手动刷新即可到达（右上角「刷新」仍可即时重拉）
+    refetchInterval: 30000,
   })
 
   const current = data?.app ?? null
@@ -151,9 +156,17 @@ export function Requirements() {
   const openAnalysis = (entry: RequirementsEntry) => {
     const summary = analysisMap.get(String(entry.id))
     setAnalysisTarget({ entry, analysisId: summary?.id ?? null })
+    // 打开即重拉：弹窗内的新鲜度检测（自动同步）基于本次最新数据，不等 30s 轮询
+    void refetch()
   }
 
   const entries = data?.ok ? data.entries : []
+  // 弹窗条目传入「列表实时数据」（随 30s 轮询自动更新；拿不到时回退打开时快照）——
+  // 被监控系统「继续评估」后弹窗据此自动检测更新并同步（见 RequirementAnalysisModal）
+  const analysisEntry = analysisTarget
+    ? entries.find((item) => String(item.id) === String(analysisTarget.entry.id)) ??
+      analysisTarget.entry
+    : null
   const high = entries.filter((entry) => entry.priority === 'P0' || entry.priority === 'P1')
   const p0 = high.filter((entry) => entry.priority === 'P0').length
   const p1 = high.length - p0
@@ -373,7 +386,7 @@ export function Requirements() {
         <RequirementAnalysisModal
           open
           appId={current.id}
-          entry={analysisTarget.entry}
+          entry={analysisEntry}
           existingId={analysisTarget.analysisId}
           onClose={() => setAnalysisTarget(null)}
         />
