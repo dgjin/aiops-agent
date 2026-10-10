@@ -21,7 +21,6 @@ from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 
 from aiops_agent import requirements_client
-from aiops_agent.models import RequirementTask
 
 from .. import audit, requirement_analyses
 from .. import monitored_apps as store
@@ -169,17 +168,6 @@ def _find_analysis(analysis_id: str) -> dict:
     return entry
 
 
-def _requirement_text(entry: dict) -> str:
-    """需求原文（标题 + 内容 + 评估意见）：修复工作流的任务描述体。"""
-    snapshot = entry.get("entry_snapshot") or {}
-    parts = [str(snapshot.get("title") or entry.get("entry_title") or "")]
-    if snapshot.get("content"):
-        parts.append(f"内容：{snapshot['content']}")
-    if snapshot.get("assessment"):
-        parts.append(f"需求方评估意见：{snapshot['assessment']}")
-    return "\n".join(parts)
-
-
 @router.get("/api/requirements/analyses")
 async def api_requirement_analysis_list(app_id: str = Query("", max_length=64)) -> dict:
     """分析会话列表（viewer 起可读；摘要字段，不含版本明细）。"""
@@ -291,26 +279,12 @@ async def api_requirement_analysis_approve(request: Request, analysis_id: str) -
         raise ApiError(
             409, f"当前状态 {entry.get('status') or '未知'} 不允许批准（要求分析完成）"
         )
-    version = int(entry.get("current_version") or 0)
     analysis = requirement_analyses.latest_analysis(entry) or {}
     if analysis.get("degraded"):
         raise ApiError(409, "最新分析未成功完成（无有效结果），请提交反馈或重试后再批准")
     actor = request.state.identity.user
-    task = RequirementTask(
-        analysis_id=analysis_id,
-        app_id=str(entry.get("app_id") or ""),
-        service=str(entry.get("service") or ""),
-        entry_id=str(entry.get("entry_id") or ""),
-        title=str(entry.get("entry_title") or ""),
-        requirement=_requirement_text(entry),
-        plan="\n".join(
-            f"{index}. {step}" for index, step in enumerate(analysis.get("plan") or [], 1)
-        ),
-        acceptance=[str(item) for item in analysis.get("acceptance") or []],
-        suspect_files=[str(item) for item in analysis.get("suspect_files") or []],
-        version=version,
-        approved_by=actor,
-    )
+    # 任务构造与「转人工待办→重试修复」共用（bff.requirement_analyses.build_requirement_task）
+    task, version = requirement_analyses.build_requirement_task(entry, actor)
     wf_id = f"aiops-req-{analysis_id}-v{version}"
     try:
         started = await gw.start_requirement_flow(task, wf_id)

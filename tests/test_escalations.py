@@ -4,10 +4,15 @@
 - 纯函数：升级原因翻译（gate_events → 中文）、记录构造、assign/close/retry 状态迁移；
 - 存储（demo JSON / production SQLite 注入）：幂等登记、closed 不重开、统计、热生效；
 - SLA：到期判定（open/assigned 且超时且未再升级）、sweep_due 每单只升级一次。
+
+另覆盖重试路由（routes/escalations）：需求来源待办（wf ``aiops-req-*`` 或级联
+``req-N-retryM``）重试必须重启需求修复流——按告警流重试对无日志的需求必然
+在闸门 1 被置信度拦截，永远无法成功（历史故障：req-19-retry1 级联）。
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import unittest
@@ -17,6 +22,8 @@ from unittest import mock
 
 from aiops_agent import db as db_layer
 from bff import escalations as esc
+from bff.deps import ApiError
+from bff.routes import escalations as esc_routes
 
 
 def _flow(
@@ -277,6 +284,185 @@ class ProductionDbBackendTest(unittest.TestCase):
         esc.persist_entry(entry)
         due = esc.due_for_re_escalation()
         self.assertEqual([e["id"] for e in due], ["esc-aiops-fix-order-a1"])
+
+
+_REQUIREMENT_SESSION = {
+    "id": "ra-app-19",
+    "app_id": "app-19",
+    "service": "nl2sql",
+    "entry_id": "19",
+    "entry_title": "用户信息维护功能优化。",
+    "entry_snapshot": {"title": "用户信息维护功能优化。", "content": "点击用户名进入用户信息维护"},
+    "status": "approved",
+    "current_version": 1,
+    "versions": [
+        {
+            "version": 1,
+            "analysis": {
+                "plan": ["在首页增加用户信息入口", "补充跳转测试"],
+                "acceptance": ["首页可见入口"],
+                "suspect_files": ["web/src/App.tsx"],
+            },
+        }
+    ],
+    "approved": {
+        "version": 1,
+        "wf_id": "aiops-req-ra-app-19-v1",
+        "at": "2026-10-10T05:49:50+00:00",
+        "actor": "admin",
+    },
+}
+
+
+def _req_flow(wf_id: str, alert_id: str, service: str = "nl2sql") -> dict:
+    """需求来源的升级流程（如闸门 2 超时升级；alert_id 为 req-N 形态）。"""
+    return {
+        "wf_id": wf_id,
+        "stage": "ESCALATED",
+        "gate_events": ["gate2:timeout:300s"],
+        "alert": {"alert_id": alert_id, "service": service, "severity": "critical"},
+    }
+
+
+class RetryRouteTest(unittest.TestCase):
+    """重试修复路由：需求来源重启需求流（防「按告警流重试必然闸门1拦截」回归）。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        patcher = mock.patch.object(esc, "DATA_PATH", Path(self._tmp.name) / "escalations.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        sessions_patcher = mock.patch.object(
+            esc_routes.requirement_analyses, "list_all", return_value=[]
+        )
+        self.sessions = sessions_patcher.start()
+        self.addCleanup(sessions_patcher.stop)
+
+        audit_patcher = mock.patch.object(esc_routes.audit, "write_audit")
+        self.audit = audit_patcher.start()
+        self.addCleanup(audit_patcher.stop)
+
+        start_patcher = mock.patch.object(
+            esc_routes.gw, "start_requirement_flow", new_callable=mock.AsyncMock
+        )
+        self.start_req = start_patcher.start()
+        self.addCleanup(start_patcher.stop)
+
+        alert_patcher = mock.patch.object(esc_routes.gw, "start_flow", new_callable=mock.AsyncMock)
+        self.start_alert = alert_patcher.start()
+        self.addCleanup(alert_patcher.stop)
+
+    def _request(self, user: str = "admin1"):
+        request = mock.Mock()
+        request.state.identity.user = user
+        return request
+
+    def _retry(self, esc_id: str) -> dict:
+        return asyncio.run(esc_routes.api_escalation_retry(self._request(), esc_id))
+
+    def test_requirement_flow_entry_restarts_requirement_workflow(self) -> None:
+        """① 流程本身即需求流（aiops-req-*）→ 按 approved.wf_id 精确反查后重启需求流。"""
+        self.sessions.return_value = [dict(_REQUIREMENT_SESSION)]
+        self.start_req.return_value = "aiops-req-ra-app-19-v1-req-19-retry1"
+        esc.persist_entry(esc.new_entry(_req_flow("aiops-req-ra-app-19-v1", "req-19")))
+
+        data = self._retry("esc-aiops-req-ra-app-19-v1")
+
+        self.assertEqual(data["mode"], "requirement")
+        self.assertFalse(self.start_alert.called)
+        task, wf_id = self.start_req.call_args.args
+        self.assertEqual(wf_id, "aiops-req-ra-app-19-v1-req-19-retry1")
+        self.assertEqual(task.analysis_id, "ra-app-19")
+        self.assertEqual(task.approved_by, "admin1")
+        self.assertIn("首页增加用户信息入口", task.plan)
+        self.assertEqual(task.acceptance, ["首页可见入口"])
+        entry = esc.get("esc-aiops-req-ra-app-19-v1")
+        self.assertEqual(entry["status"], "closed")
+        self.assertIn("aiops-req-ra-app-19-v1-req-19-retry1", entry["note"])
+        self.assertEqual(self.audit.call_args.kwargs["params"]["mode"], "requirement")
+
+    def test_cascaded_generic_entry_resolves_by_alert_id(self) -> None:
+        """② 旧逻辑级联的告警流待办（req-N-retryM）→ 剥离重试后缀反查会话。"""
+        self.sessions.return_value = [dict(_REQUIREMENT_SESSION)]
+        self.start_req.return_value = "wf-new"
+        esc.persist_entry(esc.new_entry(_req_flow("aiops-fix-nl2sql-req-19-retry1", "req-19-retry1")))
+
+        data = self._retry("esc-aiops-fix-nl2sql-req-19-retry1")
+
+        self.assertEqual(data["mode"], "requirement")
+        self.assertFalse(self.start_alert.called)
+        _, wf_id = self.start_req.call_args.args
+        self.assertEqual(wf_id, "aiops-req-ra-app-19-v1-req-19-retry1-retry1")
+
+    def test_plain_alert_entry_keeps_generic_retry(self) -> None:
+        """普通告警来源行为不变：仍以告警流（幂等新键）重启。"""
+        self.sessions.return_value = [dict(_REQUIREMENT_SESSION)]
+        self.start_alert.return_value = "aiops-fix-order-a1-retry1"
+        esc.persist_entry(esc.new_entry(_flow(wf_id="aiops-fix-order-a1")))
+
+        data = self._retry("esc-aiops-fix-order-a1")
+
+        self.assertEqual(data["mode"], "alert")
+        self.assertFalse(self.start_req.called)
+        alert, wf_id = self.start_alert.call_args.args
+        self.assertEqual(wf_id, "aiops-fix-order-a1-retry1")
+        self.assertEqual(alert.alert_id, "a1-retry1")
+
+    def test_requirement_like_without_session_guides_human(self) -> None:
+        """疑似需求来源但会话缺失：409 引导（不再按告警流空转）。"""
+        self.sessions.return_value = []
+        esc.persist_entry(
+            esc.new_entry(_req_flow("aiops-fix-nl2sql-req-19-retry1-retry1", "req-19-retry1-retry1"))
+        )
+        with self.assertRaises(ApiError) as ctx:
+            self._retry("esc-aiops-fix-nl2sql-req-19-retry1-retry1")
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("需求反馈", ctx.exception.message)
+        self.assertFalse(self.start_alert.called)
+        self.assertFalse(self.start_req.called)
+
+    def test_requirement_not_approved_409(self) -> None:
+        self.sessions.return_value = [dict(_REQUIREMENT_SESSION, status="analyzed")]
+        esc.persist_entry(esc.new_entry(_req_flow("aiops-req-ra-app-19-v1", "req-19")))
+        with self.assertRaises(ApiError) as ctx:
+            self._retry("esc-aiops-req-ra-app-19-v1")
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("批准", ctx.exception.message)
+
+    def test_requirement_degraded_analysis_409(self) -> None:
+        session = dict(_REQUIREMENT_SESSION)
+        session["versions"] = [
+            {
+                "version": 1,
+                "analysis": {
+                    **_REQUIREMENT_SESSION["versions"][0]["analysis"],
+                    "degraded": True,
+                },
+            }
+        ]
+        self.sessions.return_value = [session]
+        esc.persist_entry(esc.new_entry(_req_flow("aiops-req-ra-app-19-v1", "req-19")))
+        with self.assertRaises(ApiError) as ctx:
+            self._retry("esc-aiops-req-ra-app-19-v1")
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("重试分析", ctx.exception.message)
+
+    def test_decorate_marks_requirement_origin(self) -> None:
+        entry = esc.new_entry(_req_flow("aiops-fix-nl2sql-req-19-retry1", "req-19-retry1"))
+        self.assertTrue(esc_routes._decorate(entry)["requirement"])
+        plain = esc.new_entry(_flow(wf_id="aiops-fix-order-a1"))
+        self.assertFalse(esc_routes._decorate(plain)["requirement"])
+
+    def test_resolve_prefers_service_match(self) -> None:
+        """同 entry_id 多应用：优先服务名匹配的会话。"""
+        other = dict(_REQUIREMENT_SESSION, id="ra-app-x-19", app_id="app-x", service="other")
+        self.sessions.return_value = [other, dict(_REQUIREMENT_SESSION)]
+        resolved = esc_routes.resolve_requirement_session(
+            {"wf_id": "aiops-fix-nl2sql-req-19", "alert_id": "req-19", "service": "nl2sql"}
+        )
+        self.assertEqual(resolved["id"], "ra-app-19")
 
 
 class WiringTest(unittest.TestCase):

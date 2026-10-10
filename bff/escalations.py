@@ -11,7 +11,7 @@
     open（新登记）→ assigned（已指派责任人）→ closed（已处置）
     - assign 可反复改派（open/assigned 均可）；
     - close 记录处置备注并落 history；
-    - retry（路由层以新幂等键重启修复流程后调 ``mark_retried``）→ closed。
+    - retry（路由层以新幂等键重启修复流程——需求来源重开需求流——后调 ``apply_retried``）→ closed。
 
 超时再升级：
     ``due_for_re_escalation`` 找出「open/assigned 且登记超过 SLA（默认 30 分钟，

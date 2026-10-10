@@ -3,7 +3,8 @@
  * - 列表 3 秒轮询；读侧自动幂等登记（ESCALATED 流程 → open 待办），已关闭不重开；
  * - 超 SLA（默认 30 分钟）未处置的条目由 BFF 后台巡检经通知渠道再升级一次，
  *   前端以「已超时未处置 / 已再升级」标记提示值班同学；
- * - 处置路径：指派责任人 → 手动关闭（备注留档）或「重试修复」（新幂等键重启完整修复链路）。
+ * - 处置路径：指派责任人 → 手动关闭（备注留档）或「重试修复」（新幂等键重启完整修复链路）；
+ *   需求来源的待办（entry.requirement）重试时重启需求修复流（批准版方案 → 沙箱 → 审批 → 发布）。
  */
 
 import { useState } from 'react'
@@ -210,8 +211,9 @@ export function Escalations() {
             </div>
           </div>
           <p className="text-xs text-idle">
-            以新幂等键（自动追加 retry 序号）重启完整修复链路：诊断 → 补丁 → 沙箱 →
-            审批 → 发布；启动成功后本待办自动关闭。
+            {entry.requirement
+              ? '需求来源待办：以新幂等键重启需求修复链路（批准版方案 → 补丁 → 沙箱 → 审批 → 公告 → 发布），不重走日志诊断；启动成功后本待办自动关闭。'
+              : '以新幂等键（自动追加 retry 序号）重启完整修复链路：诊断 → 补丁 → 沙箱 → 审批 → 发布；启动成功后本待办自动关闭。'}
           </p>
         </div>
       ),
@@ -278,6 +280,11 @@ export function Escalations() {
                         <span className={cn('rounded border px-1.5 py-0.5 text-[10px]', meta.cls)}>
                           {meta.label}
                         </span>
+                        {entry.requirement && (
+                          <span className="rounded border border-accent/40 px-1.5 py-0.5 text-[10px] text-accent">
+                            需求
+                          </span>
+                        )}
                         {open && entry.overdue && (
                           <span className="rounded border border-danger/40 bg-danger/10 px-1.5 py-0.5 text-[10px] text-danger">
                             已超时未处置

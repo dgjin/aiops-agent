@@ -672,6 +672,8 @@ export interface EscalationEntry {
   /** 已超 SLA 未处置（读侧派生） */
   overdue: boolean
   sla_minutes: number
+  /** 需求来源待办（读侧派生；重试修复将重启需求修复流而非告警诊断流） */
+  requirement?: boolean
 }
 
 export interface EscalationStats {

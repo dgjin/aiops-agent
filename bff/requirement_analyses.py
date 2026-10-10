@@ -37,6 +37,7 @@ from sqlalchemy import select
 
 from aiops_agent import db as db_layer
 from aiops_agent import mode
+from aiops_agent.models import RequirementTask
 
 log = logging.getLogger("aiops.bff.requirement")
 
@@ -133,6 +134,41 @@ def latest_analysis(entry: dict) -> dict | None:
         if version.get("analysis"):
             return version["analysis"]
     return None
+
+
+def build_requirement_task(entry: dict, actor: str) -> tuple[RequirementTask, int]:
+    """由分析会话构造需求修复任务（管理员批准启动 / 转人工待办重试 共用）。
+
+    - 需求原文 = 条目快照标题 + 内容 + 需求方评估意见（缺失字段自动省略）；
+    - 方案 = ``current_version`` 的最新分析结果（plan / acceptance / suspect_files）；
+    - 状态与 degraded 校验由调用方负责（两侧拦截文案不同），本函数只做映射。
+    """
+    version = int(entry.get("current_version") or 0)
+    analysis = latest_analysis(entry) or {}
+    snapshot = entry.get("entry_snapshot") or {}
+    requirement_parts = [str(snapshot.get("title") or entry.get("entry_title") or "")]
+    if snapshot.get("content"):
+        requirement_parts.append(f"内容：{snapshot['content']}")
+    if snapshot.get("assessment"):
+        requirement_parts.append(f"需求方评估意见：{snapshot['assessment']}")
+    return (
+        RequirementTask(
+            analysis_id=str(entry.get("id") or ""),
+            app_id=str(entry.get("app_id") or ""),
+            service=str(entry.get("service") or ""),
+            entry_id=str(entry.get("entry_id") or ""),
+            title=str(entry.get("entry_title") or ""),
+            requirement="\n".join(requirement_parts),
+            plan="\n".join(
+                f"{index}. {step}" for index, step in enumerate(analysis.get("plan") or [], 1)
+            ),
+            acceptance=[str(item) for item in analysis.get("acceptance") or []],
+            suspect_files=[str(item) for item in analysis.get("suspect_files") or []],
+            version=version,
+            approved_by=actor,
+        ),
+        version,
+    )
 
 
 def feedbacks_upto(entry: dict, version: int) -> list[dict]:
