@@ -29,6 +29,7 @@ import {
 import { ApiError, api, serverNow } from '../lib/api'
 import { cn, fmtDateTime } from '../lib/format'
 import { useNowTick } from '../lib/hooks'
+import { AppHealthDot } from './MonitoredAppStatus'
 import { BrandLockup, Logo } from './Logo'
 import { ThemeMenu } from './ThemeMenu'
 import { UserMenu } from './UserMenu'
@@ -44,19 +45,92 @@ interface NavItem {
   adminOnly?: boolean
 }
 
-const NAV_ITEMS: NavItem[] = [
-  { to: '/', label: '流程看板', icon: LayoutDashboard, end: true },
-  { to: '/flows', label: '流程列表', icon: Activity },
-  { to: '/approvals', label: '审批中心', icon: ClipboardCheck, badgeKey: 'wait_approval' },
-  { to: '/escalations', label: '转人工待办', icon: Inbox, badgeKey: 'escalations_open' },
-  { to: '/window', label: '发布窗口', icon: Timer, badgeKey: 'notifying' },
-  { to: '/audit', label: '审计回看', icon: History },
-  { to: '/monitored-apps', label: '被监控应用', icon: Radar },
-  { to: '/requirements', label: '需求基线', icon: Lightbulb },
-  { to: '/system', label: '系统状态', icon: Server },
-  { to: '/users', label: '用户管理', icon: Users, adminOnly: true },
-  { to: '/help', label: '帮助中心', icon: HelpCircle },
+/** 导航分组（2026-10 UI 重构：11 项平铺 → 4 组，主语切换为「被监控系统」）。 */
+interface NavGroup {
+  title: string
+  items: NavItem[]
+}
+
+const NAV_GROUPS: NavGroup[] = [
+  {
+    title: '总览',
+    items: [
+      { to: '/', label: '系统总览', icon: LayoutDashboard, end: true },
+      { to: '/flows', label: '全部流程', icon: Activity },
+    ],
+  },
+  {
+    title: '跨系统待办',
+    items: [
+      { to: '/approvals', label: '审批中心', icon: ClipboardCheck, badgeKey: 'wait_approval' },
+      { to: '/escalations', label: '转人工待办', icon: Inbox, badgeKey: 'escalations_open' },
+      { to: '/window', label: '发布窗口', icon: Timer, badgeKey: 'notifying' },
+    ],
+  },
+  {
+    title: '被监控系统',
+    items: [{ to: '/monitored-apps', label: '系统清单管理', icon: Radar }],
+  },
+  {
+    title: '平台',
+    items: [
+      { to: '/requirements', label: '需求基线', icon: Lightbulb },
+      { to: '/audit', label: '审计回看', icon: History },
+      { to: '/system', label: '系统状态', icon: Server },
+      { to: '/users', label: '用户管理', icon: Users, adminOnly: true },
+      { to: '/help', label: '帮助中心', icon: HelpCircle },
+    ],
+  },
 ]
+
+/** 侧栏动态系统列表：健康点 + 进行中流程数角标（清单 15s 轮询，列表超过 8 项时组内滚动）。 */
+function SystemList({
+  collapsed,
+  runningByService,
+}: {
+  collapsed: boolean
+  runningByService: Map<string, number>
+}) {
+  const { data } = useQuery({
+    queryKey: ['monitored-apps'],
+    queryFn: api.monitoredApps,
+    refetchInterval: 15000,
+  })
+  const apps = data?.items ?? []
+  if (apps.length === 0) return null
+  return (
+    <div className={cn('space-y-1', apps.length > 8 && 'max-h-64 overflow-y-auto pr-0.5')}>
+      {apps.map((app) => {
+        const running = runningByService.get(app.service) ?? 0
+        return (
+          <NavLink
+            key={app.id}
+            to={`/systems/${encodeURIComponent(app.id)}`}
+            title={collapsed ? app.name : app.enabled ? undefined : '已停用'}
+            className={({ isActive }) =>
+              cn(
+                'relative flex items-center rounded-lg py-2 text-sm transition-colors',
+                collapsed ? 'justify-center' : 'gap-2.5 px-3',
+                isActive ? 'nav-active' : 'text-muted hover:bg-elevated hover:text-ink',
+              )
+            }
+          >
+            <AppHealthDot app={app} />
+            {!collapsed && <span className="flex-1 truncate">{app.name}</span>}
+            {running > 0 && !collapsed && (
+              <span className="rounded-full bg-info/15 px-1.5 py-0.5 font-mono text-[10px] text-info">
+                {running}
+              </span>
+            )}
+            {running > 0 && collapsed && (
+              <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-info" />
+            )}
+          </NavLink>
+        )
+      })}
+    </div>
+  )
+}
 
 const SIDEBAR_KEY = 'aiops.sidebar'
 
@@ -262,13 +336,28 @@ export function AppShell() {
     refetchInterval: 30000,
     retry: false,
   })
-  const items = NAV_ITEMS.filter((item) => !item.adminOnly || auth?.self?.role === 'admin')
+  const role = auth?.self?.role
+  const groups = NAV_GROUPS.map((group) => ({
+    ...group,
+    items: group.items.filter((item) => !item.adminOnly || role === 'admin'),
+  })).filter((group) => group.items.length > 0)
+
+  // 侧栏系统列表角标：进行中流程数按 service join（overview 数据量小，零后端改动）
+  const runningByService = new Map<string, number>()
+  for (const item of overview?.running ?? []) {
+    const service = item.alert?.service
+    if (service) runningByService.set(service, (runningByService.get(service) ?? 0) + 1)
+  }
 
   const location = useLocation()
   const navigate = useNavigate()
-  const current = NAV_ITEMS.find((item) =>
+  const allItems = NAV_GROUPS.flatMap((group) => group.items)
+  const current = allItems.find((item) =>
     item.end ? location.pathname === item.to : location.pathname.startsWith(item.to),
   )
+  const topbarTitle = location.pathname.startsWith('/systems/')
+    ? '系统工作台'
+    : (current?.label ?? '')
 
   // 快捷键：? → 帮助中心（输入框 / 文本域内不触发）
   useEffect(() => {
@@ -333,37 +422,53 @@ export function AppShell() {
             </button>
           </div>
         )}
-        <nav className={cn('flex-1 space-y-1 overflow-y-auto py-3', collapsed ? 'px-2' : 'px-3')}>
-          {items.map((item) => {
-            const count = item.badgeKey ? (overview?.counts[item.badgeKey] ?? 0) : 0
-            const Icon = item.icon
-            return (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.end}
-                title={collapsed ? item.label : undefined}
-                className={({ isActive }) =>
-                  cn(
-                    'relative flex items-center rounded-lg py-2 text-sm transition-colors',
-                    collapsed ? 'justify-center' : 'gap-2.5 px-3',
-                    isActive ? 'nav-active' : 'text-muted hover:bg-elevated hover:text-ink',
+        <nav className={cn('flex-1 overflow-y-auto py-3', collapsed ? 'px-2' : 'px-3')}>
+          {groups.map((group) => (
+            <div key={group.title} className="mb-0.5">
+              {collapsed ? (
+                <div className="mx-2 my-1.5 border-t border-line first:hidden" />
+              ) : (
+                <div className="px-3 pb-1 pt-3 text-[10px] uppercase tracking-wider text-idle first:pt-0">
+                  {group.title}
+                </div>
+              )}
+              <div className="space-y-1">
+                {group.title === '被监控系统' && (
+                  <SystemList collapsed={collapsed} runningByService={runningByService} />
+                )}
+                {group.items.map((item) => {
+                  const count = item.badgeKey ? (overview?.counts[item.badgeKey] ?? 0) : 0
+                  const Icon = item.icon
+                  return (
+                    <NavLink
+                      key={item.to}
+                      to={item.to}
+                      end={item.end}
+                      title={collapsed ? item.label : undefined}
+                      className={({ isActive }) =>
+                        cn(
+                          'relative flex items-center rounded-lg py-2 text-sm transition-colors',
+                          collapsed ? 'justify-center' : 'gap-2.5 px-3',
+                          isActive ? 'nav-active' : 'text-muted hover:bg-elevated hover:text-ink',
+                        )
+                      }
+                    >
+                      <Icon size={16} strokeWidth={1.8} className="shrink-0" />
+                      {!collapsed && <span className="flex-1 truncate">{item.label}</span>}
+                      {count > 0 && !collapsed && (
+                        <span className="rounded-full bg-warn/15 px-1.5 py-0.5 font-mono text-[10px] text-warn">
+                          {count}
+                        </span>
+                      )}
+                      {count > 0 && collapsed && (
+                        <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-warn" />
+                      )}
+                    </NavLink>
                   )
-                }
-              >
-                <Icon size={16} strokeWidth={1.8} className="shrink-0" />
-                {!collapsed && <span className="flex-1 truncate">{item.label}</span>}
-                {count > 0 && !collapsed && (
-                  <span className="rounded-full bg-warn/15 px-1.5 py-0.5 font-mono text-[10px] text-warn">
-                    {count}
-                  </span>
-                )}
-                {count > 0 && collapsed && (
-                  <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-warn" />
-                )}
-              </NavLink>
-            )
-          })}
+                })}
+              </div>
+            </div>
+          ))}
         </nav>
         <div className={cn('shrink-0 border-t border-line py-3', collapsed ? 'px-2' : 'px-4')}>
           {collapsed ? (
@@ -383,7 +488,7 @@ export function AppShell() {
       <div className={cn('min-h-full transition-[margin] duration-200', collapsed ? 'ml-16' : 'ml-56')}>
         <header className="topbar-glow sticky top-0 z-30 flex h-12 items-center justify-between gap-3 border-b border-line bg-panel/95 px-6 backdrop-blur">
           <div className="flex min-w-0 items-center gap-1.5">
-            <div className="truncate text-sm text-muted">{current?.label ?? ''}</div>
+            <div className="truncate text-sm text-muted">{topbarTitle}</div>
           </div>
           <div className="flex items-center gap-1">
             <NavLink

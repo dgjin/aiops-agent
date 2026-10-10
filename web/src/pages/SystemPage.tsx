@@ -1,10 +1,15 @@
-/** 系统状态：Temporal / 策略 / 索引 / 稳定版探测 / 最近发布（设计方案 7.6）。 */
+/** 系统状态（平台自身）：安全与熔断 / 运行依赖 / 配置与策略 / 发布记录。
+ *
+ * 2026-10 UI 重构：原 8 卡平铺拼盘 → 4 组分区；「被监控应用」卡移出本页
+ * （统一在系统总览卡片墙呈现），本页只聚焦 AIOps 平台自身的运行状态。
+ */
 
 import type { ReactNode } from 'react'
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { ChevronRight } from 'lucide-react'
 import { api, describeError } from '../lib/api'
-import { fmtDateTime } from '../lib/format'
+import { cn, fmtDateTime } from '../lib/format'
 import { useWriteAction } from '../lib/actions'
 import { EmptyState } from '../components/EmptyState'
 import { JsonBlock } from '../components/JsonBlock'
@@ -42,6 +47,14 @@ function Metric({ label, value, mono = true }: { label: string; value: ReactNode
   )
 }
 
+/** 常驻组件中文标签（/api/subsystems 四项修复链路依赖）。 */
+const SUBSYSTEM_LABELS: Record<string, string> = {
+  temporal: 'Temporal（工作流引擎）',
+  loki: 'Loki（日志查询）',
+  ollama: 'Ollama（LLM 推理）',
+  docker: 'Docker（沙箱验证）',
+}
+
 export function SystemPage() {
   const { data, isError, error } = useQuery({
     queryKey: ['system'],
@@ -56,6 +69,13 @@ export function SystemPage() {
     refetchInterval: 30000,
     retry: false,
   })
+  // 常驻组件在线状态（与全局降级横幅同源）
+  const { data: subsys } = useQuery({
+    queryKey: ['subsystems'],
+    queryFn: api.subsystems,
+    refetchInterval: 10000,
+  })
+  const [policyOpen, setPolicyOpen] = useState(false)
   const killReasonRef = useRef('')
   const write = useWriteAction()
 
@@ -71,13 +91,14 @@ export function SystemPage() {
     policy_error,
     index: idx,
     stable,
-    monitored_apps,
     config_items,
     recent_releases,
   } = data
 
   const killActive = Boolean(kill.state?.active)
   const isAdmin = authStatus?.self?.role === 'admin'
+  const subsysEntries = Object.entries(subsys?.subsystems ?? {})
+  const subsysOk = subsysEntries.filter(([, info]) => info.ok).length
 
   const EFFECT_META: Record<string, { label: string; cls: string }> = {
     hot: { label: '热生效', cls: 'border-ok/40 text-ok' },
@@ -88,109 +109,114 @@ export function SystemPage() {
   return (
     <div>
       <h1 className="text-lg font-medium">系统状态</h1>
-      <p className="mt-1 text-xs text-muted">运行依赖与策略快照（15 秒自动刷新）</p>
+      <p className="mt-1 text-xs text-muted">
+        AIOps 平台自身（控制中枢）· 安全与熔断 / 运行依赖 / 配置与策略 / 发布记录（15 秒自动刷新）
+      </p>
 
-      <div className="mt-5 grid gap-4 md:grid-cols-2">
-        <Card
-          title="Kill Switch（全局熔断）"
-          className="md:col-span-2"
-          extra={
-            <span className="inline-flex items-center gap-1.5 text-xs">
-              <span
-                className={`h-1.5 w-1.5 rounded-full ${killActive ? 'bg-danger animate-pulse' : 'bg-ok'}`}
-              />
-              <span className={killActive ? 'text-danger' : 'text-muted'}>
-                {killActive ? '已激活 · 写操作被拒绝' : '未激活'}
-              </span>
+      {/* ============ 组 1：安全与熔断 ============ */}
+      <h2 className="mb-3 mt-6 text-sm font-medium text-muted">安全与熔断</h2>
+      <Card
+        title="Kill Switch（全局熔断）"
+        extra={
+          <span className="inline-flex items-center gap-1.5 text-xs">
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${killActive ? 'bg-danger animate-pulse' : 'bg-ok'}`}
+            />
+            <span className={killActive ? 'text-danger' : 'text-muted'}>
+              {killActive ? '已激活 · 写操作被拒绝' : '未激活'}
             </span>
-          }
-        >
-          {kill.error ? (
-            <div className="text-xs text-danger">状态不可读：{kill.error}</div>
-          ) : killActive && kill.state ? (
-            <div className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2.5">
-              <div className="text-xs text-danger">
-                审批、发布指令、配置变更等一切写操作与 webhook 新流程均已拒绝；关闭后恢复。
-              </div>
-              <div className="mt-3 grid gap-3 md:grid-cols-3">
-                <Metric label="操作者" value={kill.state.actor || '—'} />
-                <Metric label="激活时间" value={fmtDateTime(kill.state.since)} />
-                <Metric label="最近更新" value={fmtDateTime(kill.state.updated_at)} />
-              </div>
-              {kill.state.reason && (
-                <div className="mt-2 text-xs text-muted">原因：{kill.state.reason}</div>
-              )}
+          </span>
+        }
+      >
+        {kill.error ? (
+          <div className="text-xs text-danger">状态不可读：{kill.error}</div>
+        ) : killActive && kill.state ? (
+          <div className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2.5">
+            <div className="text-xs text-danger">
+              审批、发布指令、配置变更等一切写操作与 webhook 新流程均已拒绝；关闭后恢复。
             </div>
-          ) : (
-            <div className="text-xs text-muted">
-              未激活。故障时的紧急停止：激活后将拒绝一切写操作（审批、发布指令、配置维护）与
-              webhook 新流程启动；正在运行的流程不受影响。
-              {kill.state?.updated_at && (
-                <span className="ml-1">最近更新：{fmtDateTime(kill.state.updated_at)}</span>
-              )}
+            <div className="mt-3 grid gap-3 md:grid-cols-3">
+              <Metric label="操作者" value={kill.state.actor || '—'} />
+              <Metric label="激活时间" value={fmtDateTime(kill.state.since)} />
+              <Metric label="最近更新" value={fmtDateTime(kill.state.updated_at)} />
             </div>
-          )}
-          {isAdmin && !kill.error && (
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              {killActive ? (
-                <button
-                  type="button"
-                  onClick={() =>
-                    write.open({
-                      title: '关闭 kill switch？',
-                      confirmLabel: '关闭并恢复写操作',
-                      detail: (
-                        <div className="text-xs text-muted">
-                          关闭后，审批、发布指令与配置维护将恢复可用；本操作会记录审计。
+            {kill.state.reason && (
+              <div className="mt-2 text-xs text-muted">原因：{kill.state.reason}</div>
+            )}
+          </div>
+        ) : (
+          <div className="text-xs text-muted">
+            未激活。故障时的紧急停止：激活后将拒绝一切写操作（审批、发布指令、配置维护）与
+            webhook 新流程启动；正在运行的流程不受影响。
+            {kill.state?.updated_at && (
+              <span className="ml-1">最近更新：{fmtDateTime(kill.state.updated_at)}</span>
+            )}
+          </div>
+        )}
+        {isAdmin && !kill.error && (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {killActive ? (
+              <button
+                type="button"
+                onClick={() =>
+                  write.open({
+                    title: '关闭 kill switch？',
+                    confirmLabel: '关闭并恢复写操作',
+                    detail: (
+                      <div className="text-xs text-muted">
+                        关闭后，审批、发布指令与配置维护将恢复可用；本操作会记录审计。
+                      </div>
+                    ),
+                    run: () => api.killSwitch(false, '手动关闭'),
+                    success: '已关闭 kill switch，写操作恢复',
+                  })
+                }
+                className="rounded-md border border-line px-2.5 py-1 text-xs text-muted hover:bg-elevated hover:text-ink"
+              >
+                关闭 kill switch
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  killReasonRef.current = ''
+                  write.open({
+                    title: '激活 kill switch（紧急停止）？',
+                    tone: 'danger',
+                    confirmLabel: '立即激活',
+                    detail: (
+                      <div className="space-y-2.5">
+                        <div className="text-xs">
+                          激活后将<b className="text-danger">立即拒绝</b>所有写操作（审批、发布指令、
+                          配置维护）并拒绝 webhook 启动新流程；正在运行的流程不受影响。仅本管理端点保持
+                          可用，以便随时关闭。
                         </div>
-                      ),
-                      run: () => api.killSwitch(false, '手动关闭'),
-                      success: '已关闭 kill switch，写操作恢复',
-                    })
-                  }
-                  className="rounded-md border border-line px-2.5 py-1 text-xs text-muted hover:bg-elevated hover:text-ink"
-                >
-                  关闭 kill switch
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => {
-                    killReasonRef.current = ''
-                    write.open({
-                      title: '激活 kill switch（紧急停止）？',
-                      tone: 'danger',
-                      confirmLabel: '立即激活',
-                      detail: (
-                        <div className="space-y-2.5">
-                          <div className="text-xs">
-                            激活后将<b className="text-danger">立即拒绝</b>所有写操作（审批、发布指令、
-                            配置维护）并拒绝 webhook 启动新流程；正在运行的流程不受影响。仅本管理端点保持
-                            可用，以便随时关闭。
-                          </div>
-                          <input
-                            defaultValue=""
-                            onChange={(event) => {
-                              killReasonRef.current = event.target.value
-                            }}
-                            placeholder="激活原因（建议填写，将记录到审计）"
-                            className="w-full rounded-md border border-line bg-canvas px-2.5 py-1.5 text-xs text-ink placeholder:text-idle focus:border-accent/50 focus:outline-none"
-                          />
-                        </div>
-                      ),
-                      run: () => api.killSwitch(true, killReasonRef.current.trim() || '未注明'),
-                      success: '已激活 kill switch：所有写操作已被拒绝',
-                    })
-                  }}
-                  className="rounded-md border border-danger/40 px-2.5 py-1 text-xs text-danger hover:bg-danger/10"
-                >
-                  激活（紧急停止）
-                </button>
-              )}
-            </div>
-          )}
-        </Card>
+                        <input
+                          defaultValue=""
+                          onChange={(event) => {
+                            killReasonRef.current = event.target.value
+                          }}
+                          placeholder="激活原因（建议填写，将记录到审计）"
+                          className="w-full rounded-md border border-line bg-canvas px-2.5 py-1.5 text-xs text-ink placeholder:text-idle focus:border-accent/50 focus:outline-none"
+                        />
+                      </div>
+                    ),
+                    run: () => api.killSwitch(true, killReasonRef.current.trim() || '未注明'),
+                    success: '已激活 kill switch：所有写操作已被拒绝',
+                  })
+                }}
+                className="rounded-md border border-danger/40 px-2.5 py-1 text-xs text-danger hover:bg-danger/10"
+              >
+                激活（紧急停止）
+              </button>
+            )}
+          </div>
+        )}
+      </Card>
 
+      {/* ============ 组 2：运行依赖 ============ */}
+      <h2 className="mb-3 mt-7 text-sm font-medium text-muted">运行依赖</h2>
+      <div className="grid gap-4 md:grid-cols-2">
         <Card
           title="Temporal"
           extra={
@@ -205,6 +231,38 @@ export function SystemPage() {
             <Metric label="延迟" value={temporal.connected ? `${temporal.latency_ms} ms` : '—'} />
           </div>
           {temporal.error && <div className="mt-3 text-xs text-danger">{temporal.error}</div>}
+        </Card>
+
+        <Card
+          title="常驻组件"
+          extra={
+            subsys ? (
+              <span className={cn('text-xs', subsys.degraded_mode ? 'text-warn' : 'text-muted')}>
+                {subsysOk}/{subsysEntries.length} 在线
+              </span>
+            ) : undefined
+          }
+        >
+          {subsys ? (
+            <ul className="space-y-2.5">
+              {subsysEntries.map(([name, info]) => (
+                <li key={name} className="flex items-center justify-between gap-3 text-xs">
+                  <span className="inline-flex items-center gap-1.5">
+                    <span
+                      className={cn('h-1.5 w-1.5 rounded-full', info.ok ? 'bg-ok' : 'bg-danger animate-pulse')}
+                    />
+                    <span className="text-ink">{SUBSYSTEM_LABELS[name] ?? name}</span>
+                  </span>
+                  <span className={info.ok ? 'text-muted' : 'text-danger'}>{info.ok ? '正常' : info.detail}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="text-xs text-idle">加载中…</div>
+          )}
+          <div className="mt-3 border-t border-line pt-2 text-[10px] text-idle">
+            修复链路的四项外部依赖（与页面顶部降级横幅同源）；进程级常驻组件列表见部署手册。
+          </div>
         </Card>
 
         <Card
@@ -229,133 +287,6 @@ export function SystemPage() {
           )}
         </Card>
 
-        <Card
-          title="被监控应用"
-          extra={<span className="text-xs text-muted">{monitored_apps.length} 个 · 在「被监控应用」页维护</span>}
-        >
-          {monitored_apps.length === 0 ? (
-            <EmptyState title="暂无被监控应用" hint="在「被监控应用」页新增" />
-          ) : (
-            <ul className="space-y-3">
-              {monitored_apps.map((app) => {
-                const running = app.enabled && app.probe.running
-                const dot = !app.enabled ? 'bg-idle' : running ? 'bg-ok' : 'bg-danger animate-pulse'
-                const text = !app.enabled
-                  ? '已停用'
-                  : app.probe.running
-                    ? `在线 ${app.probe.status_code ?? ''}${app.probe.latency_ms != null ? ` · ${app.probe.latency_ms}ms` : ''}`
-                    : '不可达'
-                return (
-                  <li key={app.id} className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="text-sm">{app.name}</div>
-                      <div className="mt-0.5 truncate font-mono text-[10px] text-idle">{app.url}</div>
-                    </div>
-                    <span
-                      className={`inline-flex items-center gap-1.5 text-xs ${running || !app.enabled ? 'text-muted' : 'text-danger'}`}
-                    >
-                      <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
-                      {text}
-                    </span>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
-        </Card>
-
-        <Card
-          title="配置项（来源与生效方式）"
-          className="md:col-span-2"
-          extra={<span className="text-xs text-muted">改前先看「生效方式」，避免以为改了其实没生效</span>}
-        >
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="border-b border-line text-left text-muted">
-                  <th className="py-2 pr-3 font-medium">配置</th>
-                  <th className="py-2 pr-3 font-medium">当前值</th>
-                  <th className="py-2 pr-3 font-medium">来源</th>
-                  <th className="py-2 pr-3 font-medium">生效方式</th>
-                  <th className="py-2 pr-3 font-medium">运行中流程</th>
-                </tr>
-              </thead>
-              <tbody>
-                {config_items.map((item) => {
-                  const meta = EFFECT_META[item.effect] ?? EFFECT_META.restart
-                  return (
-                    <tr key={item.key} className="border-b border-line/60 last:border-0">
-                      <td className="py-2 pr-3 align-top">
-                        <div className="text-ink">{item.label}</div>
-                        <div className="mt-0.5 font-mono text-[10px] text-idle">{item.key}</div>
-                      </td>
-                      <td className="max-w-[16rem] py-2 pr-3 align-top">
-                        <span className="block break-words font-mono text-[11px] text-muted">{item.value}</span>
-                        {item.note && <div className="mt-0.5 text-[10px] text-idle">{item.note}</div>}
-                      </td>
-                      <td className="py-2 pr-3 align-top text-muted">{item.source}</td>
-                      <td className="py-2 pr-3 align-top">
-                        <span className={`whitespace-nowrap rounded border px-1.5 py-0.5 text-[10px] ${meta.cls}`}>
-                          {meta.label}
-                        </span>
-                        <div className="mt-0.5 text-[10px] text-idle">{item.owner}</div>
-                      </td>
-                      <td className="py-2 pr-3 align-top">
-                        {item.applies_to_running ? (
-                          <span className="text-ok">生效</span>
-                        ) : (
-                          <span className="text-muted">不生效</span>
-                        )}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        </Card>
-
-        <Card title="策略快照" className="md:col-span-2">
-          {policy ? (
-            <>
-              <div className="text-xs text-muted">来源：{policy.source}</div>
-              <div className="mt-1 text-sm">{policy.summary}</div>
-              <div className="mt-4 grid gap-3 md:grid-cols-2">
-                <div>
-                  <div className="mb-1.5 text-xs text-muted">triage</div>
-                  <JsonBlock data={policy.triage} />
-                </div>
-                <div>
-                  <div className="mb-1.5 text-xs text-muted">approval</div>
-                  <JsonBlock data={policy.approval} />
-                </div>
-                <div>
-                  <div className="mb-1.5 text-xs text-muted">notify_window</div>
-                  <JsonBlock data={policy.notify_window} />
-                </div>
-                <div>
-                  <div className="mb-1.5 text-xs text-muted">canary</div>
-                  <JsonBlock data={policy.canary} />
-                </div>
-              </div>
-              <div className="mt-4 border-t border-line pt-4">
-                <div className="mb-2 text-xs text-muted">策略锁定项（不可通过控制台修改）</div>
-                <ul className="space-y-1.5">
-                  {policy.locks.map((lock) => (
-                    <li key={lock.key} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-                      <span className="font-mono text-muted">{lock.key}</span>
-                      <span className="font-mono text-ink">{JSON.stringify(lock.value)}</span>
-                      <span className="text-idle">{lock.reason}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </>
-          ) : (
-            <div className="text-xs text-danger">{policy_error ?? '策略不可用'}</div>
-          )}
-        </Card>
-
         <Card title="知识索引">
           {idx ? (
             <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
@@ -373,28 +304,141 @@ export function SystemPage() {
             <EmptyState title="索引不可用" hint="请先执行索引构建" />
           )}
         </Card>
-
-        <Card title="最近发布">
-          {recent_releases.length ? (
-            <ul className="space-y-2.5">
-              {recent_releases.map((release) => (
-                <li key={release.file} className="text-xs">
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                    <span className="text-sm">{release.name ?? release.file}</span>
-                    {release.version && <span className="font-mono text-accent">{release.version}</span>}
-                    {release.service && <span className="text-muted">{release.service}</span>}
-                  </div>
-                  <div className="mt-1 font-mono text-[10px] text-idle">
-                    {release.file} · {fmtDateTime(release.mtime)}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <EmptyState title="暂无发布记录" hint="完成发布后这里会显示最近版本" />
-          )}
-        </Card>
       </div>
+
+      {/* ============ 组 3：配置与策略 ============ */}
+      <h2 className="mb-3 mt-7 text-sm font-medium text-muted">配置与策略</h2>
+      <Card
+        title="配置项（来源与生效方式）"
+        extra={<span className="text-xs text-muted">改前先看「生效方式」，避免以为改了其实没生效</span>}
+      >
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-line text-left text-muted">
+                <th className="py-2 pr-3 font-medium">配置</th>
+                <th className="py-2 pr-3 font-medium">当前值</th>
+                <th className="py-2 pr-3 font-medium">来源</th>
+                <th className="py-2 pr-3 font-medium">生效方式</th>
+                <th className="py-2 pr-3 font-medium">运行中流程</th>
+              </tr>
+            </thead>
+            <tbody>
+              {config_items.map((item) => {
+                const meta = EFFECT_META[item.effect] ?? EFFECT_META.restart
+                return (
+                  <tr key={item.key} className="border-b border-line/60 last:border-0">
+                    <td className="py-2 pr-3 align-top">
+                      <div className="text-ink">{item.label}</div>
+                      <div className="mt-0.5 font-mono text-[10px] text-idle">{item.key}</div>
+                    </td>
+                    <td className="max-w-[16rem] py-2 pr-3 align-top">
+                      <span className="block break-words font-mono text-[11px] text-muted">{item.value}</span>
+                      {item.note && <div className="mt-0.5 text-[10px] text-idle">{item.note}</div>}
+                    </td>
+                    <td className="py-2 pr-3 align-top text-muted">{item.source}</td>
+                    <td className="py-2 pr-3 align-top">
+                      <span className={`whitespace-nowrap rounded border px-1.5 py-0.5 text-[10px] ${meta.cls}`}>
+                        {meta.label}
+                      </span>
+                      <div className="mt-0.5 text-[10px] text-idle">{item.owner}</div>
+                    </td>
+                    <td className="py-2 pr-3 align-top">
+                      {item.applies_to_running ? (
+                        <span className="text-ok">生效</span>
+                      ) : (
+                        <span className="text-muted">不生效</span>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <Card
+        title="策略快照"
+        className="mt-4"
+        extra={
+          <button
+            type="button"
+            onClick={() => setPolicyOpen((prev) => !prev)}
+            className="inline-flex items-center gap-1 text-xs text-idle transition-colors hover:text-accent"
+          >
+            {policyOpen ? '收起' : '展开'}
+            <ChevronRight
+              className={cn('h-3.5 w-3.5 transition-transform', policyOpen && 'rotate-90')}
+              strokeWidth={1.8}
+            />
+          </button>
+        }
+      >
+        {!policyOpen ? (
+          <div className="text-xs text-idle">已收起：展开查看闸门阈值 / 通知窗口 / 金丝雀参数与策略锁定项</div>
+        ) : policy ? (
+          <>
+            <div className="text-xs text-muted">来源：{policy.source}</div>
+            <div className="mt-1 text-sm">{policy.summary}</div>
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              <div>
+                <div className="mb-1.5 text-xs text-muted">triage</div>
+                <JsonBlock data={policy.triage} />
+              </div>
+              <div>
+                <div className="mb-1.5 text-xs text-muted">approval</div>
+                <JsonBlock data={policy.approval} />
+              </div>
+              <div>
+                <div className="mb-1.5 text-xs text-muted">notify_window</div>
+                <JsonBlock data={policy.notify_window} />
+              </div>
+              <div>
+                <div className="mb-1.5 text-xs text-muted">canary</div>
+                <JsonBlock data={policy.canary} />
+              </div>
+            </div>
+            <div className="mt-4 border-t border-line pt-4">
+              <div className="mb-2 text-xs text-muted">策略锁定项（不可通过控制台修改）</div>
+              <ul className="space-y-1.5">
+                {policy.locks.map((lock) => (
+                  <li key={lock.key} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                    <span className="font-mono text-muted">{lock.key}</span>
+                    <span className="font-mono text-ink">{JSON.stringify(lock.value)}</span>
+                    <span className="text-idle">{lock.reason}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </>
+        ) : (
+          <div className="text-xs text-danger">{policy_error ?? '策略不可用'}</div>
+        )}
+      </Card>
+
+      {/* ============ 组 4：发布记录 ============ */}
+      <h2 className="mb-3 mt-7 text-sm font-medium text-muted">发布记录</h2>
+      <Card title="最近发布">
+        {recent_releases.length ? (
+          <ul className="space-y-2.5">
+            {recent_releases.map((release) => (
+              <li key={release.file} className="text-xs">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className="text-sm">{release.name ?? release.file}</span>
+                  {release.version && <span className="font-mono text-accent">{release.version}</span>}
+                  {release.service && <span className="text-muted">{release.service}</span>}
+                </div>
+                <div className="mt-1 font-mono text-[10px] text-idle">
+                  {release.file} · {fmtDateTime(release.mtime)}
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <EmptyState title="暂无发布记录" hint="完成发布后这里会显示最近版本" />
+        )}
+      </Card>
 
       <ConfirmDialog
         open={write.spec !== null}

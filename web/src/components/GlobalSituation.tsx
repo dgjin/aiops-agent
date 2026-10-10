@@ -1,13 +1,17 @@
-/** 流程看板：计数卡 + 运行中卡片墙 + 近 7 日终态分布 + 运营度量（设计方案 7.2、P1-4）。 */
+/** 全局态势（原流程看板内容）：计数卡 + 运行中流程墙 + 近 7 日终态分布 + 运营度量。
+ *
+ * 2026-10 UI 重构：从独立首页（Dashboard）下沉为「系统总览」页的折叠区——
+ * 流程视角的既有能力完整保留，但不再占据首页第一屏（首页主语切换为被监控系统）。
+ */
 
 import type { ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { api, describeError } from '../lib/api'
 import { cn } from '../lib/format'
-import { EmptyState } from '../components/EmptyState'
-import { FlowCard } from '../components/FlowCard'
-import { Donut } from '../components/charts/Donut'
+import { EmptyState } from './EmptyState'
+import { FlowCard } from './FlowCard'
+import { Donut } from './charts/Donut'
 import type { OpsMetricsResp, OverviewCounts } from '../lib/types'
 
 const STAT_CARDS: Array<{ key: keyof OverviewCounts; label: string; tone: string }> = [
@@ -57,7 +61,7 @@ function OpsMetricsSection({ metrics }: { metrics: OpsMetricsResp }) {
   const { mttr } = metrics
   const activeGates = metrics.gate_breakdown.filter((row) => row.count > 0)
   return (
-    <section className="mt-7">
+    <section>
       <h2 className="mb-3 text-sm font-medium text-muted">
         运营度量（近 {metrics.period_days} 日 · 共 {metrics.closed_total} 个终态流程）
       </h2>
@@ -118,7 +122,7 @@ function OpsMetricsSection({ metrics }: { metrics: OpsMetricsResp }) {
   )
 }
 
-export function Dashboard() {
+export function GlobalSituation() {
   const navigate = useNavigate()
   const { data, isError, error } = useQuery({
     queryKey: ['overview'],
@@ -132,16 +136,13 @@ export function Dashboard() {
   })
 
   if (isError) {
-    return <EmptyState title="无法加载看板数据" hint={describeError(error)} />
+    return <EmptyState title="无法加载态势数据" hint={describeError(error)} />
   }
   if (!data) return <div className="text-sm text-muted">加载中…</div>
 
   return (
-    <div>
-      <h1 className="text-lg font-medium">流程看板</h1>
-      <p className="mt-1 text-xs text-muted">自动运维全流程实时总览（5 秒自动刷新）</p>
-
-      <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+    <div className="space-y-7">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
         {STAT_CARDS.map((card) => (
           <div key={card.key} className="rounded-xl border border-line bg-panel p-4">
             <div className="text-xs text-muted">{card.label}</div>
@@ -152,7 +153,7 @@ export function Dashboard() {
         ))}
       </div>
 
-      <section className="mt-7">
+      <section>
         <h2 className="mb-3 text-sm font-medium text-muted">运行中流程</h2>
         {data.running.length ? (
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -165,7 +166,7 @@ export function Dashboard() {
         )}
       </section>
 
-      <section className="mt-7">
+      <section>
         <h2 className="mb-3 text-sm font-medium text-muted">近 7 日终态分布</h2>
         <div className="rounded-xl border border-line bg-panel p-4">
           <Donut

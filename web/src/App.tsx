@@ -10,7 +10,8 @@ import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { AppShell } from './components/AppShell'
 import { EmptyState } from './components/EmptyState'
 import { getToken } from './lib/api'
-import { Dashboard } from './pages/Dashboard'
+import { SystemOverview } from './pages/SystemOverview'
+import { SystemWorkbench } from './pages/SystemWorkbench'
 import { Flows } from './pages/Flows'
 import { FlowDetail } from './pages/FlowDetail'
 import { Approvals } from './pages/Approvals'
@@ -46,7 +47,8 @@ export default function App() {
           </RequireAuth>
         }
       >
-        <Route index element={<Dashboard />} />
+        <Route index element={<SystemOverview />} />
+        <Route path="systems/:appId" element={<SystemWorkbench />} />
         <Route path="flows" element={<Flows />} />
         <Route path="flows/:wfId" element={<FlowDetail />} />
         <Route path="approvals" element={<Approvals />} />
