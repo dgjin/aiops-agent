@@ -16,12 +16,13 @@
  *   批准进入需求驱动修复工作流。
  */
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { RefreshCw, Search, X } from 'lucide-react'
 import { api, describeError } from '../lib/api'
 import { cn, fmtDateTime } from '../lib/format'
 import { EmptyState } from '../components/EmptyState'
+import { Pagination, usePagination } from '../components/Pagination'
 import { PermissionGate } from '../components/PermissionGate'
 import {
   ANALYSIS_STATUS_META,
@@ -250,6 +251,14 @@ export function Requirements() {
   // 高优区跟随筛选（搜索结果中的高优同样置顶展示）
   const high = sorted.filter((entry) => entry.priority === 'P0' || entry.priority === 'P1')
   const hasConditions = Boolean(q || filterKind || filterPriority || filterDept || sort !== 'default')
+
+  // ---- 分页：条件 / 数据源变化回到第 1 页（越界页码自动夹取）；高优区不受分页影响 ----
+  const pg = usePagination(sorted.length, 10)
+  const { setPage } = pg
+  useEffect(() => {
+    setPage(1)
+  }, [appId, query, filterKind, filterPriority, filterDept, sort, setPage])
+  const paged = sorted.slice(pg.start, pg.start + pg.pageSize)
 
   return (
     <div>
@@ -502,6 +511,7 @@ export function Requirements() {
                   </div>
                 </div>
               ) : (
+                <>
                 <div className="mt-2 overflow-x-auto rounded-xl border border-line">
                 <table className="w-full text-xs">
                   <thead>
@@ -517,7 +527,7 @@ export function Requirements() {
                     </tr>
                   </thead>
                   <tbody>
-                    {sorted.map((entry) => (
+                    {paged.map((entry) => (
                       <tr key={String(entry.id)} className="border-b border-line/60 last:border-0">
                         <td className="px-3 py-2 font-mono text-muted">{entry.id}</td>
                         <td className="px-3 py-2 text-muted">
@@ -555,6 +565,8 @@ export function Requirements() {
                   </tbody>
                 </table>
                 </div>
+                <Pagination pg={pg} />
+                </>
               )}
             </section>
           ) : (

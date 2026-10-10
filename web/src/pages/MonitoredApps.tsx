@@ -3,7 +3,7 @@
 import { useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Copy, Download, Plus, Upload } from 'lucide-react'
+import { Download, MoreHorizontal, Plus, Upload } from 'lucide-react'
 import { api, describeError } from '../lib/api'
 import { cn, downloadJson, fmtDateTime } from '../lib/format'
 import { useWriteAction } from '../lib/actions'
@@ -12,6 +12,7 @@ import { ActionButton } from '../components/ActionButton'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { EmptyState } from '../components/EmptyState'
 import { ProbeBadge, ReadinessLine, WatcherLine } from '../components/MonitoredAppStatus'
+import { Pagination, usePagination } from '../components/Pagination'
 import { PermissionGate } from '../components/PermissionGate'
 import { Toast } from '../components/Toast'
 import type { MonitoredApp, MonitoredAppInput } from '../lib/types'
@@ -367,11 +368,17 @@ export function MonitoredApps() {
   const [importError, setImportError] = useState<string | null>(null)
   const [importResult, setImportResult] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  /** 行内「⋯」菜单（fixed 定位，逃逸表格 overflow 裁剪；白屏遮罩点击关闭）。 */
+  const [rowMenu, setRowMenu] = useState<{ app: MonitoredApp; x: number; y: number } | null>(null)
+
+  // ---- 分页（条目增删后越界页码自动夹取）----
+  const pg = usePagination(data?.items.length ?? 0, 10)
 
   if (isError) return <EmptyState title="无法加载被监控应用" hint={describeError(error)} />
   if (!data) return <div className="text-sm text-muted">加载中…</div>
 
   const items = data.items
+  const paged = items.slice(pg.start, pg.start + pg.pageSize)
   const names = items.map((item) => item.name)
   const allSelected = items.length > 0 && selected.length === items.length
 
@@ -552,10 +559,10 @@ export function MonitoredApps() {
             <EmptyState title="暂无被监控应用" hint="点击右上角「新增」，或用「导入」批量录入" />
           </div>
         ) : (
-          <table className="w-full text-sm">
+          <table className="w-full min-w-[1080px] text-sm">
             <thead>
               <tr className="border-b border-line text-left text-xs text-muted">
-                <th className="px-4 py-3 font-medium">
+                <th className="whitespace-nowrap px-4 py-3 font-medium">
                   {canManage && (
                     <input
                       type="checkbox"
@@ -566,18 +573,23 @@ export function MonitoredApps() {
                     />
                   )}
                 </th>
-                <th className="px-4 py-3 font-medium">名称</th>
-                <th className="px-4 py-3 font-medium">地址</th>
-                <th className="px-4 py-3 font-medium">service</th>
-                <th className="px-4 py-3 font-medium">日志路径</th>
-                <th className="px-4 py-3 font-medium">状态</th>
-                <th className="px-4 py-3 font-medium">更新时间</th>
-                <th className="px-4 py-3 text-right font-medium">操作</th>
+                <th className="whitespace-nowrap px-4 py-3 font-medium">名称</th>
+                <th className="min-w-[180px] whitespace-nowrap px-4 py-3 font-medium">状态</th>
+                <th className="whitespace-nowrap px-4 py-3 font-medium">更新时间</th>
+                <th className="whitespace-nowrap px-4 py-3 font-medium">地址</th>
+                <th className="whitespace-nowrap px-4 py-3 font-medium">service</th>
+                <th className="whitespace-nowrap px-4 py-3 font-medium">日志路径</th>
+                <th className="sticky right-0 whitespace-nowrap border-l border-line/40 bg-panel px-4 py-3 text-right font-medium">
+                  操作
+                </th>
               </tr>
             </thead>
             <tbody>
-              {items.map((app) => (
-                <tr key={app.id} className="border-b border-line/60 last:border-0">
+              {paged.map((app) => (
+                <tr
+                  key={app.id}
+                  className="group border-b border-line/60 last:border-0 hover:bg-elevated/60"
+                >
                   <td className="px-4 py-3">
                     {canManage && (
                       <input
@@ -594,18 +606,38 @@ export function MonitoredApps() {
                     )}
                   </td>
                   <td className="px-4 py-3">
-                    <div className="text-ink">{app.name}</div>
+                    <div className="max-w-[12rem] truncate text-ink" title={app.name}>
+                      {app.name}
+                    </div>
                     {app.note && (
-                      <div className="mt-0.5 max-w-[16rem] truncate text-xs text-idle" title={app.note}>
+                      <div className="mt-0.5 max-w-[12rem] truncate text-xs text-idle" title={app.note}>
                         {app.note}
                       </div>
                     )}
                   </td>
-                  <td className="px-4 py-3 font-mono text-xs text-muted">{app.url}</td>
-                  <td className="px-4 py-3 font-mono text-xs text-muted">{app.service}</td>
+                  <td className="min-w-[180px] px-4 py-3">
+                    <ProbeBadge app={app} />
+                    {app.enabled && app.watcher && <WatcherLine watcher={app.watcher} />}
+                    {!app.probe.running && app.probe.error && app.enabled && (
+                      <div className="mt-0.5 max-w-[16rem] truncate text-[10px] text-idle" title={app.probe.error}>
+                        {app.probe.error}
+                      </div>
+                    )}
+                    {app.readiness && <ReadinessLine readiness={app.readiness} />}
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3 font-mono text-xs text-idle">{fmtDateTime(app.updated_at)}</td>
+                  <td className="px-4 py-3">
+                    <span
+                      className="block max-w-[13rem] truncate font-mono text-xs text-muted"
+                      title={app.url}
+                    >
+                      {app.url}
+                    </span>
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3 font-mono text-xs text-muted">{app.service}</td>
                   <td className="px-4 py-3">
                     {app.log_path ? (
-                      <span className="block max-w-[18rem] truncate font-mono text-xs text-muted" title={app.log_path}>
+                      <span className="block max-w-[13rem] truncate font-mono text-xs text-muted" title={app.log_path}>
                         {app.log_path}
                       </span>
                     ) : (
@@ -613,7 +645,7 @@ export function MonitoredApps() {
                     )}
                     {app.probe_keyword && (
                       <span
-                        className="mt-0.5 block max-w-[18rem] truncate font-mono text-xs text-muted"
+                        className="mt-0.5 block max-w-[13rem] truncate font-mono text-xs text-muted"
                         title={`页面关键字：${app.probe_keyword}`}
                       >
                         关键字：{app.probe_keyword}
@@ -621,47 +653,34 @@ export function MonitoredApps() {
                     )}
                     {app.repo && (
                       <span
-                        className="mt-0.5 block max-w-[18rem] truncate font-mono text-xs text-muted"
+                        className="mt-0.5 block max-w-[13rem] truncate font-mono text-xs text-muted"
                         title={`修复仓库：${app.repo}`}
                       >
                         仓库：{app.repo}
                       </span>
                     )}
                   </td>
-                  <td className="px-4 py-3">
-                    <ProbeBadge app={app} />
-                    {app.enabled && app.watcher && <WatcherLine watcher={app.watcher} />}
-                    {!app.probe.running && app.probe.error && app.enabled && (
-                      <div className="mt-0.5 max-w-[22rem] truncate text-[10px] text-idle" title={app.probe.error}>
-                        {app.probe.error}
-                      </div>
-                    )}
-                    {app.readiness && <ReadinessLine readiness={app.readiness} />}
-                  </td>
-                  <td className="px-4 py-3 text-xs text-idle">{fmtDateTime(app.updated_at)}</td>
-                  <td className="px-4 py-3">
+                  <td className="sticky right-0 border-l border-line/40 bg-panel px-4 py-3 group-hover:bg-elevated">
                     {canManage ? (
                       <div className="flex justify-end gap-1.5 whitespace-nowrap">
                         <Link
                           to={`/systems/${encodeURIComponent(app.id)}`}
                           title="以该系统为视角查看健康 / 流程 / 链路（系统工作台）"
-                          className="rounded-lg border border-accent/40 px-3.5 py-1.5 text-sm font-medium text-accent transition-colors hover:bg-accent/10"
+                          className="rounded-lg border border-accent/40 px-2.5 py-1 text-xs font-medium text-accent transition-colors hover:bg-accent/10"
                         >
                           工作台
                         </Link>
-                        <ActionButton onClick={() => openEdit(app)}>编辑</ActionButton>
-                        <ActionButton onClick={() => confirmDuplicate(app)}>
-                          <span className="inline-flex items-center gap-1">
-                            <Copy className="h-3 w-3" />
-                            复制
-                          </span>
-                        </ActionButton>
-                        <ActionButton onClick={() => confirmToggle(app)}>
-                          {app.enabled ? '停用' : '启用'}
-                        </ActionButton>
-                        <ActionButton tone="danger" onClick={() => confirmDelete(app)}>
-                          删除
-                        </ActionButton>
+                        <button
+                          type="button"
+                          title="更多操作（编辑 / 复制 / 停用 / 删除）"
+                          onClick={(event) => {
+                            const rect = event.currentTarget.getBoundingClientRect()
+                            setRowMenu({ app, x: rect.right, y: rect.bottom + 4 })
+                          }}
+                          className="rounded-lg border border-line px-2.5 py-1 text-muted transition-colors hover:bg-elevated hover:text-ink"
+                        >
+                          <MoreHorizontal className="h-3.5 w-3.5" />
+                        </button>
                       </div>
                     ) : (
                       <div className="text-right text-xs text-idle">仅管理员可编辑</div>
@@ -673,6 +692,58 @@ export function MonitoredApps() {
           </table>
         )}
       </div>
+      <Pagination pg={pg} />
+
+      {rowMenu && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setRowMenu(null)} />
+          <div
+            className="fixed z-50 w-28 rounded-lg border border-line bg-elevated p-1 shadow-lg"
+            style={{ top: rowMenu.y, left: rowMenu.x - 112 }}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                setRowMenu(null)
+                openEdit(rowMenu.app)
+              }}
+              className="block w-full rounded-md px-2.5 py-1.5 text-left text-xs text-muted transition-colors hover:bg-panel hover:text-ink"
+            >
+              编辑
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setRowMenu(null)
+                confirmDuplicate(rowMenu.app)
+              }}
+              className="block w-full rounded-md px-2.5 py-1.5 text-left text-xs text-muted transition-colors hover:bg-panel hover:text-ink"
+            >
+              复制
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setRowMenu(null)
+                confirmToggle(rowMenu.app)
+              }}
+              className="block w-full rounded-md px-2.5 py-1.5 text-left text-xs text-muted transition-colors hover:bg-panel hover:text-ink"
+            >
+              {rowMenu.app.enabled ? '停用' : '启用'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setRowMenu(null)
+                confirmDelete(rowMenu.app)
+              }}
+              className="block w-full rounded-md px-2.5 py-1.5 text-left text-xs text-danger transition-colors hover:bg-danger/10"
+            >
+              删除
+            </button>
+          </div>
+        </>
+      )}
 
       <AppFormDialog
         open={formOpen}

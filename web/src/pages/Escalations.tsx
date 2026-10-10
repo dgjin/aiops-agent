@@ -10,7 +10,7 @@
  *   计数；卡片双列布局（超长原因截断，悬停看全文）——均前端内存计算，状态页签仍走服务端。
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Search, X } from 'lucide-react'
@@ -27,6 +27,7 @@ import {
   primaryButtonClass,
   secondaryButtonClass,
 } from '../components/Modal'
+import { Pagination, usePagination } from '../components/Pagination'
 import { PermissionGate } from '../components/PermissionGate'
 import { Toast } from '../components/Toast'
 import type { EscalationEntry } from '../lib/types'
@@ -270,6 +271,14 @@ export function Escalations() {
   const overdueCount = items.filter((entry) => entry.overdue).length
   const hasConditions = Boolean(q || filterSource || onlyOverdue || sort !== 'default')
 
+  // ---- 分页：状态页签 / 条件变化回到第 1 页（越界页码自动夹取）----
+  const pg = usePagination(sorted.length, 10)
+  const { setPage } = pg
+  useEffect(() => {
+    setPage(1)
+  }, [status, query, filterSource, onlyOverdue, sort, setPage])
+  const paged = sorted.slice(pg.start, pg.start + pg.pageSize)
+
   /** 页签计数（stats 为全量口径，不随 status 变化）。 */
   const tabCount = (tab: StatusFilter): number => {
     const stats = data?.stats
@@ -444,8 +453,9 @@ export function Escalations() {
               </div>
             </div>
           ) : (
+          <>
           <div className="mt-5 grid gap-3 lg:grid-cols-2">
-            {sorted.map((entry) => {
+            {paged.map((entry) => {
               const meta = STATUS_META[entry.status]
               const open = entry.status !== 'closed'
               return (
@@ -521,6 +531,8 @@ export function Escalations() {
               )
             })}
           </div>
+          <Pagination pg={pg} />
+          </>
           )
         ) : (
           <div className="mt-5">

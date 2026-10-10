@@ -1,11 +1,12 @@
 /** 流程列表：状态 / 阶段 / 服务过滤 + 明细表（设计方案 7.3）。 */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, describeError } from '../lib/api'
 import { fmtDateTime, fmtDuration } from '../lib/format'
 import { EmptyState } from '../components/EmptyState'
+import { Pagination, usePagination } from '../components/Pagination'
 import { STAGE_META, StageBadge } from '../components/StageBadge'
 
 const STAGE_OPTIONS = [
@@ -39,6 +40,14 @@ export function Flows() {
     queryFn: () => api.flows({ status, stage: stage || undefined, service: service || undefined }),
     refetchInterval: 5000,
   })
+
+  // ---- 分页：过滤条件变化回到第 1 页（总数变化时越界页码自动夹取）----
+  const pg = usePagination(data?.items.length ?? 0, 20)
+  const { setPage } = pg
+  useEffect(() => {
+    setPage(1)
+  }, [status, stage, service, setPage])
+  const view = data ? data.items.slice(pg.start, pg.start + pg.pageSize) : []
 
   return (
     <div>
@@ -76,6 +85,7 @@ export function Flows() {
 
       {data &&
         (data.items.length ? (
+          <>
           <div className="mt-4 overflow-x-auto rounded-xl border border-line bg-panel">
             <table className="w-full text-sm">
               <thead>
@@ -90,7 +100,7 @@ export function Flows() {
                 </tr>
               </thead>
               <tbody>
-                {data.items.map((item) => (
+                {view.map((item) => (
                   <tr key={item.wf_id} className="border-b border-line/60 last:border-0 hover:bg-elevated/60">
                     <td className="px-4 py-2.5 font-mono text-xs">{item.wf_id}</td>
                     <td className="px-4 py-2.5">{item.alert?.service ?? '—'}</td>
@@ -117,6 +127,8 @@ export function Flows() {
               </tbody>
             </table>
           </div>
+          <Pagination pg={pg} />
+          </>
         ) : (
           <div className="mt-4">
             <EmptyState title="没有匹配的流程" hint="调整过滤条件，或等待新告警接入" />

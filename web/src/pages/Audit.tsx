@@ -1,6 +1,6 @@
 /** 审计回看：终态流程审计 + 控制台操作审计（设计方案 7.5）。 */
 
-import { Fragment, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api, describeError } from '../lib/api'
@@ -10,6 +10,7 @@ import { ActionButton } from '../components/ActionButton'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { EmptyState } from '../components/EmptyState'
 import { EventTimeline } from '../components/EventTimeline'
+import { Pagination, usePagination } from '../components/Pagination'
 import { StageBadge } from '../components/StageBadge'
 import { Toast } from '../components/Toast'
 
@@ -137,6 +138,16 @@ export function Audit() {
     refetchInterval: 15000,
   })
 
+  // ---- 分页：q / 时间范围 / 页签变化回到第 1 页；流程审计与操作审计各自独立 ----
+  const flowsPg = usePagination(data?.items.length ?? 0, 20)
+  const opsPg = usePagination(data?.ops.length ?? 0, 20)
+  const { setPage: setFlowsPage } = flowsPg
+  const { setPage: setOpsPage } = opsPg
+  useEffect(() => {
+    setFlowsPage(1)
+    setOpsPage(1)
+  }, [q, days, tab, setFlowsPage, setOpsPage])
+
   return (
     <div>
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -198,6 +209,7 @@ export function Audit() {
 
       {data && tab === 'flows' && (
         data.items.length ? (
+          <>
           <div className="mt-4 overflow-x-auto rounded-xl border border-line bg-panel">
             <table className="w-full text-sm">
               <thead>
@@ -212,7 +224,7 @@ export function Audit() {
                 </tr>
               </thead>
               <tbody>
-                {data.items.map((item) => (
+                {data.items.slice(flowsPg.start, flowsPg.start + flowsPg.pageSize).map((item) => (
                   <Fragment key={item.wf_id}>
                   <tr className="border-b border-line/60 last:border-0 hover:bg-elevated/60">
                     <td className="px-4 py-2.5 text-xs text-muted">{fmtDateTime(item.close_time)}</td>
@@ -255,6 +267,8 @@ export function Audit() {
               </tbody>
             </table>
           </div>
+          <Pagination pg={flowsPg} />
+          </>
         ) : (
           <div className="mt-4">
             <EmptyState title="没有匹配的审计记录" hint="调整搜索条件或时间范围" />
@@ -266,6 +280,7 @@ export function Audit() {
 
       {data && tab === 'ops' && (
         data.ops.length ? (
+          <>
           <div className="mt-4 overflow-x-auto rounded-xl border border-line bg-panel">
             <table className="w-full text-sm">
               <thead>
@@ -280,7 +295,7 @@ export function Audit() {
                 </tr>
               </thead>
               <tbody>
-                {data.ops.map((row, index) => {
+                {data.ops.slice(opsPg.start, opsPg.start + opsPg.pageSize).map((row, index) => {
                   // 仅「工作流 ID」才可跳转；配置类操作的对象（target）不是工作流，渲染为纯文本。
                   // 用前缀判断而非依赖新字段，历史记录同样不再产生坏链。
                   const isWorkflow = row.wf_id.startsWith('aiops-fix-')
@@ -306,7 +321,10 @@ export function Audit() {
                         </span>
                       )}
                     </td>
-                    <td className="max-w-60 truncate px-4 py-2.5 font-mono text-xs text-muted">
+                    <td
+                      className="max-w-60 truncate px-4 py-2.5 font-mono text-xs text-muted"
+                      title={Object.keys(row.params).length ? JSON.stringify(row.params) : undefined}
+                    >
                       {Object.keys(row.params).length ? JSON.stringify(row.params) : '—'}
                     </td>
                     <td className="whitespace-nowrap px-4 py-2.5 text-xs text-muted">{row.result}</td>
@@ -347,6 +365,8 @@ export function Audit() {
               </tbody>
             </table>
           </div>
+          <Pagination pg={opsPg} />
+          </>
         ) : (
           <div className="mt-4">
             <EmptyState title="暂无控制台操作记录" hint="在控制台执行的审批 / 窗口操作会追加到这里" />
