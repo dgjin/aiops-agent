@@ -5,11 +5,15 @@
  *   前端以「已超时未处置 / 已再升级」标记提示值班同学；
  * - 处置路径：指派责任人 → 手动关闭（备注留档）或「重试修复」（新幂等键重启完整修复链路）；
  *   需求来源的待办（entry.requirement）重试时重启需求修复流（批准版方案 → 沙箱 → 审批 → 发布）。
+ * - 内容管理：关键词搜索（服务 / 升级原因 / 告警 / 工作流 / 责任人 / 备注）+ 来源筛选
+ *   （告警 / 需求）+ 仅看超时 + 排序（待处置优先 / 最近登记 / 最早登记）；状态页签带全量
+ *   计数；卡片双列布局（超长原因截断，悬停看全文）——均前端内存计算，状态页签仍走服务端。
  */
 
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { Search, X } from 'lucide-react'
 import { api, describeError } from '../lib/api'
 import { cn, fmtDateTime } from '../lib/format'
 import { useWriteAction } from '../lib/actions'
@@ -40,6 +44,36 @@ const STATUS_META: Record<EscalationEntry['status'], { label: string; cls: strin
   open: { label: '待指派', cls: 'border-danger/40 text-danger' },
   assigned: { label: '已指派', cls: 'border-warn/40 text-warn' },
   closed: { label: '已关闭', cls: 'border-ok/40 text-ok' },
+}
+
+/** 筛选/排序下拉统一输入样式（同 Requirements / Audit 页 INPUT_CLS 族）。 */
+const SELECT_CLS =
+  'rounded-lg border border-line bg-panel px-2 py-1.5 text-xs text-ink focus:border-accent/50 focus:outline-none'
+
+/** 排序方式：待处置优先（默认）/ 最近登记 / 最早登记。 */
+const SORT_OPTIONS = [
+  { key: 'default', label: '待处置优先' },
+  { key: 'escalated_desc', label: '最近登记' },
+  { key: 'escalated_asc', label: '最早登记' },
+] as const
+type SortKey = (typeof SORT_OPTIONS)[number]['key']
+
+/** 状态权重（默认排序组内：open → assigned → closed）。 */
+const STATUS_RANK: Record<EscalationEntry['status'], number> = { open: 0, assigned: 1, closed: 2 }
+
+const tsOf = (value: string | null | undefined): number => (value ? Date.parse(value) : 0)
+
+/** 默认排序：未关闭在前 → 超时在前 → 状态权重 → 早登记先处置。 */
+function compareEscalations(a: EscalationEntry, b: EscalationEntry, sort: SortKey): number {
+  if (sort === 'escalated_desc') return tsOf(b.escalated_at) - tsOf(a.escalated_at)
+  if (sort === 'escalated_asc') return tsOf(a.escalated_at) - tsOf(b.escalated_at)
+  const closed = Number(a.status === 'closed') - Number(b.status === 'closed')
+  if (closed) return closed
+  const overdue = Number(b.overdue) - Number(a.overdue)
+  if (overdue) return overdue
+  const rank = STATUS_RANK[a.status] - STATUS_RANK[b.status]
+  if (rank) return rank
+  return tsOf(a.escalated_at) - tsOf(b.escalated_at)
 }
 
 /** 指派/改派责任人（提交即热生效，落操作审计）。 */
@@ -188,6 +222,10 @@ function CloseDialog({ entry, onClose }: { entry: EscalationEntry; onClose: () =
 export function Escalations() {
   const write = useWriteAction()
   const [status, setStatus] = useState<StatusFilter>('all')
+  const [query, setQuery] = useState('')
+  const [filterSource, setFilterSource] = useState('')
+  const [onlyOverdue, setOnlyOverdue] = useState(false)
+  const [sort, setSort] = useState<SortKey>('default')
   const [assignTarget, setAssignTarget] = useState<EscalationEntry | null>(null)
   const [closeTarget, setCloseTarget] = useState<EscalationEntry | null>(null)
 
@@ -196,6 +234,51 @@ export function Escalations() {
     queryFn: () => api.escalations(status),
     refetchInterval: 3000,
   })
+
+  /** 重置全部内容管理条件。 */
+  const resetConditions = () => {
+    setQuery('')
+    setFilterSource('')
+    setOnlyOverdue(false)
+    setSort('default')
+  }
+
+  // ---- 内容管理：搜索 + 筛选 + 排序（前端内存计算；状态页签仍走服务端过滤）----
+  const items = data?.escalations ?? []
+  const q = query.trim().toLowerCase()
+  const matched = items.filter((entry) => {
+    if (filterSource === 'requirement' && !entry.requirement) return false
+    if (filterSource === 'alert' && entry.requirement) return false
+    if (onlyOverdue && !entry.overdue) return false
+    if (!q) return true
+    // 命中范围：服务 / 升级原因 / 告警 / 工作流 / 责任人 / 备注 / 来源标签
+    const haystack = [
+      entry.service,
+      entry.auto_reason,
+      entry.alert_id,
+      entry.wf_id,
+      entry.assignee,
+      entry.note,
+      entry.requirement ? '需求' : '告警',
+    ]
+      .map((value) => String(value ?? ''))
+      .join('\n')
+      .toLowerCase()
+    return haystack.includes(q)
+  })
+  const sorted = [...matched].sort((a, b) => compareEscalations(a, b, sort))
+  const overdueCount = items.filter((entry) => entry.overdue).length
+  const hasConditions = Boolean(q || filterSource || onlyOverdue || sort !== 'default')
+
+  /** 页签计数（stats 为全量口径，不随 status 变化）。 */
+  const tabCount = (tab: StatusFilter): number => {
+    const stats = data?.stats
+    if (!stats) return 0
+    if (tab === 'open') return stats.open
+    if (tab === 'assigned') return stats.assigned
+    if (tab === 'closed') return stats.closed
+    return stats.total
+  }
 
   const openRetry = (entry: EscalationEntry) => {
     write.open({
@@ -229,19 +312,8 @@ export function Escalations() {
         升级人工后的处置闭环（3 秒自动刷新）：指派责任人 → 处置关闭或重试修复；超时未处置将自动再升级
       </p>
 
-      {data && (
-        <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
-          <span>共 {data.stats.total} 条</span>
-          <span className="text-danger">待指派 {data.stats.open}</span>
-          <span className="text-warn">已指派 {data.stats.assigned}</span>
-          <span className="text-ok">已关闭 {data.stats.closed}</span>
-          <span className="text-idle">
-            SLA {data.stats.sla_minutes} 分钟：超时未处置自动再升级一次（每单一次，防轰炸）
-          </span>
-        </div>
-      )}
-
-      <div className="mt-4 flex gap-1.5">
+      {/* 状态页签（计数为全量口径）+ SLA 说明 */}
+      <div className="mt-4 flex flex-wrap items-center gap-1.5">
         {STATUS_TABS.map((tab) => (
           <button
             key={tab.value}
@@ -255,9 +327,97 @@ export function Escalations() {
             )}
           >
             {tab.label}
+            <span className={cn('ml-1 font-mono', status === tab.value ? 'text-accent' : 'text-idle')}>
+              {tabCount(tab.value)}
+            </span>
           </button>
         ))}
+        {data && (
+          <span className="ml-auto text-xs text-idle">
+            SLA {data.stats.sla_minutes} 分钟：超时未处置自动再升级一次（每单一次，防轰炸）
+          </span>
+        )}
       </div>
+
+      {data && (
+        <>
+          {/* 工具条：搜索 + 来源筛选 + 仅看超时 + 排序 + 计数 */}
+          <div className="mt-2.5 flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <Search
+                size={13}
+                className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-idle"
+              />
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') setQuery('')
+                }}
+                placeholder="搜索服务 / 原因 / 告警 / 工作流 / 责任人"
+                className="w-72 rounded-lg border border-line bg-panel py-1.5 pl-8 pr-7 text-xs text-ink placeholder:text-idle focus:border-accent/50 focus:outline-none"
+              />
+              {query && (
+                <button
+                  type="button"
+                  onClick={() => setQuery('')}
+                  title="清除搜索"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-idle transition-colors hover:text-ink"
+                >
+                  <X size={13} />
+                </button>
+              )}
+            </div>
+            <select
+              value={filterSource}
+              onChange={(event) => setFilterSource(event.target.value)}
+              className={SELECT_CLS}
+            >
+              <option value="">全部来源</option>
+              <option value="alert">告警来源</option>
+              <option value="requirement">需求来源</option>
+            </select>
+            {overdueCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setOnlyOverdue((value) => !value)}
+                title="只看已超 SLA 未处置的待办"
+                className={cn(
+                  'rounded-lg border px-2 py-1.5 text-xs transition-colors',
+                  onlyOverdue
+                    ? 'border-danger/40 bg-danger/10 text-danger'
+                    : 'border-line text-muted hover:bg-elevated hover:text-ink',
+                )}
+              >
+                仅看超时（{overdueCount}）
+              </button>
+            )}
+            <select
+              value={sort}
+              onChange={(event) => setSort(event.target.value as SortKey)}
+              className={SELECT_CLS}
+            >
+              {SORT_OPTIONS.map((option) => (
+                <option key={option.key} value={option.key}>
+                  排序：{option.label}
+                </option>
+              ))}
+            </select>
+            {hasConditions && (
+              <button
+                type="button"
+                onClick={resetConditions}
+                className="rounded-lg border border-line px-2 py-1.5 text-xs text-muted transition-colors hover:bg-elevated hover:text-ink"
+              >
+                重置条件
+              </button>
+            )}
+            <span className="ml-auto text-xs text-muted">
+              显示 <span className="text-ink">{sorted.length}</span> / 共 {items.length} 条
+            </span>
+          </div>
+        </>
+      )}
 
       {isError && (
         <div className="mt-5">
@@ -266,15 +426,32 @@ export function Escalations() {
       )}
 
       {data &&
-        (data.escalations.length ? (
-          <div className="mt-5 space-y-3">
-            {data.escalations.map((entry) => {
+        (items.length ? (
+          sorted.length === 0 ? (
+            <div className="mt-5">
+              <EmptyState
+                title="没有匹配的待办"
+                hint="试试调整关键词，或重置筛选条件查看全部待办"
+              />
+              <div className="mt-3 flex justify-center">
+                <button
+                  type="button"
+                  onClick={resetConditions}
+                  className="rounded-lg border border-accent/40 px-3.5 py-1.5 text-xs font-medium text-accent transition-colors hover:bg-accent/10"
+                >
+                  重置条件
+                </button>
+              </div>
+            </div>
+          ) : (
+          <div className="mt-5 grid gap-3 lg:grid-cols-2">
+            {sorted.map((entry) => {
               const meta = STATUS_META[entry.status]
               const open = entry.status !== 'closed'
               return (
                 <div key={entry.id} className="rounded-xl border border-line bg-panel p-4">
-                  <div className="flex flex-wrap items-start justify-between gap-4">
-                    <div className="min-w-0">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-3">
                         <span className="text-sm font-medium">{entry.service || '未知服务'}</span>
                         <span className={cn('rounded border px-1.5 py-0.5 text-[10px]', meta.cls)}>
@@ -296,8 +473,11 @@ export function Escalations() {
                           </span>
                         )}
                       </div>
-                      <div className="mt-2 text-xs text-muted">
-                        升级原因：<span className="text-ink">{entry.auto_reason}</span>
+                      <div className="mt-2 flex gap-1 text-xs text-muted">
+                        <span className="shrink-0">升级原因：</span>
+                        <span className="line-clamp-2 text-ink" title={entry.auto_reason}>
+                          {entry.auto_reason}
+                        </span>
                       </div>
                       <div className="mt-1.5 flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-muted">
                         <span>
@@ -317,30 +497,31 @@ export function Escalations() {
                         )}
                       </div>
                     </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Link
-                        to={`/flows/${encodeURIComponent(entry.wf_id)}`}
-                        className="text-xs text-accent hover:underline"
-                      >
-                        流程详情 →
-                      </Link>
-                      {open && (
-                        <PermissionGate require="operator">
-                          <ActionButton onClick={() => setAssignTarget(entry)}>
-                            {entry.assignee ? '改派' : '指派'}
-                          </ActionButton>
-                          <ActionButton onClick={() => setCloseTarget(entry)}>处置关闭</ActionButton>
-                          <ActionButton tone="accent" onClick={() => openRetry(entry)}>
-                            重试修复
-                          </ActionButton>
-                        </PermissionGate>
-                      )}
-                    </div>
+                    <Link
+                      to={`/flows/${encodeURIComponent(entry.wf_id)}`}
+                      className="shrink-0 text-xs text-accent hover:underline"
+                    >
+                      流程详情 →
+                    </Link>
                   </div>
+                  {open && (
+                    <PermissionGate require="operator" fallback={null}>
+                      <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-line/60 pt-3">
+                        <ActionButton onClick={() => setAssignTarget(entry)}>
+                          {entry.assignee ? '改派' : '指派'}
+                        </ActionButton>
+                        <ActionButton onClick={() => setCloseTarget(entry)}>处置关闭</ActionButton>
+                        <ActionButton tone="accent" onClick={() => openRetry(entry)}>
+                          重试修复
+                        </ActionButton>
+                      </div>
+                    </PermissionGate>
+                  )}
                 </div>
               )
             })}
           </div>
+          )
         ) : (
           <div className="mt-5">
             <EmptyState
