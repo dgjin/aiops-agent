@@ -35,7 +35,12 @@ import urllib.request
 from pathlib import Path
 
 from . import code_rag, sandbox
-from .fix_agent import _normalize_rel, apply_unified_diff, split_unified_diff
+from .fix_agent import (
+    _normalize_rel,
+    apply_unified_diff,
+    is_new_file_diff,
+    split_unified_diff,
+)
 from .models import Alert, CanaryResult, Patch, ReleaseResult
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -391,6 +396,15 @@ def _page_probe_once(url: str, keyword: str) -> bool:
         return False
 
 
+def _restore_direct_backups(backups: dict[Path, str | None]) -> None:
+    """还原直连发布的文件改动：备份为原文者写回；备份为 None（新增文件）者删除。"""
+    for path, content in backups.items():
+        if content is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(content, encoding="utf-8")
+
+
 def run_canary_direct(
     patch: Patch,
     repo_dir: Path | str,
@@ -402,12 +416,13 @@ def run_canary_direct(
     """直连发布金丝雀（契约应用专用）：补丁直接应用到真实仓库，以真实页面探针观测。
 
     适用于本机开发态前端（vite dev 落盘即生效）等无容器交付面的应用：
-    备份补丁涉及文件 → 按 diff 改写真实仓库 → 探针 URL（HTTP 200 且含契约关键词）
-    → 健康：保持生效（=已全量发布）；劣化：还原补丁前文件（=真实回滚）。
+    备份补丁涉及文件 → 按 diff 改写真实仓库（含新增文件：--- /dev/null 形态直接创建）
+    → 探针 URL（HTTP 200 且含契约关键词）
+    → 健康：保持生效（=已全量发布）；劣化：还原补丁前文件（新增文件删除，=真实回滚）。
     应用阶段任一文件失败：还原已写文件后抛错（不留半成品，交由 Temporal 重试）。
     """
     repo_dir = Path(repo_dir)
-    backups: dict[Path, str] = {}
+    backups: dict[Path, str | None] = {}  # 原文；None = 补丁前不存在（新增文件）
     try:
         sections = split_unified_diff(patch.diff)
         if len(sections) > 1:
@@ -416,17 +431,23 @@ def run_canary_direct(
             items = [(_normalize_rel(patch.files[0]) if patch.files else "", patch.diff)]
         for rel, file_diff in items:
             target = repo_dir / rel
-            if not target.is_file():
+            original: str | None
+            if target.is_file():
+                original = target.read_text(encoding="utf-8")
+            elif is_new_file_diff(file_diff):
+                original = None  # 新增文件（需求实现常见形态）：以空原文应用
+            else:
                 raise RuntimeError(f"直连发布失败：仓库中目标文件不存在: {rel}")
-            original = target.read_text(encoding="utf-8")
-            new_text = apply_unified_diff(original, file_diff)
+            new_text = apply_unified_diff(original or "", file_diff)
             if new_text is None:
                 raise RuntimeError(f"直连发布失败：补丁 diff 无法应用（上下文不匹配）: {rel}")
+            if original is None and not new_text.endswith("\n"):
+                new_text += "\n"
             backups[target] = original
+            target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(new_text, encoding="utf-8")
     except Exception:
-        for path, content in backups.items():
-            path.write_text(content, encoding="utf-8")
+        _restore_direct_backups(backups)
         raise
 
     _page_probe_once(url, keyword)  # 预热一次（不计入统计）：热更新场景首个请求可能仍在重编译
@@ -460,8 +481,7 @@ def run_canary_direct(
         observation = (
             f"直连发布劣化：{'；'.join(reasons)}（{total} 次真实页面探针，已还原补丁前文件）"
         )
-        for path, content in backups.items():
-            path.write_text(content, encoding="utf-8")
+        _restore_direct_backups(backups)
     return CanaryResult(
         patch_id=patch.patch_id,
         traffic_percent=traffic_percent,

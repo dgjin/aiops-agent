@@ -4,7 +4,8 @@
     - 健康：补丁落盘生效且保持（=已发布）；
     - 劣化：探针失败 → 全部涉及文件还原为补丁前内容（=真实回滚）；
     - 目标文件缺失：抛错且不留半成品；
-    - 多文件补丁：逐文件应用与还原。
+    - 多文件补丁：逐文件应用与还原；
+    - 新增文件（--- /dev/null）：健康时创建；劣化/失败时删除（不留残留）。
 """
 
 from __future__ import annotations
@@ -53,12 +54,23 @@ MULTI_DIFF = DIFF + (
     "+new value\n"
 )
 
+NEW_FILE_DIFF = (
+    "--- /dev/null\n"
+    "+++ b/userPersonal.ts\n"
+    "@@ -0,0 +1,3 @@\n"
+    "+export const displayName = 'x';\n"
+    "+export const theme = 'dark';\n"
+    "+export const unit = '元';\n"
+)
 
-def _patch(*, diff: str = DIFF) -> Patch:
+MIXED_NEW_DIFF = DIFF + NEW_FILE_DIFF
+
+
+def _patch(*, diff: str = DIFF, files: list[str] | None = None) -> Patch:
     return Patch(
         patch_id="p-direct-u1-r0",
         alert_id="direct-u1",
-        files=["index.html"],
+        files=files or ["index.html"],
         diff=diff,
         description="直连发布单测",
         risk="low",
@@ -134,6 +146,49 @@ class TestRunCanaryDirect(unittest.TestCase):
         self.assertIn(FAIL_TEXT, self.page.read_text(encoding="utf-8"))
         self.assertIn("old value", extra.read_text(encoding="utf-8"))
         self.assertNotIn("new value", extra.read_text(encoding="utf-8"))
+
+    def test_new_file_healthy_creates_and_keeps(self) -> None:
+        new_file = self.repo / "userPersonal.ts"
+        self.assertFalse(new_file.exists())
+        result = self._run(
+            probe_ok=True, patch=_patch(diff=NEW_FILE_DIFF, files=["userPersonal.ts"])
+        )
+        self.assertTrue(result.healthy, result.observation)
+        content = new_file.read_text(encoding="utf-8")
+        self.assertIn("displayName", content)
+        self.assertTrue(content.endswith("\n"))
+
+    def test_new_file_degraded_removes_created(self) -> None:
+        new_file = self.repo / "userPersonal.ts"
+        result = self._run(
+            probe_ok=False, patch=_patch(diff=NEW_FILE_DIFF, files=["userPersonal.ts"])
+        )
+        self.assertFalse(result.healthy, result.observation)
+        self.assertFalse(new_file.exists(), "劣化回滚后新增文件不应残留")
+
+    def test_mixed_existing_and_new_degraded_restores_both(self) -> None:
+        new_file = self.repo / "userPersonal.ts"
+        result = self._run(probe_ok=False, patch=_patch(diff=MIXED_NEW_DIFF))
+        self.assertFalse(result.healthy, result.observation)
+        self.assertIn(FAIL_TEXT, self.page.read_text(encoding="utf-8"))
+        self.assertNotIn(OK_TEXT, self.page.read_text(encoding="utf-8"))
+        self.assertFalse(new_file.exists(), "混合补丁劣化后新增文件不应残留")
+
+    def test_mixed_existing_and_new_apply_failure_cleans_up(self) -> None:
+        # 既有文件先写入成功、新增文件段不可应用（含需匹配的上下文行但空原文无从匹配）
+        # → 抛错且既有文件回滚、无新文件残留
+        broken_new = (
+            "--- /dev/null\n"
+            "+++ b/userPersonal.ts\n"
+            "@@ -1,2 +1,3 @@\n"
+            " pre-existing context\n"
+            "+export const x = 1;\n"
+        )
+        new_file = self.repo / "userPersonal.ts"
+        with self.assertRaises(RuntimeError):
+            self._run(probe_ok=True, patch=_patch(diff=DIFF + broken_new))
+        self.assertIn(FAIL_TEXT, self.page.read_text(encoding="utf-8"))
+        self.assertFalse(new_file.exists())
 
 
 if __name__ == "__main__":

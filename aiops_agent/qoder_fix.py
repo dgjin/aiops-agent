@@ -48,12 +48,13 @@ DEFAULT_QODER_MODEL = "DeepSeek-Flash"
 DEFAULT_PERMISSION_MODE = "accept_edits"
 DEFAULT_ALLOWED_TOOLS = "Read,Edit,Write,Grep,Glob"
 DEFAULT_DISALLOWED_TOOLS = "Bash"
-# 2026-10-10 实测：DeepSeek-Flash 在真实前端仓库（约 2.2k 文件）中 20 轮全部耗于只读
-# 探索（Glob/Grep/Read）即被 error_max_turns 掐断、从未进入编辑（changed=False），
-# 连续 3 次重试均同一失败模式后转人工。预算上调为 60 轮 / 600s，并在 prompt 中加入
-# 「先锁定、早编辑」效率策略（见 build_qoder_prompt）。
-DEFAULT_TIMEOUT = 600
-DEFAULT_MAX_TURNS = 60
+# 2026-10-10 实测：DeepSeek-Flash 在真实前端仓库（约 2.2k 文件）中探索占比高——
+# 首测 20 轮全部耗于只读探索即被 error_max_turns 掐断（changed=False）；60 轮下需求类
+# 大改动（跨前后端多文件，实测 73 次只读探索 + 6 次编辑）仍在编辑中途被掐断，产出
+# 不完整补丁。现预算 100 轮 / 720s，并在 prompt 中加入「先锁定、早编辑」效率策略
+# （见 build_qoder_prompt）。约束：本值 + 快速重试预算（180s）< workflows._FIX_ACTIVITY_TIMEOUT。
+DEFAULT_TIMEOUT = 720
+DEFAULT_MAX_TURNS = 100
 
 # 服务端瞬时故障「快速重试」参数（2026-10-09 排查结论）：
 # Qoder 服务端在会话初始化阶段会间歇性返回 500（subtype=error_during_execution、
@@ -264,7 +265,7 @@ def build_qoder_prompt(
 {target_block}
 
 ## 效率策略（重要）
-- 先用最少的只读探索（建议不超过 8 次 Glob/Grep/Read，优先直接读取上述嫌疑文件）快速锁定改动文件与具体行号；
+- 先用最少的只读探索（Glob/Grep/Read 合计控制在 40 次以内，优先直接读取上述嫌疑文件）快速锁定改动文件与具体行号；
 - 锁定后必须立即开始用 Edit/Write 修改，不要继续无目的扫描；工具调用总预算有限，务必预留编辑时间；
 - 禁止重复读取同一文件；禁止对无关目录做大范围扫描。
 
