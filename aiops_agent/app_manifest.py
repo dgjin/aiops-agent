@@ -12,7 +12,7 @@ AIOps 控制台「从标准接口自动探测」据此预填接入配置（名�
 spec_version      *       接口规范版本（如 "1.0"）；主版本不符仅告警
 service           *       服务标识（与告警 / 日志 / 清单中的 ``service`` 一致）
 name                      人类可读名称（控制台默认展示名）
-probe_keyword             健康页响应须包含的关键字（在线判据 / 修复后验证）
+probe_keyword             健康页响应须包含的关键字（在线探针判据）
 health_path               健康检查路径（相对根地址，校验工具用）
 metrics_path              Prometheus 指标路径（观测增强，可空）
 log_path                  应用日志文件路径（支持 ``*`` 通配，采集器据此监听）

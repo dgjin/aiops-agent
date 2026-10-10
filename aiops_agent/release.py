@@ -386,7 +386,7 @@ def run_finalize(
 
 
 def _page_probe_once(url: str, keyword: str) -> bool:
-    """对真实页面请求一次：HTTP 200 且响应体包含契约关键词 → 健康。"""
+    """对真实页面请求一次：HTTP 200 且（配置探针关键词时）响应体包含该关键词 → 健康。"""
     request = urllib.request.Request(url, headers={"User-Agent": "aiops-canary/1.0"})
     try:
         with urllib.request.urlopen(request, timeout=3) as resp:
@@ -417,7 +417,7 @@ def run_canary_direct(
 
     适用于本机开发态前端（vite dev 落盘即生效）等无容器交付面的应用：
     备份补丁涉及文件 → 按 diff 改写真实仓库（含新增文件：--- /dev/null 形态直接创建）
-    → 探针 URL（HTTP 200 且含契约关键词）
+    → 探针 URL（HTTP 200；配置探针关键词时须包含该关键词）
     → 健康：保持生效（=已全量发布）；劣化：还原补丁前文件（新增文件删除，=真实回滚）。
     应用阶段任一文件失败：还原已写文件后抛错（不留半成品，交由 Temporal 重试）。
     """

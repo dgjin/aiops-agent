@@ -69,7 +69,7 @@ def _resolve_repo_dir(service: str) -> Path | None:
     entry = _resolve_app(service)
     if entry:
         log.info(
-            "[registry] 服务 %s → 修复仓库 %s（契约关键词=%s）",
+            "[registry] 服务 %s → 修复仓库 %s（探针关键词=%s）",
             service,
             entry["repo"],
             (entry.get("contract") or {}).get("keyword") or "无",

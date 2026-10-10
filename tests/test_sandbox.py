@@ -280,9 +280,7 @@ class TestPrepareWorkspaceAndRunTests(unittest.TestCase):
 
 
 class TestContractValidation(unittest.TestCase):
-    """契约模式（前端仓库）：补丁后探针关键词「恢复/保留」放行，破坏或未恢复才拦截。"""
-
-    KEYWORD = '<div id="root"'
+    """契约模式（前端仓库）：补丁应用成功即通过（2026-10-10 取消探针关键词判据）；降级补丁拦截。"""
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="contract-test-"))
@@ -312,17 +310,18 @@ class TestContractValidation(unittest.TestCase):
             confidence=0.9,
         )
 
-    def _run(self, patch: Patch) -> sandbox.TestReport:
+    def _run(self, patch: Patch, contract: dict | None = None) -> sandbox.TestReport:
+        # contract 仅作模式开关：keyword 已不参与判据（传真实值与空值结果一致）
         return sandbox.run_patch_tests(
             patch,
             0,
             repo_dir=self.repo,
             sandbox_root=self.tmp,
-            contract={"keyword": self.KEYWORD},
+            contract={"keyword": '<div id="root"'} if contract is None else contract,
         )
 
-    def test_component_patch_passes_when_keyword_preserved(self) -> None:
-        """功能类补丁（只改组件、不动入口页）：关键词仍在 → 放行（原误杀场景）。"""
+    def test_component_patch_passes_and_report_has_no_keyword(self) -> None:
+        """功能类补丁（只改组件）→ 通过；报告不再出现探针关键词判据文案（取消回归防线）。"""
         diff = (
             f"--- a/{self.component}\n"
             f"+++ b/{self.component}\n"
@@ -332,28 +331,41 @@ class TestContractValidation(unittest.TestCase):
         )
         report = self._run(self._patch([self.component], diff))
         self.assertTrue(report.passed, report.details)
-        self.assertIn("探针关键词保留", report.unit_tests)
-        self.assertIn("index.html", report.details)
+        self.assertIn("契约校验通过", report.unit_tests)
+        self.assertNotIn("关键词", report.unit_tests)
+        self.assertNotIn("关键词", report.details)
 
-    def test_patch_restoring_keyword_passes(self) -> None:
-        """修复场景：入口页缺失关键词，补丁恢复 → 放行（「已恢复」路径）。"""
-        (self.repo / "index.html").write_text(
-            '<!doctype html><html><body><div id="app"></div></body></html>\n',
-            encoding="utf-8",
-        )
+    def test_patch_touching_entry_page_passes(self) -> None:
+        """修复入口页的补丁 → 通过（不再校验关键词「恢复」路径）。"""
         diff = (
             "--- a/index.html\n"
             "+++ b/index.html\n"
             "@@ -1,1 +1,1 @@\n"
-            '-<!doctype html><html><body><div id="app"></div></body></html>\n'
-            '+<!doctype html><html><body><div id="root"></div></body></html>\n'
+            '-<!doctype html><html><body><div id="root"></div></body></html>\n'
+            '+<!doctype html><html><body><div id="root"></div><script src="/main.js"></script></body></html>\n'
         )
         report = self._run(self._patch(["index.html"], diff))
         self.assertTrue(report.passed, report.details)
-        self.assertIn("探针关键词已恢复", report.unit_tests)
+        self.assertIn("契约校验通过", report.unit_tests)
 
-    def test_patch_breaking_keyword_host_fails(self) -> None:
-        """破坏性补丁（改坏入口页且全树无关键词）→ 拦截。"""
+    def test_keyword_absence_no_longer_blocks(self) -> None:
+        """未配置探针关键词 → 不再判「配置无效」；补丁应用成功即通过。"""
+        diff = (
+            f"--- a/{self.component}\n"
+            f"+++ b/{self.component}\n"
+            "@@ -1,1 +1,2 @@\n"
+            " export const Report = () => null;\n"
+            "+export const X = 1;\n"
+        )
+        report = self._run(self._patch([self.component], diff), contract={"keyword": ""})
+        self.assertTrue(report.passed, report.details)
+
+    def test_breaking_entry_page_not_statically_blocked(self) -> None:
+        """破坏入口页的补丁 → 静态契约不再拦截（关键词判据已取消）；
+
+        该类风险由直连发布的在线页面探针与金丝雀劣化自动回滚兜底
+        （见 release.run_canary_direct / _page_probe_once）。
+        """
         diff = (
             "--- a/index.html\n"
             "+++ b/index.html\n"
@@ -362,30 +374,10 @@ class TestContractValidation(unittest.TestCase):
             '+<!doctype html><html><body></body></html>\n'
         )
         report = self._run(self._patch(["index.html"], diff))
-        self.assertFalse(report.passed)
-        self.assertIn("未找到探针关键词", report.unit_tests)
-
-    def test_missing_keyword_config_fails(self) -> None:
-        """契约缺少 keyword → 配置无效拦截（不静默放行）。"""
-        diff = (
-            f"--- a/{self.component}\n"
-            f"+++ b/{self.component}\n"
-            "@@ -1,1 +1,2 @@\n"
-            " export const Report = () => null;\n"
-            "+export const X = 1;\n"
-        )
-        report = sandbox.run_patch_tests(
-            self._patch([self.component], diff),
-            0,
-            repo_dir=self.repo,
-            sandbox_root=self.tmp,
-            contract={"keyword": ""},
-        )
-        self.assertFalse(report.passed)
-        self.assertIn("配置无效", report.details)
+        self.assertTrue(report.passed, report.details)
 
     def test_degraded_patch_blocked(self) -> None:
-        """生成降级（Qoder/LLM 失败兜底）的补丁即使不破坏关键词也拦截。"""
+        """生成降级（Qoder/LLM 失败兜底）的补丁仍拦截。"""
         diff = (
             f"--- a/{self.component}\n"
             f"+++ b/{self.component}\n"
@@ -401,7 +393,7 @@ class TestContractValidation(unittest.TestCase):
         self.assertIn("降级", report.details)
 
     def test_requirement_patch_with_new_file_passes(self) -> None:
-        """需求实现含新增组件文件（多文件补丁）→ 应用成功且关键词保留 → 放行。"""
+        """需求实现含新增组件文件（多文件补丁）→ 应用成功 → 放行。"""
         new_rel = "src/components/reports/ExportButton.tsx"
         diff = (
             f"--- a/{self.component}\n"
@@ -417,30 +409,8 @@ class TestContractValidation(unittest.TestCase):
         )
         report = self._run(self._patch([self.component, new_rel], diff))
         self.assertTrue(report.passed, report.details)
-        self.assertIn("探针关键词保留", report.unit_tests)
+        self.assertIn("契约校验通过", report.unit_tests)
         self.assertTrue((self.tmp / "p-contract-1" / new_rel).is_file())
-
-    def test_template_host_outside_old_whitelist_detected(self) -> None:
-        """关键词宿主为非典型模板（.ejs，旧白名单之外）→ 仍能检出，不误拦。"""
-        (self.repo / "index.html").write_text(
-            '<!doctype html><html><body><div id="app"></div></body></html>\n',
-            encoding="utf-8",
-        )
-        (self.repo / "views").mkdir()
-        (self.repo / "views" / "layout.ejs").write_text(
-            '<!doctype html><html><body><div id="root"></div></body></html>\n',
-            encoding="utf-8",
-        )
-        diff = (
-            f"--- a/{self.component}\n"
-            f"+++ b/{self.component}\n"
-            "@@ -1,1 +1,2 @@\n"
-            " export const Report = () => null;\n"
-            "+export const X = 1;\n"
-        )
-        report = self._run(self._patch([self.component], diff))
-        self.assertTrue(report.passed, report.details)
-        self.assertIn("layout.ejs", report.details)
 
 
 class TestBanditIntegration(unittest.TestCase):

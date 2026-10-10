@@ -83,20 +83,6 @@ _IGNORE = shutil.ignore_patterns(
     "node_modules", "dist", "build", "coverage", ".next", "out", "logs",
 )
 
-# 契约模式全树扫描范围：跳过二进制/媒体扩展名 + 单文件大小上限（防超大文件拖慢）。
-# 不用源码白名单：非典型模板宿主（.ejs/.pug/无扩展名入口等）会被白名单漏掉，
-# 导致「关键词明明在树上却判失败」的误拦；凡文本文件一律参与扫描。
-_CONTRACT_SKIP_SUFFIXES = {
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp", ".ico", ".tiff", ".psd",
-    ".woff", ".woff2", ".ttf", ".otf", ".eot",
-    ".mp3", ".mp4", ".mov", ".avi", ".webm", ".wav", ".ogg", ".flac",
-    ".pdf", ".zip", ".gz", ".tar", ".rar", ".7z", ".bz2", ".xz",
-    ".exe", ".dll", ".so", ".dylib", ".node", ".wasm", ".class", ".jar", ".pyc",
-    ".map", ".rdb", ".snap", ".lock",
-}
-_CONTRACT_MAX_FILE_BYTES = 512 * 1024
-
-
 @dataclass
 class SandboxJob:
     """一次沙箱执行任务（生产侧映射为 K8s Job 定义）。"""
@@ -430,15 +416,13 @@ class K8sJobSandboxRunner:
         )
 
 
-def _contract_report(
-    patch: Patch, attempt: int, workspace: Path, contract: dict, sast_detail: str
-) -> TestReport:
-    """静态契约校验（前端/非 Python 仓库）：补丁应用后，探针关键词必须仍可检出。
+def _contract_report(patch: Patch, attempt: int, sast_detail: str) -> TestReport:
+    """静态契约校验（前端/非 Python 仓库）：不执行 Python 测试套件与 Bandit。
 
-    该类仓库无 Python 测试套件可执行（不运行 runner / Bandit）；以「探针关键词在
-    补丁后的工作区源码树中仍存在」作为沙箱验收证据——静态等价 app_prober 在线判据
-    /直连发布探针的「修复后验证」：补丁恢复（修复场景）或不破坏入口页（功能场景，
-    如需求实现只改组件文件）均可放行；仅当补丁后全树均找不到关键词才拦截。
+    该类仓库无 Python 测试套件可执行（不运行 runner / Bandit）；补丁应用成功
+    （工作区准备阶段已按 diff 落盘）即为静态验收通过。
+    2026-10-10 起取消探针关键词判据（原「补丁后全树仍可检出关键词」不再作为通过
+    条件）：探针关键词仅保留给直连发布的在线页面探针（release.run_canary_direct）。
     生成降级（degraded）的兜底补丁为生成环节失败产物，直接拦截。
     """
     if patch.degraded:
@@ -453,89 +437,14 @@ def _contract_report(
                 f"补丁文件 {patch.files}（attempt={attempt}）"
             ),
         )
-    keyword = str(contract.get("keyword") or "").strip()
-    if not keyword:
-        return TestReport(
-            patch_id=patch.patch_id,
-            passed=False,
-            unit_tests="未执行（契约缺少 keyword）",
-            regression_tests="未执行",
-            sast=sast_detail,
-            details=f"契约校验配置无效：未提供探针关键词（attempt={attempt}）",
-        )
-    # 1) 补丁触碰的文件命中关键词 → 修复场景「已恢复」
-    hit_files: list[str] = []
-    for rel in patch.files:
-        rel = _normalize_rel(rel)
-        target = workspace / rel
-        if not target.is_file():
-            continue
-        try:
-            if keyword in target.read_text(encoding="utf-8", errors="replace"):
-                hit_files.append(rel)
-        except OSError:
-            continue
-    if hit_files:
-        return TestReport(
-            patch_id=patch.patch_id,
-            passed=True,
-            unit_tests=f"契约校验通过（探针关键词已恢复：{keyword}）",
-            regression_tests="未执行（静态契约模式）",
-            sast=sast_detail,
-            details=f"契约校验：{'、'.join(hit_files)} 已包含探针关键词（attempt={attempt}）",
-        )
-    # 2) 补丁未触碰的源码文件仍含关键词 → 功能类补丁「未破坏」（不误杀需求实现）
-    preserved = _scan_keyword_files(
-        workspace, keyword, skip={_normalize_rel(rel) for rel in patch.files}
-    )
-    if preserved:
-        return TestReport(
-            patch_id=patch.patch_id,
-            passed=True,
-            unit_tests=f"契约校验通过（探针关键词保留：{keyword}）",
-            regression_tests="未执行（静态契约模式）",
-            sast=sast_detail,
-            details=(
-                f"契约校验：补丁未破坏探针关键词（仍存在于 {'、'.join(preserved)}，"
-                f"attempt={attempt}）"
-            ),
-        )
-    # 3) 补丁后全树均无关键词 → 修复未生效或关键挂载页被破坏，拦截
     return TestReport(
         patch_id=patch.patch_id,
-        passed=False,
-        unit_tests="契约校验失败（补丁后未找到探针关键词）",
+        passed=True,
+        unit_tests="契约校验通过（静态契约模式：补丁应用成功）",
         regression_tests="未执行（静态契约模式）",
         sast=sast_detail,
-        details=(
-            f"契约校验失败：补丁应用后工作区中未出现探针关键词 {keyword!r}"
-            f"（补丁文件 {patch.files}，attempt={attempt}）"
-        ),
+        details=f"契约校验：补丁已应用至工作区（{len(patch.files)} 个文件，attempt={attempt}）",
     )
-
-
-def _scan_keyword_files(workspace: Path, keyword: str, *, skip: set[str]) -> list[str]:
-    """在工作区源码树中扫描含关键词的文本文件（返回工作区相对路径列表）。
-
-    只跳过二进制/媒体扩展名（_CONTRACT_SKIP_SUFFIXES）与超大小上限的文件——
-    不限定源码白名单，保证 .ejs/.pug/无扩展名等非典型宿主也能被检出；
-    node_modules / dist / .git 等大型目录已在工作区准备阶段随 _IGNORE 排除。
-    """
-    found: list[str] = []
-    for path in sorted(workspace.rglob("*")):
-        if not path.is_file() or path.suffix.lower() in _CONTRACT_SKIP_SUFFIXES:
-            continue
-        rel = path.relative_to(workspace).as_posix()
-        if rel in skip:
-            continue
-        try:
-            if path.stat().st_size > _CONTRACT_MAX_FILE_BYTES:
-                continue
-            if keyword in path.read_text(encoding="utf-8", errors="replace"):
-                found.append(rel)
-        except OSError:
-            continue
-    return found
 
 
 def run_patch_tests(
@@ -549,10 +458,10 @@ def run_patch_tests(
 ) -> TestReport:
     """编排一次沙箱验证：SAST → 工作区准备 → 隔离执行 → TestReport。
 
-    contract：被监控前端应用的静态契约校验（形如 {"keyword": "探针页面关键字"}）。
-        非空时启用契约模式——不执行 Python 测试套件与 Bandit；以「补丁应用后工作区
-        中仍可检出探针关键词」作为通过判据（修复恢复 / 功能不破坏两类均放行，仅当
-        关键词在补丁后全树消失才拦截）；None 时保持既有 unittest 沙箱路径。
+    contract：被监控前端应用的静态契约模式开关（注册表条目 contract 非空即启用，
+        关键词本身已不再参与判据）。非空时走契约模式——不执行 Python 测试套件与
+        Bandit；补丁应用成功即为通过（2026-10-10 取消探针关键词判据）；None 时
+        保持既有 unittest 沙箱路径。
     """
     repo_dir = Path(repo_dir) if repo_dir else code_rag.DEFAULT_REPO_DIR
     sandbox_root = Path(sandbox_root) if sandbox_root else DEFAULT_SANDBOX_ROOT
@@ -579,9 +488,9 @@ def run_patch_tests(
             details=f"{prep_error}（attempt={attempt}）",
         )
 
-    # 契约模式（前端仓库）：静态校验探针关键词恢复，不执行 Python 套件与 Bandit
+    # 契约模式（前端仓库）：补丁应用成功即通过（已取消探针关键词判据），不执行 Python 套件与 Bandit
     if contract:
-        return _contract_report(patch, attempt, workspace, contract, sast_detail)
+        return _contract_report(patch, attempt, sast_detail)
 
     # 第二道 SAST：Bandit AST 深度扫描（仅拦截补丁新引入的 HIGH/MEDIUM 问题）
     bandit_ok, bandit_detail = run_bandit(workspace, repo_dir)

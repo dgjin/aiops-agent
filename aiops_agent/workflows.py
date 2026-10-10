@@ -69,7 +69,7 @@ def _attempt_failure_summary(patch: Patch | None, report: TestReport | None) -> 
     1. 补丁生成降级（degraded）——生成环节失败（服务端故障 / diff 校验拒绝 /
        未定位目标文件），而非沙箱测试结论；附降级原因摘要；
     2. 静态扫描（SAST / Bandit）拦截；
-    3. 工作区准备失败 / 契约校验未通过（含探针关键词缺失与配置无效）；
+    3. 工作区准备失败（含前端契约模式的补丁应用失败）；
     4. 真实测试失败——取单测结论文本。
     """
     if patch is not None and patch.degraded:
@@ -82,8 +82,6 @@ def _attempt_failure_summary(patch: Patch | None, report: TestReport | None) -> 
             return f"静态扫描拦截：{_clip_event_text(details or unit)}"
         if "工作区准备失败" in unit:
             return f"工作区准备失败：{_clip_event_text(details or unit)}"
-        if "契约校验失败" in unit or "契约缺少" in unit:
-            return f"契约校验未通过：{_clip_event_text(details or unit)}"
         return f"沙箱测试未通过：{_clip_event_text(unit or details or '无详情')}"
     return "失败原因未知（沙箱报告缺失）"
 

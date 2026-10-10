@@ -52,7 +52,7 @@ class BuildRequirementContextTest(unittest.TestCase):
 
 
 class AttemptFailureSummaryTest(unittest.TestCase):
-    """升级提示具体化：单轮失败摘要按真实原因分类（生成降级 / SAST / 契约 / 真实测试）。"""
+    """升级提示具体化：单轮失败摘要按真实原因分类（生成降级 / SAST / 工作区准备 / 真实测试）。"""
 
     @staticmethod
     def _patch(**overrides) -> Patch:
@@ -93,14 +93,16 @@ class AttemptFailureSummaryTest(unittest.TestCase):
         )
         self.assertIn("静态扫描拦截", _attempt_failure_summary(None, report))
 
-    def test_contract_report_summary(self) -> None:
+    def test_workspace_prep_report_summary(self) -> None:
         report = models.TestReport(
             patch_id="p1",
             passed=False,
-            unit_tests="契约校验失败（补丁后未找到探针关键词）",
-            details="契约校验失败：补丁应用后工作区中未出现探针关键词 'disabled'（attempt=2）",
+            unit_tests="未执行（工作区准备失败）",
+            details="工作区准备失败：补丁无法应用（hunk 冲突，attempt=2）",
         )
-        self.assertIn("契约校验未通过", _attempt_failure_summary(None, report))
+        summary = _attempt_failure_summary(None, report)
+        self.assertIn("工作区准备失败", summary)
+        self.assertIn("hunk 冲突", summary)
 
     def test_real_test_failure_summary(self) -> None:
         report = models.TestReport(
