@@ -536,6 +536,7 @@ async def deploy_canary(
             resolved["contract"]["keyword"],
             traffic_percent,
             observe_seconds,
+            service=alert.service,
         )
         mode_label = "直连发布"
     else:

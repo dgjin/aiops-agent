@@ -412,11 +412,15 @@ def run_canary_direct(
     keyword: str,
     traffic_percent: int,
     observe_seconds: int = 10,
+    *,
+    service: str = "",
+    publisher: ArgoCDPublisher | None = None,
 ) -> CanaryResult:
     """直连发布金丝雀（契约应用专用）：补丁直接应用到真实仓库，以真实页面探针观测。
 
     适用于本机开发态前端（vite dev 落盘即生效）等无容器交付面的应用：
     备份补丁涉及文件 → 按 diff 改写真实仓库（含新增文件：--- /dev/null 形态直接创建）
+    → 发布留痕（与容器路径一致写 data/argocd/<name>.json，供控制台「系统状态 → 最近发布」读取）
     → 探针 URL（HTTP 200；配置探针关键词时须包含该关键词）
     → 健康：保持生效（=已全量发布）；劣化：还原补丁前文件（新增文件删除，=真实回滚）。
     应用阶段任一文件失败：还原已写文件后抛错（不留半成品，交由 Temporal 重试）。
@@ -449,6 +453,23 @@ def run_canary_direct(
     except Exception:
         _restore_direct_backups(backups)
         raise
+
+    # 发布留痕：与容器路径（run_canary）同语义——recorded 模式写 ArgoCD manifest，
+    # 供控制台「系统状态 → 最近发布」自动读到最新直连发布记录。
+    version = release_version(patch.patch_id)
+    (publisher or ArgoCDPublisher()).apply(
+        render_application(
+            {
+                "patch_id": patch.patch_id,
+                "alert_id": patch.alert_id,
+                "service": service,
+                "image": f"direct:{patch.patch_id}",  # 直连模式无容器镜像：以 direct 语义标注
+                "traffic_percent": traffic_percent,
+                "observe_seconds": observe_seconds,
+                "version": version,
+            }
+        )
+    )
 
     _page_probe_once(url, keyword)  # 预热一次（不计入统计）：热更新场景首个请求可能仍在重编译
 

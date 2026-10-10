@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 import unittest
@@ -88,7 +89,14 @@ class TestRunCanaryDirect(unittest.TestCase):
         self.page = self.repo / "index.html"
         self.page.write_text(BROKEN_PAGE, encoding="utf-8")
 
-    def _run(self, *, probe_ok: bool, patch: Patch | None = None):
+    def _run(
+        self,
+        *,
+        probe_ok: bool,
+        patch: Patch | None = None,
+        service: str = "",
+        publisher=None,
+    ):
         with mock.patch.object(release, "OBSERVE_INTERVAL_SECONDS", 0.05), mock.patch.object(
             release, "_page_probe_once", return_value=probe_ok
         ):
@@ -99,6 +107,9 @@ class TestRunCanaryDirect(unittest.TestCase):
                 OK_TEXT,
                 5,
                 observe_seconds=1,
+                service=service,
+                # 默认注入 mock：避免单测向真实 data/argocd/ 写发布留痕
+                publisher=publisher or mock.MagicMock(),
             )
 
     def test_healthy_applies_patch_and_keeps(self) -> None:
@@ -123,6 +134,34 @@ class TestRunCanaryDirect(unittest.TestCase):
         final = release.run_finalize_direct(result, True)
         self.assertTrue(final.rolled_back)
         self.assertIn("已还原", final.reason)
+
+    def test_records_argocd_manifest_for_console(self) -> None:
+        """真实 publisher + 重定向留痕目录：发布成功后写 manifest（控制台「最近发布」数据源）。"""
+        argocd_dir = self.tmp / "argocd"
+        with mock.patch.object(release, "ARGOCD_DIR", argocd_dir):
+            result = self._run(
+                probe_ok=True, service="nl2sql", publisher=release.ArgoCDPublisher()
+            )
+        record = argocd_dir / f"demo-app-{result.patch_id}.json"
+        self.assertTrue(record.is_file(), "直连发布应写 ArgoCD 留痕")
+        raw = json.loads(record.read_text(encoding="utf-8"))
+        labels = raw["metadata"]["labels"]
+        self.assertEqual(labels["aiops.service"], "nl2sql")
+        self.assertEqual(labels["aiops.patch-id"], result.patch_id)
+        self.assertEqual(labels["aiops.alert-id"], "direct-u1")
+        self.assertEqual(
+            raw["metadata"]["annotations"]["aiops.version"],
+            release.release_version(result.patch_id),
+        )
+
+    def test_apply_failure_writes_no_manifest(self) -> None:
+        """补丁应用失败（发布未发生）：不写留痕。"""
+        self.page.unlink()
+        argocd_dir = self.tmp / "argocd"
+        with mock.patch.object(release, "ARGOCD_DIR", argocd_dir):
+            with self.assertRaises(RuntimeError):
+                self._run(probe_ok=True, publisher=release.ArgoCDPublisher())
+        self.assertFalse(argocd_dir.exists(), "发布未发生不应有留痕")
 
     def test_missing_target_raises_without_side_effect(self) -> None:
         self.page.unlink()

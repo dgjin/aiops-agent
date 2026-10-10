@@ -287,18 +287,25 @@ def _test_runner() -> release.DockerRolloutRunner:
 class TestRealCanaryIntegration(unittest.TestCase):
     """真实发布集成：镜像构建 → 金丝雀容器 → 真实探活 → 晋级 / 回滚。
 
-    隔离约定：只用 `aiops-test-stable:18099`，**绝不触碰**真实发布的 `aiops-stable-order:18080`。
+    隔离约定：只用 `aiops-test-stable:18099`，**绝不触碰**真实发布的 `aiops-stable-order:18080`；
+    发布留痕注入 mock publisher，**不写**真实 data/argocd/（避免测试产物污染控制台「最近发布」）。
     """
 
     def setUp(self) -> None:
         self.runner = _test_runner()
+        # 发布留痕注入 mock：默认 ArgoCDPublisher 会向真实 data/argocd/ 重写留痕文件，
+        # 其 mtime 被刷新后会挤占控制台「系统状态 → 最近发布」的排序首位。
+        self.publisher = mock.Mock()
+        self.publisher.apply.return_value = {"mode": "recorded", "application": "x", "path": "y"}
         # 兜底清理：即使断言失败也回收测试容器（只回收测试命名）
         self.addCleanup(self.runner.stop, _TEST_STABLE_CONTAINER)
 
     def test_healthy_canary_promotes_to_stable(self) -> None:
         alert = Alert(alert_id="wp7-int-good", service="order", description="发布集成（健康）")
         patch = _patch("wp7-int-good")
-        result = release.run_canary(alert, patch, 5, observe_seconds=4, runner=self.runner)
+        result = release.run_canary(
+            alert, patch, 5, observe_seconds=4, runner=self.runner, publisher=self.publisher
+        )
         self.assertTrue(result.healthy, result.observation)
         self.assertLessEqual(result.error_rate, release.SLO_MAX_ERROR_RATE)
 
@@ -314,7 +321,9 @@ class TestRealCanaryIntegration(unittest.TestCase):
     def test_bad_canary_detected_and_rolled_back(self) -> None:
         alert = Alert(alert_id="wp7-int-bad", service="order", description="canary-bad 发布集成")
         patch = _patch("wp7-int-bad")
-        result = release.run_canary(alert, patch, 5, observe_seconds=4, runner=self.runner)
+        result = release.run_canary(
+            alert, patch, 5, observe_seconds=4, runner=self.runner, publisher=self.publisher
+        )
         self.assertFalse(result.healthy, result.observation)
         # 劣化判定必须至少有一项 SLO 越线。注意：BAD_CANARY 注入 500ms 延迟后，4s 窗口内仅有
         # 数个请求，小样本下错误率可能采到 0.0（约 6% 概率）——故不断言单个指标，避免 flaky。
