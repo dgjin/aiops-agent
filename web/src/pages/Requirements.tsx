@@ -135,6 +135,8 @@ export function Requirements() {
     // 自动获取：页面可见时 30s 轮询（失焦自动暂停）——被监控系统新评估 / 继续评估的
     // 条目无需手动刷新即可到达（右上角「刷新」仍可即时重拉）
     refetchInterval: 30000,
+    // 切回窗口（如从被监控系统提交需求后切回）立即重拉——全局默认关闭聚焦刷新，此处显式开启
+    refetchOnWindowFocus: true,
   })
 
   const current = data?.app ?? null
@@ -146,6 +148,8 @@ export function Requirements() {
     // 有分析执行中时 3 秒轮询（全部完成后自动停止）
     refetchInterval: (query) =>
       (query.state.data?.analyses ?? []).some((item) => item.status === 'analyzing') ? 3000 : false,
+    // 与条目列表同：切回窗口立即刷新会话状态
+    refetchOnWindowFocus: true,
   })
   const analysisMap = useMemo(() => {
     const map = new Map<string, RequirementAnalysisSummary>()

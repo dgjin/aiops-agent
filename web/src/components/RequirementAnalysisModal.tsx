@@ -293,6 +293,8 @@ export function RequirementAnalysisModal({
     // 分析执行中 3 秒轮询；完成 / 失败后停止
     refetchInterval: (query) =>
       query.state.data?.analysis.status === 'analyzing' ? 3000 : false,
+    // 切回窗口立即拉取会话最新状态（弹窗打开着时亦然）
+    refetchOnWindowFocus: true,
   })
 
   const session = detail.data?.analysis ?? null
