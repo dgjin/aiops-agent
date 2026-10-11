@@ -9,8 +9,9 @@
  *   原文展示并补充部署侧配置指引，不影响其余功能；
  * - P0 / P1 高优条目置顶卡片突出，全清单表格展示（评估意见随标题小字展示）；
  * - 内容管理：关键词搜索（标题 / 内容 / 评估 / 提交人 / 部门 / ID / 标签）+ 类型 /
- *   优先级 / 部门筛选 + 排序（高优置顶 / 最近更新 / 最早更新）——导出接口单应用
- *   全量返回，全部为前端内存过滤，零后端改动；筛选器仅在有区分度的维度展示；
+ *   优先级 / 部门筛选 + 排序（全清单默认按更新时间降序；点击表头任意列切换升 /
+ *   降序，「智能分析」操作列除外）——导出接口单应用全量返回，全部为前端内存过滤，
+ *   零后端改动；筛选器仅在有区分度的维度展示；
  * - 智能分析闭环（弹窗 components/RequirementAnalysisModal）：管理员发起分析 →
  *   查看结构化结果 → 反馈再分析（版本递增）→ 自动同步被监控系统最新评估结论（refresh）→
  *   批准进入需求驱动修复工作流。
@@ -18,7 +19,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { RefreshCw, Search, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, ArrowUpDown, RefreshCw, Search, X } from 'lucide-react'
 import { api, describeError } from '../lib/api'
 import { cn, fmtDateTime } from '../lib/format'
 import { EmptyState } from '../components/EmptyState'
@@ -46,14 +47,6 @@ const PRIORITY_CLS: Record<string, string> = {
 const SELECT_CLS =
   'rounded-lg border border-line bg-panel px-2 py-1.5 text-xs text-ink focus:border-accent/50 focus:outline-none'
 
-/** 排序方式：高优置顶（默认，同级按更新时间倒序）/ 最近更新 / 最早更新。 */
-const SORT_OPTIONS = [
-  { key: 'default', label: '高优置顶' },
-  { key: 'updated_desc', label: '最近更新' },
-  { key: 'updated_asc', label: '最早更新' },
-] as const
-type SortKey = (typeof SORT_OPTIONS)[number]['key']
-
 const PRIORITY_RANK: Record<string, number> = { P0: 0, P1: 1, P2: 2, P3: 3 }
 
 /** 维度显示标签（空值统一归「未标注 / 未定级」；筛选比较与选项计数共用同一口径）。 */
@@ -64,13 +57,55 @@ const departmentLabel = (entry: RequirementsEntry) => entry.department || '未�
 /** 时间戳（缺失按 0，排序兜底稳定）。 */
 const tsOf = (value: string | null | undefined): number => (value ? Date.parse(value) : 0)
 
-/** 排序比较器：默认高优置顶（P0→P3→未定级，同级按更新时间倒序）。 */
-function compareEntries(a: RequirementsEntry, b: RequirementsEntry, sort: SortKey): number {
-  if (sort === 'updated_desc') return tsOf(b.updatedAt) - tsOf(a.updatedAt)
-  if (sort === 'updated_asc') return tsOf(a.updatedAt) - tsOf(b.updatedAt)
-  const rankA = PRIORITY_RANK[a.priority] ?? 9
-  const rankB = PRIORITY_RANK[b.priority] ?? 9
-  return rankA - rankB || tsOf(b.updatedAt) - tsOf(a.updatedAt)
+/** 全清单可排序列（「智能分析」为操作列，不参与排序）。 */
+type ColumnKey =
+  | 'id'
+  | 'kind'
+  | 'priority'
+  | 'title'
+  | 'baselineVersion'
+  | 'submitter'
+  | 'updatedAt'
+
+interface SortState {
+  key: ColumnKey
+  dir: 'asc' | 'desc'
+}
+
+/** 默认排序：更新时间降序（最新条目在前）。 */
+const DEFAULT_SORT: SortState = { key: 'updatedAt', dir: 'desc' }
+
+/** 列排序取值（ID 数字优先数值比较，混合值由比较器字符串化兜底）。 */
+function sortValue(entry: RequirementsEntry, key: ColumnKey): string | number {
+  switch (key) {
+    case 'id': {
+      const num = Number(entry.id)
+      return Number.isFinite(num) ? num : String(entry.id)
+    }
+    case 'kind':
+      return kindLabel(entry)
+    case 'priority':
+      return PRIORITY_RANK[entry.priority] ?? 9
+    case 'title':
+      return entry.title || ''
+    case 'baselineVersion':
+      return entry.baselineVersion || ''
+    case 'submitter':
+      return `${entry.submitter || ''} ${entry.department || ''}`
+    case 'updatedAt':
+      return tsOf(entry.updatedAt)
+  }
+}
+
+/** 列排序比较器（同类型数值直接比较，其余按中文排序；结果按方向取反）。 */
+function compareByColumn(a: RequirementsEntry, b: RequirementsEntry, sort: SortState): number {
+  const va = sortValue(a, sort.key)
+  const vb = sortValue(b, sort.key)
+  const result =
+    typeof va === 'number' && typeof vb === 'number'
+      ? va - vb
+      : String(va).localeCompare(String(vb), 'zh')
+  return sort.dir === 'asc' ? result : -result
 }
 
 /** 优先级徽标（P0 红 / P1 橙 / 其余中性；空值「未定级」）。 */
@@ -85,6 +120,49 @@ function PriorityBadge({ priority }: { priority: string }) {
     >
       {priority}
     </span>
+  )
+}
+
+/** 可排序表头：点击切换升 / 降序；当前排序列箭头常显，其余悬停提示可点。 */
+function SortableTh({
+  label,
+  colKey,
+  sort,
+  onToggle,
+}: {
+  label: string
+  colKey: ColumnKey
+  sort: SortState
+  onToggle: (key: ColumnKey) => void
+}) {
+  const active = sort.key === colKey
+  const Icon = active ? (sort.dir === 'asc' ? ArrowUp : ArrowDown) : ArrowUpDown
+  return (
+    <th
+      className="px-3 py-2 font-medium"
+      aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : undefined}
+    >
+      <button
+        type="button"
+        onClick={() => onToggle(colKey)}
+        title={active ? (sort.dir === 'asc' ? '点击改为降序' : '点击改为升序') : '点击按此列排序'}
+        className={cn(
+          'group inline-flex items-center gap-1 transition-colors hover:text-ink',
+          active && 'text-ink',
+        )}
+      >
+        {label}
+        <Icon
+          size={11}
+          className={cn(
+            'shrink-0',
+            active
+              ? 'text-accent'
+              : 'text-idle opacity-0 transition-opacity group-hover:opacity-100',
+          )}
+        />
+      </button>
+    </th>
   )
 }
 
@@ -157,7 +235,7 @@ export function Requirements() {
   const [filterKind, setFilterKind] = useState('')
   const [filterPriority, setFilterPriority] = useState('')
   const [filterDept, setFilterDept] = useState('')
-  const [sort, setSort] = useState<SortKey>('default')
+  const [sort, setSort] = useState<SortState>(DEFAULT_SORT)
   const [analysisTarget, setAnalysisTarget] = useState<{
     entry: RequirementsEntry
     analysisId: string | null
@@ -169,7 +247,16 @@ export function Requirements() {
     setFilterKind('')
     setFilterPriority('')
     setFilterDept('')
-    setSort('default')
+    setSort(DEFAULT_SORT)
+  }
+
+  /** 点击表头：同列翻转方向；换列时按直觉默认方向（时间降序，其余升序）。 */
+  const toggleSort = (key: ColumnKey) => {
+    setSort((prev) =>
+      prev.key === key
+        ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+        : { key, dir: key === 'updatedAt' ? 'desc' : 'asc' },
+    )
   }
   const { data, isError, error, isFetching, refetch } = useQuery({
     queryKey: ['requirements', appId],
@@ -238,7 +325,7 @@ export function Requirements() {
       .toLowerCase()
     return haystack.includes(q)
   })
-  const sorted = [...matched].sort((a, b) => compareEntries(a, b, sort))
+  const sorted = [...matched].sort((a, b) => compareByColumn(a, b, sort))
 
   // 全局统计不随筛选变化（P0/P1 警示与高优盘点始终反映全量）
   const highAll = entries.filter((entry) => entry.priority === 'P0' || entry.priority === 'P1')
@@ -250,7 +337,10 @@ export function Requirements() {
   const deptPairs = countBy(entries, departmentLabel)
   // 高优区跟随筛选（搜索结果中的高优同样置顶展示）
   const high = sorted.filter((entry) => entry.priority === 'P0' || entry.priority === 'P1')
-  const hasConditions = Boolean(q || filterKind || filterPriority || filterDept || sort !== 'default')
+  const isDefaultSort = sort.key === DEFAULT_SORT.key && sort.dir === DEFAULT_SORT.dir
+  const hasConditions = Boolean(
+    q || filterKind || filterPriority || filterDept || !isDefaultSort,
+  )
 
   // ---- 分页：条件 / 数据源变化回到第 1 页（越界页码自动夹取）；高优区不受分页影响 ----
   const pg = usePagination(sorted.length, 10)
@@ -409,17 +499,6 @@ export function Requirements() {
                 ))}
               </select>
             )}
-            <select
-              value={sort}
-              onChange={(event) => setSort(event.target.value as SortKey)}
-              className={SELECT_CLS}
-            >
-              {SORT_OPTIONS.map((option) => (
-                <option key={option.key} value={option.key}>
-                  排序：{option.label}
-                </option>
-              ))}
-            </select>
             {hasConditions && (
               <button
                 type="button"
@@ -516,13 +595,33 @@ export function Requirements() {
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="border-b border-line text-left text-muted">
-                      <th className="px-3 py-2 font-medium">ID</th>
-                      <th className="px-3 py-2 font-medium">类型</th>
-                      <th className="px-3 py-2 font-medium">优先级</th>
-                      <th className="px-3 py-2 font-medium">标题</th>
-                      <th className="px-3 py-2 font-medium">基线版本</th>
-                      <th className="px-3 py-2 font-medium">提交人 / 部门</th>
-                      <th className="px-3 py-2 font-medium">更新时间</th>
+                      <SortableTh label="ID" colKey="id" sort={sort} onToggle={toggleSort} />
+                      <SortableTh label="类型" colKey="kind" sort={sort} onToggle={toggleSort} />
+                      <SortableTh
+                        label="优先级"
+                        colKey="priority"
+                        sort={sort}
+                        onToggle={toggleSort}
+                      />
+                      <SortableTh label="标题" colKey="title" sort={sort} onToggle={toggleSort} />
+                      <SortableTh
+                        label="基线版本"
+                        colKey="baselineVersion"
+                        sort={sort}
+                        onToggle={toggleSort}
+                      />
+                      <SortableTh
+                        label="提交人 / 部门"
+                        colKey="submitter"
+                        sort={sort}
+                        onToggle={toggleSort}
+                      />
+                      <SortableTh
+                        label="更新时间"
+                        colKey="updatedAt"
+                        sort={sort}
+                        onToggle={toggleSort}
+                      />
                       <th className="px-3 py-2 font-medium">智能分析</th>
                     </tr>
                   </thead>
