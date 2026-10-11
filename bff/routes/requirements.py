@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
@@ -168,27 +170,132 @@ def _find_analysis(analysis_id: str) -> dict:
     return entry
 
 
+# ----------------------------------------------------------------------
+# 状态控制：修复流程发布状态（已发布成功的需求为终态，不可再次分析）
+#
+# 分析会话批准（approved）后，修复工作流走沙箱 / 审批 / 公告 / 金丝雀链路，
+# 其结果决定需求是否真正落地：
+#   released（stage=DONE）——已发布成功，需求终态：一切「再次分析」入口一律 409；
+#   其余终态（escalated / cancelled / failed）——展示真实结果，控制仍按
+#   「已批准」拦截（可到流程详情人工跟进）。
+# 首次观测到终态即冻结回会话（approved.result）：Temporal 工作流记录过期
+# 被清理后（start-dev 默认保留约 24h），「已发布成功」不丢；查询带进程内缓存：
+# 终态长 TTL、运行中短 TTL（轮询不打爆 Temporal）；Temporal 不可达时降级
+# unknown——「已批准不可重分析」的兜底拦截仍然有效。
+# ----------------------------------------------------------------------
+
+_RELEASE_TTL_LIVE = 20.0  # running / unknown：工作流可能随时推进或恢复
+_RELEASE_TTL_FINAL = 600.0  # 终态：仅防重复查询（冻结回会话后不再查询）
+_RELEASE_FINAL = ("released", "escalated", "cancelled", "failed")
+_RELEASE_CACHE: dict[str, tuple[float, str, float]] = {}
+_FREEZE_LOCK = asyncio.Lock()
+
+
+async def _release_status_cached(wf_id: str | None) -> str | None:
+    """查询修复流程发布状态（带缓存；查询失败降级 unknown，不影响主流程）。"""
+    if not wf_id:
+        return None
+    now = time.monotonic()
+    cached = _RELEASE_CACHE.get(wf_id)
+    if cached and now - cached[0] < cached[2]:
+        return cached[1]
+    try:
+        status = await gw.release_status(wf_id)
+    except Exception:  # noqa: BLE001 - Temporal 不可达：状态未知，列表照常返回
+        status = "unknown"
+    ttl = _RELEASE_TTL_LIVE if status in ("running", "unknown") else _RELEASE_TTL_FINAL
+    _RELEASE_CACHE[wf_id] = (now, status, ttl)
+    return status
+
+
+def _frozen_release(entry: dict) -> str | None:
+    """会话上已冻结的发布终态（approved.result.status；无则 None）。"""
+    result = (entry.get("approved") or {}).get("result")
+    status = result.get("status") if isinstance(result, dict) else None
+    return status if status in _RELEASE_FINAL else None
+
+
+async def _resolve_release_status(entry: dict) -> str | None:
+    """会话发布状态：已冻结终态优先；否则查询，首次观测到终态即写回会话（冻结）。
+
+    冻结的必要性：Temporal start-dev 工作流记录默认仅保留约 24h，记录被清理后
+    「已发布成功」将无法再查询——冻结保证需求终态（能否再次分析）不随记录丢失。
+    """
+    approved = entry.get("approved") or {}
+    wf_id = str(approved.get("wf_id") or "")
+    if not wf_id:
+        return None
+    frozen = _frozen_release(entry)
+    if frozen:
+        return frozen
+    status = await _release_status_cached(wf_id)
+    if status in _RELEASE_FINAL:
+        async with _FREEZE_LOCK:
+            frozen = _frozen_release(entry)  # 并发下可能已被另一端冻结：双检跳过
+            if not frozen:
+                updated = dict(entry.get("approved") or {})
+                updated["result"] = {
+                    "status": status,
+                    "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                }
+                entry["approved"] = updated
+                requirement_analyses.persist_entry(entry)
+    return status
+
+
+async def _with_release_status(entry: dict) -> dict:
+    """会话视图 + release_status（浅拷贝；先解析（可能冻结回写）再拷贝）。"""
+    status = await _resolve_release_status(entry)
+    view = dict(entry)
+    if status is not None:
+        view["release_status"] = status
+    return view
+
+
+async def _reject_if_released(entry: dict | None) -> None:
+    """状态控制：已发布成功的需求为终态——任何「再次分析」入口统一 409 拒绝。"""
+    if not entry or entry.get("status") != "approved":
+        return
+    if await _resolve_release_status(entry) == "released":
+        raise ApiError(409, "该需求已发布成功（终态），不能再次进行智能分析")
+
+
 @router.get("/api/requirements/analyses")
 async def api_requirement_analysis_list(app_id: str = Query("", max_length=64)) -> dict:
-    """分析会话列表（viewer 起可读；摘要字段，不含版本明细）。"""
-    items = [requirement_analyses.summary(entry) for entry in requirement_analyses.list_all(app_id or None)]
+    """分析会话列表（viewer 起可读；摘要字段，不含版本明细）。
+
+    approved 会话附带 ``release_status``（修复流程发布结果；released=已发布成功，
+    需求终态不可再次分析）；查询失败降级未知，不影响列表。
+    """
+    entries = requirement_analyses.list_all(app_id or None)
+    statuses = await asyncio.gather(*(_resolve_release_status(entry) for entry in entries))
+    items = [requirement_analyses.summary(entry) for entry in entries]
+    for item, status in zip(items, statuses):
+        if status is not None:
+            item["release_status"] = status
     return ok({"analyses": items})
 
 
 @router.get("/api/requirements/analyses/{analysis_id}")
 async def api_requirement_analysis_detail(analysis_id: str) -> dict:
-    """分析会话详情（含全部版本、批准信息；viewer 起可读）。"""
-    return ok({"analysis": _find_analysis(analysis_id)})
+    """分析会话详情（含全部版本、批准信息与发布状态；viewer 起可读）。"""
+    entry = _find_analysis(analysis_id)
+    return ok({"analysis": await _with_release_status(entry)})
 
 
 @router.post("/api/requirements/analyses")
 async def api_requirement_analysis_create(request: Request, body: AnalysisCreateBody) -> dict:
-    """发起（或失败重试）智能分析；已完成的分析直接返回既有结果。"""
+    """发起（或失败重试）智能分析；已完成的分析直接返回既有结果。
+
+    状态控制：已发布成功的需求为终态，不允许再次发起（409，先于全部状态机分支）。
+    """
     target = next((app for app in store.list_all() if app.get("id") == body.app_id), None)
     if target is None:
         raise ApiError(404, f"未找到被监控应用：{body.app_id}")
     snapshot = _entry_snapshot(body.entry)
     actor = request.state.identity.user
+    existing = requirement_analyses.find(str(target.get("id")), str(snapshot.get("id", "")))
+    await _reject_if_released(existing)
     try:
         entry, need_run = requirement_analyses.create_or_touch(
             str(target.get("id")), str(target.get("service") or ""), snapshot, actor
@@ -213,9 +320,13 @@ async def api_requirement_analysis_create(request: Request, body: AnalysisCreate
 async def api_requirement_analysis_feedback(
     request: Request, analysis_id: str, body: FeedbackBody
 ) -> dict:
-    """管理员反馈（优化建议 / 具体要求）→ 追加版本并提交系统再次分析。"""
+    """管理员反馈（优化建议 / 具体要求）→ 追加版本并提交系统再次分析。
+
+    状态控制：已发布成功的需求为终态，不允许通过反馈再次分析（409）。
+    """
     entry = _find_analysis(analysis_id)
     actor = request.state.identity.user
+    await _reject_if_released(entry)
     try:
         requirement_analyses.apply_feedback(entry, body.feedback, actor)
         requirement_analyses.persist_entry(entry)

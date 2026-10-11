@@ -62,6 +62,21 @@ def stage_from_exec_status(exec_status: str | None) -> str | None:
     return None
 
 
+def classify_release_status(stage: str | None) -> str:
+    """流程终态 stage → 发布状态分类（纯函数；需求基线的状态控制用）。
+
+    ``DONE``（金丝雀健康 → 全量发布成功）→ ``released``；``ESCALATED``（转人工，
+    含自动回滚）→ ``escalated``；``CANCELLED`` → ``cancelled``；``FAILED`` →
+    ``failed``；其余（缺失 / 无法确认）→ ``unknown``——不臆造「已发布成功」。
+    """
+    return {
+        "DONE": "released",
+        "ESCALATED": "escalated",
+        "CANCELLED": "cancelled",
+        "FAILED": "failed",
+    }.get(stage or "", "unknown")
+
+
 def _item_from_status(base: dict, status: dict) -> None:
     base.update(
         stage=status.get("stage"),
@@ -239,6 +254,34 @@ class TemporalGateway:
             "result": result,
             "errors": errors,
         }
+
+    async def release_status(self, wf_id: str) -> str:
+        """单流程发布状态（需求状态控制）：released / running / escalated / cancelled / failed / unknown。
+
+        需求分析批准后启动的修复工作流走完整沙箱 / 审批 / 公告 / 金丝雀链路：
+        - 运行中不读 result（避免阻塞等待完成），直接 ``running``；
+        - 终态读取 result.stage 分类（DONE=已发布成功 / ESCALATED / CANCELLED）；
+        - 硬失败读不到 result 时按执行状态派生（见 :func:`stage_from_exec_status`）；
+        - 任何查询异常返回 ``unknown``（安全侧：不臆造「已发布成功」）。
+        """
+        client = await self.client()
+        handle = client.get_workflow_handle(wf_id)
+        try:
+            desc = await handle.describe(rpc_timeout=_QUERY_TIMEOUT)
+        except Exception:  # noqa: BLE001 - 查询失败降级 unknown
+            return "unknown"
+        if desc.status == WorkflowExecutionStatus.RUNNING:
+            return "running"
+        stage: str | None = None
+        try:
+            result = await handle.result(rpc_timeout=_QUERY_TIMEOUT)
+            if isinstance(result, dict):
+                stage = result.get("stage")
+        except Exception:  # noqa: BLE001 - 硬失败/终止读不到 result：按执行状态派生
+            pass
+        if not stage:
+            stage = stage_from_exec_status(desc.status.name if desc.status else None)
+        return classify_release_status(stage)
 
     # ------------------------------------------------------------------
     # 信号（写操作；前置校验与审计由 app 层负责）

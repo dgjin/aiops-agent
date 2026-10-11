@@ -27,6 +27,7 @@ import { Pagination, usePagination } from '../components/Pagination'
 import { PermissionGate } from '../components/PermissionGate'
 import {
   ANALYSIS_STATUS_META,
+  RELEASE_STATUS_META,
   RequirementAnalysisModal,
 } from '../components/RequirementAnalysisModal'
 import type { RequirementAnalysisSummary, RequirementsEntry } from '../lib/types'
@@ -201,17 +202,20 @@ function AnalysisButton({
       label: summary.status || '未知',
       cls: 'border-line text-muted',
     }
+    // 已批准会话按发布结果细分徽标（已发布成功 = 终态：不能再次进行智能分析）
+    const release =
+      summary.status === 'approved' ? RELEASE_STATUS_META[summary.release_status ?? ''] : undefined
     return (
       <button
         type="button"
         onClick={onOpen}
-        title="查看分析结果 / 提交反馈 / 批准进入修复流程"
+        title={release?.title ?? '查看分析结果 / 提交反馈 / 批准进入修复流程'}
         className={cn(
           'rounded-lg border px-2 py-1 text-[11px] transition-opacity hover:opacity-80',
-          meta.cls,
+          release?.badgeCls ?? meta.cls,
         )}
       >
-        {meta.label} · v{summary.current_version}
+        {release?.short ?? meta.label} · v{summary.current_version}
       </button>
     )
   }

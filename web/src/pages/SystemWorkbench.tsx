@@ -21,8 +21,19 @@ import {
 } from '../components/MonitoredAppStatus'
 import { CountdownText } from '../components/CountdownText'
 import { EmptyState } from '../components/EmptyState'
+import { RELEASE_STATUS_META } from '../components/RequirementAnalysisModal'
 import { StageBadge } from '../components/StageBadge'
 import type { FlowItem, MonitoredApp, RequirementAnalysisSummary } from '../lib/types'
+
+/** 发布结果 → 工作台纯文本颜色（徽标配色见 RELEASE_STATUS_META，此处只取文字色）。 */
+const RELEASE_TEXT_CLS: Record<string, string> = {
+  running: 'text-info',
+  released: 'text-ok',
+  escalated: 'text-warn',
+  cancelled: 'text-muted',
+  failed: 'text-danger',
+  unknown: 'text-ok',
+}
 
 /** 侧区卡片壳（统一标题 + 内容节奏）。 */
 function SideCard({ title, children }: { title: string; children: React.ReactNode }) {
@@ -60,22 +71,31 @@ function RequirementsCard({ appId }: { appId: string }) {
   if (!latest) {
     return <div className="text-xs text-idle">暂无分析记录（在需求基线页发起）</div>
   }
+  const releaseMeta =
+    latest.approved != null ? RELEASE_STATUS_META[latest.release_status ?? ''] : undefined
   const statusText =
     latest.approved != null
-      ? `已批准（v${latest.approved.version}）`
+      ? `${releaseMeta?.short ?? '已批准'}（v${latest.approved.version}）`
       : latest.status === 'analyzing'
         ? '分析中…'
         : latest.status === 'analyzed'
           ? `已分析（v${latest.current_version}）`
           : latest.status
-  const statusCls = latest.approved != null ? 'text-ok' : latest.status === 'analyzing' ? 'text-info' : 'text-muted'
+  const statusCls =
+    latest.approved != null
+      ? (RELEASE_TEXT_CLS[latest.release_status ?? ''] ?? 'text-ok')
+      : latest.status === 'analyzing'
+        ? 'text-info'
+        : 'text-muted'
   return (
     <div className="space-y-1 text-xs">
       <div className="line-clamp-2 text-ink" title={latest.entry_title}>
         {latest.entry_title}
       </div>
       <div className="flex items-center justify-between gap-2">
-        <span className={statusCls}>{statusText}</span>
+        <span className={statusCls} title={releaseMeta?.title}>
+          {statusText}
+        </span>
         {latest.latest_confidence != null && (
           <span className="font-mono text-[11px] text-muted">置信 {latest.latest_confidence.toFixed(2)}</span>
         )}

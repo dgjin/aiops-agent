@@ -178,6 +178,25 @@ class StageFromExecStatusTest(unittest.TestCase):
         self.assertEqual(temporal_gateway.stage_from_exec_status("failed"), "FAILED")
 
 
+class ClassifyReleaseStatusTest(unittest.TestCase):
+    """需求状态控制：流程终态 stage → 发布状态分类（已发布成功 = released）。"""
+
+    def test_done_maps_to_released(self):
+        self.assertEqual(temporal_gateway.classify_release_status("DONE"), "released")
+
+    def test_escalated_and_cancelled(self):
+        self.assertEqual(temporal_gateway.classify_release_status("ESCALATED"), "escalated")
+        self.assertEqual(temporal_gateway.classify_release_status("CANCELLED"), "cancelled")
+
+    def test_failed_maps_to_failed(self):
+        self.assertEqual(temporal_gateway.classify_release_status("FAILED"), "failed")
+
+    def test_missing_or_unknown_stays_unknown(self):
+        self.assertEqual(temporal_gateway.classify_release_status(None), "unknown")
+        self.assertEqual(temporal_gateway.classify_release_status(""), "unknown")
+        self.assertEqual(temporal_gateway.classify_release_status("NOTIFYING"), "unknown")
+
+
 class RequiredRoleTest(unittest.TestCase):
     """集中式角色策略：读接口 viewer，配置写入 admin，流程写入 operator。"""
 

@@ -436,7 +436,10 @@ export interface RequirementAnalysisVersion {
   meta: RequirementAnalysisMeta | null
 }
 
-/** 分析会话（一条需求一个会话：analyzing→analyzed→approved，失败可反馈 / 重试）。 */
+/** 分析会话（一条需求一个会话：analyzing→analyzed→approved，失败可反馈 / 重试）。
+ *  ``release_status``（仅批准过的会话）：修复流程发布结果——released=已发布成功
+ *  （需求终态，不可再次分析）/ running / escalated / cancelled / failed / unknown。
+ */
 export interface RequirementAnalysisEntry {
   id: string
   app_id: string
@@ -450,6 +453,7 @@ export interface RequirementAnalysisEntry {
   current_version: number
   versions: RequirementAnalysisVersion[]
   approved: { version: number; wf_id: string; at: string; actor: string } | null
+  release_status?: string | null
   created_at: string
   updated_at: string
 }
@@ -468,6 +472,8 @@ export interface RequirementAnalysisSummary {
   latest_degraded: boolean | null
   latest_confidence: number | null
   approved: { version: number; wf_id: string; at: string; actor: string } | null
+  /** 修复流程发布结果（同 RequirementAnalysisEntry.release_status；未批准为 undefined）。 */
+  release_status?: string | null
   created_at: string
   updated_at: string
 }

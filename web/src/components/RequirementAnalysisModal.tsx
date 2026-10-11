@@ -35,6 +35,53 @@ export const ANALYSIS_STATUS_META: Record<string, { label: string; cls: string }
   approved: { label: '已批准', cls: 'border-ok/40 bg-ok/10 text-ok' },
 }
 
+/** 修复流程发布状态（approved 会话的后置结果；由 BFF 查询工作流终态得出）。
+ *
+ * released = 已发布成功（stage=DONE）——需求终态：不可再次进行智能分析；
+ * 其余状态展示真实进展，控制仍按「已批准」拦截（可到流程详情人工跟进）。
+ */
+export const RELEASE_STATUS_META: Record<
+  string,
+  { short: string; badgeCls: string; title: string; note: string }
+> = {
+  running: {
+    short: '修复中',
+    badgeCls: 'border-accent/40 bg-accent/10 text-accent',
+    title: '修复流程进行中（修复 → 验证 → 审批 → 发布）；点击查看历史',
+    note: '修复流程进行中：完成后自动更新发布结果。',
+  },
+  released: {
+    short: '已发布',
+    badgeCls: 'border-ok/40 bg-ok/10 text-ok',
+    title: '需求已发布成功（终态）：不能再次进行智能分析；点击查看历史',
+    note: '该需求已发布成功（终态）：不能再次进行智能分析。',
+  },
+  escalated: {
+    short: '已转人工',
+    badgeCls: 'border-warn/40 bg-warn/10 text-warn',
+    title: '修复流程已升级人工处理；点击查看历史',
+    note: '修复流程已升级人工处理：可在流程详情跟进。',
+  },
+  cancelled: {
+    short: '已取消',
+    badgeCls: 'border-line bg-elevated text-muted',
+    title: '发布已取消；点击查看历史',
+    note: '发布窗口内已取消：可在流程详情查看记录。',
+  },
+  failed: {
+    short: '修复失败',
+    badgeCls: 'border-danger/40 bg-danger/10 text-danger',
+    title: '修复流程执行失败；点击查看历史',
+    note: '修复流程执行失败：可在流程详情查看原因。',
+  },
+  unknown: {
+    short: '已批准',
+    badgeCls: 'border-ok/40 bg-ok/10 text-ok',
+    title: '已批准（发布状态暂时无法确认）；点击查看历史',
+    note: '修复流程发布状态暂时无法确认。',
+  },
+}
+
 const TRIGGER_LABELS: Record<string, string> = {
   initial: '初始分析',
   feedback: '反馈再分析',
@@ -306,6 +353,9 @@ export function RequirementAnalysisModal({
   const approved = session?.status === 'approved'
   const canApprove = !!session && !!result && !result.degraded && !analyzing && !approved
   const statusMeta = session ? ANALYSIS_STATUS_META[session.status] : undefined
+  // 修复流程发布状态（approved 后置；released=已发布成功，需求终态不可再次分析）
+  const releaseMeta = approved ? RELEASE_STATUS_META[session?.release_status ?? ''] : undefined
+  const released = approved && session?.release_status === 'released'
 
   const submitFeedback = async () => {
     const text = feedbackText.trim()
@@ -528,7 +578,10 @@ export function RequirementAnalysisModal({
 
           {approved && session?.approved && (
             <div className="rounded-xl border border-ok/40 bg-ok/10 p-3.5 text-xs">
-              <div className="font-medium text-ok">已批准 · 修复流程已启动</div>
+              <div className="font-medium text-ok">
+                {released ? '已发布成功 · 需求已落地（终态）' : '已批准 · 修复流程已启动'}
+              </div>
+              {releaseMeta && <p className="mt-1 text-muted">{releaseMeta.note}</p>}
               <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-muted">
                 <span>批准版本 v{session.approved.version}</span>
                 <span>批准人 {session.approved.actor}</span>

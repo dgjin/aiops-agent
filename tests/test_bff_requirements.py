@@ -198,6 +198,10 @@ class AnalysisRoutesTest(unittest.TestCase):
         self.audit = audit_patcher.start()
         self.addCleanup(audit_patcher.stop)
 
+        # 发布状态查询缓存（模块级）逐例清理：避免同 wf_id 命中他例残留
+        routes._RELEASE_CACHE.clear()
+        self.addCleanup(routes._RELEASE_CACHE.clear)
+
     def _request(self, user: str = "admin1"):
         request = mock.Mock()
         request.state.identity.user = user
@@ -420,6 +424,126 @@ class AnalysisRoutesTest(unittest.TestCase):
                     routes.api_requirement_analysis_approve(self._request(), "ra-app-b-7")
                 )
         self.assertEqual(ctx.exception.status_code, 409)
+
+    # ---- 状态控制：已发布成功的需求不可再次分析 ----
+
+    def _approve(self, analysis_id: str = "ra-app-b-7") -> None:
+        with mock.patch.object(
+            routes.gw,
+            "start_requirement_flow",
+            new_callable=mock.AsyncMock,
+            return_value="aiops-req-ra-app-b-7-v1",
+        ):
+            asyncio.run(routes.api_requirement_analysis_approve(self._request(), analysis_id))
+
+    def test_create_after_released_409(self) -> None:
+        """已发布成功（released）的需求为终态：再次发起分析精确拒绝。"""
+        self._create()
+        self._finish("ra-app-b-7")
+        self._approve()
+        with mock.patch.object(
+            routes.gw, "release_status", new_callable=mock.AsyncMock, return_value="released"
+        ):
+            with self.assertRaises(ApiError) as ctx:
+                self._create()
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("已发布成功", str(ctx.exception))
+
+    def test_create_after_approve_running_keeps_original_409(self) -> None:
+        """已批准但发布未成功：仍按「已批准」拦截（保持既有语义）。"""
+        self._create()
+        self._finish("ra-app-b-7")
+        self._approve()
+        with mock.patch.object(
+            routes.gw, "release_status", new_callable=mock.AsyncMock, return_value="running"
+        ):
+            with self.assertRaises(ApiError) as ctx:
+                self._create()
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("已批准", str(ctx.exception))
+
+    def test_feedback_after_released_409(self) -> None:
+        """已发布成功：反馈再分析入口同样精确拒绝。"""
+        self._create()
+        self._finish("ra-app-b-7")
+        self._approve()
+        body = routes.FeedbackBody(feedback="再来一版")
+        with mock.patch.object(
+            routes.gw, "release_status", new_callable=mock.AsyncMock, return_value="released"
+        ):
+            with self.assertRaises(ApiError) as ctx:
+                asyncio.run(
+                    routes.api_requirement_analysis_feedback(self._request(), "ra-app-b-7", body)
+                )
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("已发布成功", str(ctx.exception))
+
+    def test_list_and_detail_include_release_status(self) -> None:
+        """列表 / 详情附带发布状态；视图为浅拷贝，不污染存储对象。"""
+        self._create()
+        self._finish("ra-app-b-7")
+        self._approve()
+        with mock.patch.object(
+            routes.gw, "release_status", new_callable=mock.AsyncMock, return_value="released"
+        ):
+            listed = asyncio.run(routes.api_requirement_analysis_list(app_id="app-b"))
+            detail = asyncio.run(routes.api_requirement_analysis_detail("ra-app-b-7"))
+        self.assertEqual(listed["analyses"][0]["release_status"], "released")
+        self.assertEqual(detail["analysis"]["release_status"], "released")
+        stored = routes.requirement_analyses.get("ra-app-b-7")
+        self.assertNotIn("release_status", stored)
+
+    def test_release_query_failure_degrades(self) -> None:
+        """发布状态查询失败：列表降级 unknown 仍可读；再分析仍被兜底拦截（不依赖 Temporal）。"""
+        self._create()
+        self._finish("ra-app-b-7")
+        self._approve()
+        with mock.patch.object(
+            routes.gw,
+            "release_status",
+            new_callable=mock.AsyncMock,
+            side_effect=RuntimeError("temporal down"),
+        ):
+            listed = asyncio.run(routes.api_requirement_analysis_list(app_id="app-b"))
+            with self.assertRaises(ApiError) as ctx:
+                self._create()
+        self.assertEqual(listed["analyses"][0]["release_status"], "unknown")
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("已批准", str(ctx.exception))
+        # unknown 不冻结：会话上不落 result（未被确认的终态不写回）
+        stored = routes.requirement_analyses.get("ra-app-b-7")
+        self.assertIsNone((stored.get("approved") or {}).get("result"))
+
+    def test_release_status_frozen_after_first_observation(self) -> None:
+        """首次观测到 released 即冻结回会话：Temporal 记录被清理后仍拒绝再分析。"""
+        self._create()
+        self._finish("ra-app-b-7")
+        self._approve()
+        with mock.patch.object(
+            routes.gw, "release_status", new_callable=mock.AsyncMock, return_value="released"
+        ):
+            asyncio.run(routes.api_requirement_analysis_list(app_id="app-b"))
+        stored = routes.requirement_analyses.get("ra-app-b-7")
+        self.assertEqual(stored["approved"]["result"]["status"], "released")
+        # 模拟 Temporal 记录被清理（start-dev 约 24h 保留期到期）且缓存已过期：冻结值兜底
+        routes._RELEASE_CACHE.clear()
+        with mock.patch.object(
+            routes.gw,
+            "release_status",
+            new_callable=mock.AsyncMock,
+            side_effect=RuntimeError("workflow not found"),
+        ):
+            with self.assertRaises(ApiError) as ctx:
+                self._create()
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("已发布成功", str(ctx.exception))
+
+    def test_list_without_approved_has_no_release_status(self) -> None:
+        """未批准的会话不触发发布状态查询（列表字段保持可选）。"""
+        self._create()
+        self._finish("ra-app-b-7")
+        listed = asyncio.run(routes.api_requirement_analysis_list(app_id="app-b"))
+        self.assertNotIn("release_status", listed["analyses"][0])
 
 
 class AnalysisWiringTest(unittest.TestCase):
