@@ -202,14 +202,21 @@ class SecurityHeadersTest(unittest.TestCase):
         )
 
     def test_diagram_viewer_relaxed_csp(self) -> None:
-        """交互式查看器白名单：放行内联脚本 / blob: 图片 / data: 字体（交互与渲染依赖），其余基线不变。"""
+        """交互式查看器白名单：放行内联脚本 / blob: 图片 / data: 字体与同源 iframe 内嵌，其余基线不变。"""
         response = self.client.get("/diagrams/aiops-workflow.html")
         csp = response.headers["Content-Security-Policy"]
         self.assertIn("script-src 'self' 'unsafe-inline'", csp)
         self.assertIn("img-src 'self' data: blob:", csp)
         self.assertIn("font-src 'self' data:", csp)
-        self.assertIn("frame-ancestors 'none'", csp)
-        self.assertEqual(response.headers["X-Frame-Options"], "DENY")
+        self.assertIn("frame-ancestors 'self'", csp)
+        self.assertEqual(response.headers["X-Frame-Options"], "SAMEORIGIN")
+
+    def test_diagram_viewer_csp_matches_with_query(self) -> None:
+        """带查询参数（?theme=）时白名单仍命中——帮助中心 iframe 的实际请求形态。"""
+        response = self.client.get("/diagrams/aiops-architecture.html?theme=dark")
+        csp = response.headers["Content-Security-Policy"]
+        self.assertIn("script-src 'self' 'unsafe-inline'", csp)
+        self.assertIn("frame-ancestors 'self'", csp)
 
     def test_non_diagram_keeps_strict_csp(self) -> None:
         """非白名单路径保持严格 CSP：不允许内联脚本。"""

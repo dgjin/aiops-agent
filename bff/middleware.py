@@ -215,8 +215,10 @@ _SECURITY_HEADERS = {
 }
 
 # 交互式查看器（archify 自包含产物）路径白名单：脚本全部内联、PNG 导出经 blob: 图片中转、
-# 字体为内嵌 base64 data:，全局严格 CSP 会阻断其交互与渲染；仅对这四条精确路径放行
-# 内联脚本 / blob: 图片 / data: 字体，其余安全基线与普通页面完全一致。新增图时需同步追加白名单。
+# 字体为内嵌 base64 data:，帮助中心以同源 iframe 页内内嵌；全局严格的安全头会阻断其
+# 交互、渲染与内嵌。仅对这四条精确路径放行：内联脚本 / blob: 图片 / data: 字体 /
+# 同源内嵌（frame-ancestors 'self' 且 X-Frame-Options 改 SAMEORIGIN），其余安全基线与
+# 普通页面完全一致（查询参数不影响命中）。新增图时需同步追加白名单。
 _DIAGRAM_CSP_PATHS = frozenset(
     {
         "/diagrams/aiops-workflow.html",
@@ -228,7 +230,7 @@ _DIAGRAM_CSP_PATHS = frozenset(
 _DIAGRAM_CSP = (
     "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; "
-    "object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    "object-src 'none'; base-uri 'self'; frame-ancestors 'self'"
 )
 
 
@@ -239,6 +241,7 @@ async def _security_headers(request: Request, call_next):
         response.headers.setdefault(key, value)
     if request.url.path in _DIAGRAM_CSP_PATHS:
         response.headers["Content-Security-Policy"] = _DIAGRAM_CSP
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
     if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
         response.headers.setdefault(
             "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
