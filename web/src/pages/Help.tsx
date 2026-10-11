@@ -4,11 +4,12 @@
  * _READ_ROLE_OVERRIDES 一致；快捷键与 AppShell 实际绑定一致）。
  */
 
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { Database, ExternalLink, Keyboard, Layers, Network, ShieldCheck, Workflow } from 'lucide-react'
 import { Logo } from '../components/Logo'
 import { roleLabel } from '../components/UserMenu'
+import { useTheme } from '../lib/theme'
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -68,6 +69,11 @@ const SYSTEM_VIEWS = [
 ]
 
 export function Help() {
+  const [activeView, setActiveView] = useState(0)
+  const { theme } = useTheme()
+  const view = SYSTEM_VIEWS[activeView]
+  const viewSrc = `${view.href}?theme=${theme}`
+
   return (
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-4">
@@ -117,33 +123,58 @@ export function Help() {
 
       <Section title="系统视图（交互式查看器）">
         <p>
-          四张自包含的交互式图，覆盖功能、架构、数据与技术四个视角；支持缩放 / 搜索 / 深浅色与
-          导出 PNG，点击卡片在新标签页打开。
+          四张自包含的交互式图，覆盖功能、架构、数据与技术四个视角；在下方直接切换浏览（缩放 /
+          搜索 / 导出 PNG / 深浅色），也可在新标签页打开。
         </p>
-        <ul className="grid gap-2 lg:grid-cols-2">
-          {SYSTEM_VIEWS.map(({ title, desc, href, icon: Icon }) => (
-            <li key={href}>
-              <a
-                href={href}
-                target="_blank"
-                rel="noreferrer"
-                className="group flex items-start gap-3 rounded-lg border border-line bg-canvas px-3 py-2.5 transition-colors hover:bg-elevated"
-              >
-                <Icon size={15} className="mt-0.5 shrink-0 text-accent" />
-                <span className="min-w-0">
-                  <span className="flex items-center gap-1.5 text-ink">
-                    {title}
-                    <ExternalLink
-                      size={11}
-                      className="text-idle transition-colors group-hover:text-accent"
-                    />
-                  </span>
-                  <span className="mt-0.5 block text-xs text-muted">{desc}</span>
-                </span>
-              </a>
-            </li>
+        <div role="tablist" aria-label="系统视图选择" className="flex flex-wrap gap-1.5">
+          {SYSTEM_VIEWS.map(({ title, icon: Icon }, index) => (
+            <button
+              key={title}
+              id={`system-view-tab-${index}`}
+              type="button"
+              role="tab"
+              aria-selected={index === activeView}
+              aria-controls="system-view-panel"
+              onClick={() => setActiveView(index)}
+              className={[
+                'flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors',
+                index === activeView
+                  ? 'border-accent/50 bg-accent/15 font-medium text-accent'
+                  : 'border-line text-muted hover:bg-elevated hover:text-ink',
+              ].join(' ')}
+            >
+              <Icon size={13} className={index === activeView ? 'text-accent' : 'text-idle'} />
+              {title}
+            </button>
           ))}
-        </ul>
+        </div>
+        <div
+          id="system-view-panel"
+          role="tabpanel"
+          aria-labelledby={`system-view-tab-${activeView}`}
+          className="overflow-hidden rounded-lg border border-line bg-canvas"
+        >
+          <div className="flex items-center justify-between gap-3 border-b border-line px-3 py-2">
+            <span className="min-w-0 truncate text-xs text-muted">{view.desc}</span>
+            <a
+              href={view.href}
+              target="_blank"
+              rel="noreferrer"
+              className="flex shrink-0 items-center gap-1 text-xs text-accent hover:underline"
+            >
+              新标签打开
+              <ExternalLink size={10} />
+            </a>
+          </div>
+          <iframe
+            key={viewSrc}
+            src={viewSrc}
+            title={`${view.title}（交互式查看器）`}
+            loading="lazy"
+            allowFullScreen
+            className="block h-[520px] w-full lg:h-[640px]"
+          />
+        </div>
       </Section>
 
       <Section title="角色与权限矩阵">
