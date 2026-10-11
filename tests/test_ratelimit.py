@@ -201,6 +201,26 @@ class SecurityHeadersTest(unittest.TestCase):
             tls.headers["Strict-Transport-Security"], "max-age=31536000; includeSubDomains"
         )
 
+    def test_diagram_viewer_relaxed_csp(self) -> None:
+        """交互式查看器白名单：放行内联脚本 / blob: 图片 / data: 字体（交互与渲染依赖），其余基线不变。"""
+        response = self.client.get("/diagrams/aiops-workflow.html")
+        csp = response.headers["Content-Security-Policy"]
+        self.assertIn("script-src 'self' 'unsafe-inline'", csp)
+        self.assertIn("img-src 'self' data: blob:", csp)
+        self.assertIn("font-src 'self' data:", csp)
+        self.assertIn("frame-ancestors 'none'", csp)
+        self.assertEqual(response.headers["X-Frame-Options"], "DENY")
+
+    def test_non_diagram_keeps_strict_csp(self) -> None:
+        """非白名单路径保持严格 CSP：不允许内联脚本。"""
+        response = self.client.get(
+            "/api/health", headers={"Authorization": "Bearer tok-adm"}
+        )
+        self.assertNotIn(
+            "script-src 'self' 'unsafe-inline'",
+            response.headers["Content-Security-Policy"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

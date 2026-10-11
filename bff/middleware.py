@@ -214,12 +214,31 @@ _SECURITY_HEADERS = {
     ),
 }
 
+# 交互式查看器（archify 自包含产物）路径白名单：脚本全部内联、PNG 导出经 blob: 图片中转、
+# 字体为内嵌 base64 data:，全局严格 CSP 会阻断其交互与渲染；仅对这四条精确路径放行
+# 内联脚本 / blob: 图片 / data: 字体，其余安全基线与普通页面完全一致。新增图时需同步追加白名单。
+_DIAGRAM_CSP_PATHS = frozenset(
+    {
+        "/diagrams/aiops-workflow.html",
+        "/diagrams/aiops-architecture.html",
+        "/diagrams/aiops-dataflow.html",
+        "/diagrams/aiops-tech-architecture.html",
+    }
+)
+_DIAGRAM_CSP = (
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; "
+    "object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+)
+
 
 async def _security_headers(request: Request, call_next):
     """安全头（最外层中间件：鉴权 401/限速 429 等早退响应同样携带）。"""
     response = await call_next(request)
     for key, value in _SECURITY_HEADERS.items():
         response.headers.setdefault(key, value)
+    if request.url.path in _DIAGRAM_CSP_PATHS:
+        response.headers["Content-Security-Policy"] = _DIAGRAM_CSP
     if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
         response.headers.setdefault(
             "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
