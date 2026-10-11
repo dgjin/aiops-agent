@@ -6,7 +6,7 @@
 
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { ExternalLink, Keyboard, ShieldCheck } from 'lucide-react'
+import { Database, ExternalLink, Keyboard, Layers, Network, ShieldCheck, Workflow } from 'lucide-react'
 import { Logo } from '../components/Logo'
 import { roleLabel } from '../components/UserMenu'
 
@@ -38,6 +38,34 @@ const PERMISSION_ROWS: { capability: string; viewer: boolean; operator: boolean;
     { capability: '令牌轮换 / kill switch / 令牌清单', viewer: false, operator: false, admin: true },
     { capability: '登出 / 本人修改密码', viewer: true, operator: true, admin: true },
   ]
+
+/** 系统视图：四张自包含的交互式查看器（源文件位于 web/public/diagrams/，随构建进入 dist 由 BFF 同域托管）。 */
+const SYSTEM_VIEWS = [
+  {
+    title: '功能流程图',
+    desc: '从告警接入到灰度发布的完整功能流转，附需求闭环与转人工出口',
+    href: '/diagrams/aiops-workflow.html',
+    icon: Workflow,
+  },
+  {
+    title: '系统架构图',
+    desc: '从被监控应用、采集告警到 Temporal 编排、修复引擎与金丝雀发布的组件全景',
+    href: '/diagrams/aiops-architecture.html',
+    icon: Network,
+  },
+  {
+    title: '数据流图',
+    desc: '信号从产生、采集、诊断到验证放行与留痕的五段式数据流转',
+    href: '/diagrams/aiops-dataflow.html',
+    icon: Database,
+  },
+  {
+    title: '技术架构图',
+    desc: '技术栈全景：控制台与 BFF、Temporal 编排、修复引擎、存储与发布链路',
+    href: '/diagrams/aiops-tech-architecture.html',
+    icon: Layers,
+  },
+]
 
 export function Help() {
   return (
@@ -85,6 +113,37 @@ export function Help() {
             ：所有写操作（审批 / 发布 / 配置 / 用户管理）均可按操作者与时间回溯。
           </li>
         </ol>
+      </Section>
+
+      <Section title="系统视图（交互式查看器）">
+        <p>
+          四张自包含的交互式图，覆盖功能、架构、数据与技术四个视角；支持缩放 / 搜索 / 深浅色与
+          导出 PNG，点击卡片在新标签页打开。
+        </p>
+        <ul className="grid gap-2 lg:grid-cols-2">
+          {SYSTEM_VIEWS.map(({ title, desc, href, icon: Icon }) => (
+            <li key={href}>
+              <a
+                href={href}
+                target="_blank"
+                rel="noreferrer"
+                className="group flex items-start gap-3 rounded-lg border border-line bg-canvas px-3 py-2.5 transition-colors hover:bg-elevated"
+              >
+                <Icon size={15} className="mt-0.5 shrink-0 text-accent" />
+                <span className="min-w-0">
+                  <span className="flex items-center gap-1.5 text-ink">
+                    {title}
+                    <ExternalLink
+                      size={11}
+                      className="text-idle transition-colors group-hover:text-accent"
+                    />
+                  </span>
+                  <span className="mt-0.5 block text-xs text-muted">{desc}</span>
+                </span>
+              </a>
+            </li>
+          ))}
+        </ul>
       </Section>
 
       <Section title="角色与权限矩阵">
