@@ -92,7 +92,7 @@ def resolve(service: str) -> dict | None:
         return {
             "name": str(app.get("name") or ""),
             "repo": repo,
-            # 应用对外 URL：契约应用「直连发布」的真实探针地址（空串 → 调用方回落容器模式）
+            # 应用对外 URL：非空即启用「直连发布」（真实探针地址；空串 → 调用方回落容器金丝雀）
             "url": str(app.get("url") or "").strip(),
             "contract": {"keyword": keyword} if keyword else None,
         }

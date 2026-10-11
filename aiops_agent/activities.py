@@ -516,8 +516,9 @@ async def deploy_canary(
 ) -> CanaryResult:
     """真实实现（WP7）：ArgoCD 风格金丝雀——镜像构建 + 容器启动 + 真实探活观测。
 
-    契约应用（注册表同时配置 url 与 probe_keyword，如本机 vite dev 前端）走「直连发布」：
-    补丁直接应用到真实仓库（落盘即生效），以真实页面探针观测；其余应用走默认容器金丝雀。
+    直连应用（注册表配置 url，如本机 vite dev 前端）走「直连发布」：补丁直接应用到
+    真实仓库（落盘即生效），以真实页面探针观测——探针关键词可选（配置时断言页面
+    包含关键词，未配置时仅探活 HTTP 200）；其余应用走默认容器金丝雀。
     """
     from . import app_registry, metrics, release
 
@@ -527,13 +528,13 @@ async def deploy_canary(
     except Exception as exc:  # noqa: BLE001 - 注册表不可用回退默认容器金丝雀
         log.warning("[registry] 应用注册表不可用，金丝雀走默认容器模式: %s", exc)
 
-    if resolved and resolved.get("contract") and resolved.get("url"):
+    if resolved and resolved.get("url"):
         result = await asyncio.to_thread(
             release.run_canary_direct,
             patch,
             resolved["repo"],
             resolved["url"],
-            resolved["contract"]["keyword"],
+            (resolved.get("contract") or {}).get("keyword", ""),
             traffic_percent,
             observe_seconds,
             service=alert.service,

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 import tempfile
@@ -17,8 +18,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from aiops_agent import release
-from aiops_agent.models import Patch
+from aiops_agent import activities, release
+from aiops_agent.models import Alert, CanaryResult, Patch
 
 FAIL_TEXT = '<div id="eeroot"></div>'
 OK_TEXT = '<div id="root"></div>'
@@ -228,6 +229,88 @@ class TestRunCanaryDirect(unittest.TestCase):
             self._run(probe_ok=True, patch=_patch(diff=DIFF + broken_new))
         self.assertIn(FAIL_TEXT, self.page.read_text(encoding="utf-8"))
         self.assertFalse(new_file.exists())
+
+
+class TestDeployCanaryRouting(unittest.TestCase):
+    """activities.deploy_canary 发布模式路由（2026-10-11）：url 非空即直连发布，关键词可空。
+
+    背景：注册表关键词被清空后，原门控（contract and url）令直连应用错走容器金丝雀；
+    现以 url 为直连标志——无关键词时页面探针仅校验 HTTP 200（release._page_probe_once）。
+    """
+
+    def _ctx(self) -> tuple[Alert, Patch]:
+        alert = Alert(alert_id="a-route", service="svc-route", description="路由单测")
+        patch = Patch(
+            patch_id="p-route-r0",
+            alert_id="a-route",
+            files=["server/config.ts"],
+            diff=(
+                "--- a/server/config.ts\n"
+                "+++ b/server/config.ts\n"
+                "@@ -1 +1 @@\n"
+                "-export const c = 1;\n"
+                "+export const c = 2;\n"
+            ),
+            description="路由单测",
+            risk="低",
+            model_version="test-model",
+            confidence=1.0,
+        )
+        return alert, patch
+
+    def test_url_without_keyword_routes_direct(self) -> None:
+        """配置 url、未配置关键词（contract=None）→ 直连发布，keyword 参数为空串。"""
+        entry = {
+            "name": "TS 前端",
+            "repo": Path("/tmp/ts-repo"),
+            "url": "http://127.0.0.1:3000/",
+            "contract": None,
+        }
+        alert, patch = self._ctx()
+        direct = CanaryResult(
+            patch_id="p-route-r0",
+            traffic_percent=10,
+            healthy=True,
+            error_rate=0.0,
+            p99_latency_ms=5.0,
+            observation="直连发布健康",
+            mode="direct",
+        )
+        with mock.patch("aiops_agent.app_registry.resolve", return_value=entry), mock.patch(
+            "aiops_agent.release.run_canary_direct", return_value=direct
+        ) as m_direct, mock.patch("aiops_agent.release.run_canary") as m_container:
+            result = asyncio.run(activities.deploy_canary(alert, patch, 10, 1))
+        m_container.assert_not_called()
+        m_direct.assert_called_once()
+        self.assertEqual(m_direct.call_args.args[3], "")  # (patch, repo, url, keyword, …)
+        self.assertEqual(result.mode, "direct")
+
+    def test_no_url_routes_container(self) -> None:
+        """未配置 url → 保持容器金丝雀（即使配置了关键词）。"""
+        entry = {
+            "name": "容器应用",
+            "repo": Path("/tmp/py-app"),
+            "url": "",
+            "contract": {"keyword": "OK"},
+        }
+        alert, patch = self._ctx()
+        container = CanaryResult(
+            patch_id="p-route-r0",
+            traffic_percent=10,
+            healthy=True,
+            error_rate=0.0,
+            p99_latency_ms=8.0,
+            observation="金丝雀健康",
+        )
+        with mock.patch("aiops_agent.app_registry.resolve", return_value=entry), mock.patch(
+            "aiops_agent.release.run_canary_direct"
+        ) as m_direct, mock.patch(
+            "aiops_agent.release.run_canary", return_value=container
+        ) as m_container:
+            result = asyncio.run(activities.deploy_canary(alert, patch, 10, 1))
+        m_direct.assert_not_called()
+        m_container.assert_called_once()
+        self.assertEqual(result.mode, "container")
 
 
 if __name__ == "__main__":

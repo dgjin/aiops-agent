@@ -413,6 +413,105 @@ class TestContractValidation(unittest.TestCase):
         self.assertTrue((self.tmp / "p-contract-1" / new_rel).is_file())
 
 
+class TestAutoStaticVerification(unittest.TestCase):
+    """自动静态验收（2026-10-11）：无 Python 测试套件的仓库不再误入套件路径。
+
+    背景：注册表 probe_keyword 被清空 → contract 丢失 → TS 仓库（tests/ 下仅
+    Playwright *.spec.ts）落入 `unittest discover -s tests` 路径收集 0 用例，
+    报「沙箱内未发现任何测试用例」并三次回炉转人工。修复：contract 为空且仓库
+    无 test*.py 时自动按静态验收通过（与契约模式同语义），有套件的仓库行为不变。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="auto-static-"))
+        self.repo = self.tmp / "ts-repo"
+        (self.repo / "server").mkdir(parents=True)
+        (self.repo / "server" / "config.ts").write_text(
+            "export const config = {};\n", encoding="utf-8"
+        )
+        # TS 仓库典型形态：tests/ 下只有 Playwright e2e（*.spec.ts，无 test*.py）
+        (self.repo / "tests" / "e2e").mkdir(parents=True)
+        (self.repo / "tests" / "e2e" / "smoke.spec.ts").write_text(
+            "test('ok', () => {});\n", encoding="utf-8"
+        )
+        self.rel = "server/config.ts"
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _patch(self, *, degraded: bool = False) -> Patch:
+        diff = (
+            f"--- a/{self.rel}\n"
+            f"+++ b/{self.rel}\n"
+            "@@ -1,1 +1,2 @@\n"
+            " export const config = {};\n"
+            "+export const AUTO_STATIC = true;\n"
+        )
+        patch = Patch(
+            patch_id="p-auto-1",
+            alert_id="a-auto",
+            files=[self.rel],
+            diff=diff,
+            description="自动静态验收单测",
+            risk="低",
+            model_version="test",
+            confidence=0.9,
+        )
+        patch.degraded = degraded
+        return patch
+
+    def test_no_python_tests_auto_static_pass(self) -> None:
+        """TS 仓库 + 未配置契约（contract=None）→ 自动静态验收通过，不进入套件执行。"""
+        runner = mock.Mock()
+        report = sandbox.run_patch_tests(
+            self._patch(), 0, repo_dir=self.repo, sandbox_root=self.tmp, runner=runner
+        )
+        self.assertTrue(report.passed, report.details)
+        self.assertIn("静态验证通过", report.unit_tests)
+        self.assertIn("Python 测试套件", report.unit_tests)
+        self.assertIn("自动静态验收", report.details)
+        runner.run.assert_not_called()
+
+    def test_missing_tests_dir_auto_static_pass(self) -> None:
+        """仓库完全没有 tests/ 目录 → 同样自动静态验收。"""
+        shutil.rmtree(self.repo / "tests")
+        report = sandbox.run_patch_tests(
+            self._patch(), 0, repo_dir=self.repo, sandbox_root=self.tmp
+        )
+        self.assertTrue(report.passed, report.details)
+        self.assertIn("静态验证通过", report.unit_tests)
+
+    def test_python_repo_still_runs_suite(self) -> None:
+        """存在 tests/test_*.py 的仓库 → 保持执行套件路径（行为不变）。"""
+        (self.repo / "tests" / "test_config.py").write_text(
+            "import unittest\n\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        pass\n",
+            encoding="utf-8",
+        )
+        fake = mock.Mock()
+        fake.run.return_value = sandbox.SandboxOutcome(
+            exit_code=0,
+            passed=True,
+            tests_run=1,
+            duration_seconds=0.1,
+            runner="fake",
+            image="python:3.12-slim",
+        )
+        report = sandbox.run_patch_tests(
+            self._patch(), 0, repo_dir=self.repo, sandbox_root=self.tmp, runner=fake
+        )
+        self.assertTrue(report.passed, report.details)
+        fake.run.assert_called_once()
+        self.assertIn("1/1 passed", report.unit_tests)
+
+    def test_degraded_patch_still_blocked_in_auto_mode(self) -> None:
+        """自动静态验收与契约模式一致：生成降级补丁仍拦截。"""
+        report = sandbox.run_patch_tests(
+            self._patch(degraded=True), 0, repo_dir=self.repo, sandbox_root=self.tmp
+        )
+        self.assertFalse(report.passed)
+        self.assertIn("降级", report.unit_tests)
+
+
 class TestBanditIntegration(unittest.TestCase):
     """Bandit 深度扫描（P2-04）：delta 拦截 / 既有问题豁免 / LOW 记录 / 降级放行。"""
 

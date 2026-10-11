@@ -416,11 +416,26 @@ class K8sJobSandboxRunner:
         )
 
 
-def _contract_report(patch: Patch, attempt: int, sast_detail: str) -> TestReport:
-    """静态契约校验（前端/非 Python 仓库）：不执行 Python 测试套件与 Bandit。
+def has_python_tests(repo_dir: Path) -> bool:
+    """仓库是否存在可执行的 Python 测试套件（对齐 `unittest discover -s tests` 收集范围）。
 
-    该类仓库无 Python 测试套件可执行（不运行 runner / Bandit）；补丁应用成功
-    （工作区准备阶段已按 diff 落盘）即为静态验收通过。
+    discover 仅收集 tests/ 目录下匹配 test*.py 的文件：目录缺失或无匹配文件时，
+    执行 Python 套件必然收集 0 用例（「沙箱内未发现任何测试用例」）——非 Python
+    测试仓库（如 TS/Node 应用）应走静态验收，而非误入套件路径判失败。
+    """
+    tests_dir = Path(repo_dir) / "tests"
+    return tests_dir.is_dir() and any(tests_dir.glob("test*.py"))
+
+
+def _contract_report(
+    patch: Patch, attempt: int, sast_detail: str, *, auto: bool = False
+) -> TestReport:
+    """静态验收报告：补丁应用成功即通过（不执行 Python 测试套件与 Bandit）。
+
+    两类触发（判定语义一致，文案区分触发原因）：
+    - 契约模式（auto=False）：注册表条目显式启用（contract 非空，前端/非 Python 仓库）；
+    - 自动静态验收（auto=True）：未显式启用契约，但仓库未发现 Python 测试套件
+      （has_python_tests 为 False）——该路径执行 Python 套件必然 0 用例，属误入路径。
     2026-10-10 起取消探针关键词判据（原「补丁后全树仍可检出关键词」不再作为通过
     条件）：探针关键词仅保留给直连发布的在线页面探针（release.run_canary_direct）。
     生成降级（degraded）的兜底补丁为生成环节失败产物，直接拦截。
@@ -435,6 +450,18 @@ def _contract_report(patch: Patch, attempt: int, sast_detail: str) -> TestReport
             details=(
                 f"契约模式拦截降级兜底补丁（生成环节失败产物）："
                 f"补丁文件 {patch.files}（attempt={attempt}）"
+            ),
+        )
+    if auto:
+        return TestReport(
+            patch_id=patch.patch_id,
+            passed=True,
+            unit_tests="静态验证通过（未发现 Python 测试套件，自动静态验收）",
+            regression_tests="未执行（无 Python 测试套件）",
+            sast=sast_detail,
+            details=(
+                f"自动静态验收：仓库 tests/ 未发现 test*.py（非 Python 测试仓库），"
+                f"补丁已应用至工作区（{len(patch.files)} 个文件，attempt={attempt}）"
             ),
         )
     return TestReport(
@@ -460,8 +487,10 @@ def run_patch_tests(
 
     contract：被监控前端应用的静态契约模式开关（注册表条目 contract 非空即启用，
         关键词本身已不再参与判据）。非空时走契约模式——不执行 Python 测试套件与
-        Bandit；补丁应用成功即为通过（2026-10-10 取消探针关键词判据）；None 时
-        保持既有 unittest 沙箱路径。
+        Bandit；补丁应用成功即为通过（2026-10-10 取消探针关键词判据）。
+    Python 套件路径：contract 为空且仓库存在 Python 测试套件（tests/ 下 test*.py）
+        时执行 unittest discover；仓库无 Python 套件（如 TS/Node 应用）时自动转为
+        静态验收（2026-10-11），不进入必然 0 用例的套件路径。
     """
     repo_dir = Path(repo_dir) if repo_dir else code_rag.DEFAULT_REPO_DIR
     sandbox_root = Path(sandbox_root) if sandbox_root else DEFAULT_SANDBOX_ROOT
@@ -491,6 +520,12 @@ def run_patch_tests(
     # 契约模式（前端仓库）：补丁应用成功即通过（已取消探针关键词判据），不执行 Python 套件与 Bandit
     if contract:
         return _contract_report(patch, attempt, sast_detail)
+
+    # 自动静态验收（非 Python 测试仓库，如 TS/Node 应用）：tests/ 下无 test*.py 时执行
+    # Python 套件必然收集 0 用例（历史问题：「沙箱内未发现任何测试用例」三次回炉后转人工）
+    # ——与契约模式同语义改为静态验收，避免误入套件路径（2026-10-11）。
+    if not has_python_tests(repo_dir):
+        return _contract_report(patch, attempt, sast_detail, auto=True)
 
     # 第二道 SAST：Bandit AST 深度扫描（仅拦截补丁新引入的 HIGH/MEDIUM 问题）
     bandit_ok, bandit_detail = run_bandit(workspace, repo_dir)
