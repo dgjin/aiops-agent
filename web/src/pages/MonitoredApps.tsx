@@ -295,7 +295,7 @@ function AppFormDialog({
         </Field>
         <Field
           label="页面关键字（可选）"
-          hint={'留空则仅探测连接与状态码；配置后响应内容须包含该关键字才算在线（如 <div id="root"），可发现「端口活着但页面白屏」类故障'}
+          hint={'留空即启用通用白屏检测（响应非空 + HTML 完整 + 含可渲染容器，可发现「端口活着但页面白屏」类故障）；配置后按关键字精确校验（如 <div id="root"）'}
         >
           <input
             value={form.probe_keyword ?? ''}
@@ -306,7 +306,7 @@ function AppFormDialog({
         </Field>
         <Field
           label="健康检查路径（可选）"
-          hint="Manifest 自动预填；非空时探测与巡检请求该路径（如 /health），关键字也在该页校验"
+          hint="Manifest 自动预填；非空时探测与巡检请求该路径（如 /health），页面判据（关键字/通用白屏检测）在该页生效"
         >
           <input
             value={form.health_path ?? ''}

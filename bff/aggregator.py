@@ -11,7 +11,8 @@
 - probe_stable：本系统发布出的稳定版服务（/health，解析 JSON）
 - probe_monitored_app：**被监控应用**根地址（AIOPS_MONITOR_URL，默认 http://localhost:3000/），
   根路径通常返回 HTML，故不解析 JSON，只回报可达性与 HTTP 状态码；
-  可选关键字校验——响应内容须包含指定关键字才算在线（覆盖「端口活着但页面白屏」类故障）
+  页面判据见 aiops_agent.page_health——配置关键字时精确包含，未配置时通用白屏判据
+  （覆盖「端口活着但页面白屏」类故障）
 """
 
 from __future__ import annotations
@@ -25,6 +26,8 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+
+from aiops_agent.page_health import page_problem
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 _VERSION_RE = re.compile(r"v[\d.]+")
@@ -188,8 +191,12 @@ def probe_dependencies() -> dict:
     }
 
 
-def _read_head(stream, limit: int = 65536) -> bytes:
-    """读取响应片段供关键字校验（HTML 首屏足够；读取失败按「无内容」处理）。"""
+# 页面判据的响应读取上限（HTML 首屏足够；达上限视为截断，跳过 HTML 结构判定）
+_PROBE_READ_LIMIT = 65536
+
+
+def _read_head(stream, limit: int = _PROBE_READ_LIMIT) -> bytes:
+    """读取响应片段供页面判据（关键字/通用白屏检测；读取失败按「无内容」处理）。"""
     try:
         return stream.read(limit) or b""
     except Exception:  # noqa: BLE001 - 探测类允许失败返回
@@ -212,11 +219,13 @@ def probe_monitored_app(
     只回报可达性、HTTP 状态码与延迟。
 
     说明：能收到任何 HTTP 响应（含 4xx/5xx）都视为「在线」——那表示端口确实有服务在响应；
-    只有连接失败/超时才判定为不可达。
+    只有连接失败/超时才判定为不可达。2xx 响应还须通过页面判据（见下）才算在线。
 
-    关键字校验（可选）：配置 keyword 时，响应内容须包含该关键字才算在线——
-    覆盖「端口活着但页面白屏/异常」类故障（如前端挂载点被改坏：HTTP 200 但内容失效）。
-    Manifest 场景下关键字通常位于健康页（health_path），两者配合使用。
+    页面判据（aiops_agent.page_health）：配置 keyword 时响应内容须精确包含该关键字；
+    未配置时（默认）采用通用白屏判据——响应非空 + HTML 完整闭合 + body 含可渲染容器，
+    不依赖具体框架的挂载点名称，覆盖「端口活着但页面白屏/异常」类故障
+    （如挂载点被改坏/删除：HTTP 200 但内容失效）。Manifest 场景下判据作用于健康页
+    （health_path），两者配合使用。
     """
     target = url or os.environ.get("AIOPS_MONITOR_URL") or DEFAULT_MONITOR_URL
     path = (health_path or "").strip()
@@ -228,26 +237,28 @@ def probe_monitored_app(
     def _elapsed_ms() -> float:
         return round((time.monotonic() - started) * 1000, 1)
 
-    def _keyword_ok(body: bytes) -> bool:
-        return not check or check in body.decode("utf-8", errors="ignore")
+    def _page_ok(raw: bytes) -> str:
+        return page_problem(
+            raw.decode("utf-8", errors="ignore"), check, truncated=len(raw) >= _PROBE_READ_LIMIT
+        )
 
     try:
         with urllib.request.urlopen(target, timeout=timeout) as resp:  # noqa: S310 - 用户配置的监控地址
             status = getattr(resp, "status", None) or resp.getcode()
-            body = _read_head(resp) if check else b""
-        if not _keyword_ok(body):
+            # 204 No Content 是显式「无内容」成功响应（如精简健康端点）：不按白屏处理
+            problem = "" if status == 204 else _page_ok(_read_head(resp))
+        if problem:
             return {
                 "running": False,
                 "target": target,
                 "status_code": status,
                 "latency_ms": _elapsed_ms(),
-                "error": f"HTTP {status} 但响应内容缺少关键字 {check!r}（页面可能白屏/异常）",
+                "error": f"HTTP {status} 但{problem}",
             }
         return {"running": True, "target": target, "status_code": status, "latency_ms": _elapsed_ms()}
     except urllib.error.HTTPError as exc:
-        # 有 HTTP 响应即在线（如根路径 404 也说明服务在跑）；关键字校验同样适用
-        body = _read_head(exc) if check else b""
-        if not _keyword_ok(body):
+        # 有 HTTP 响应即在线（如根路径 404 也说明服务在跑）；显式配置关键字时仍校验内容
+        if check and check not in _read_head(exc).decode("utf-8", errors="ignore"):
             return {
                 "running": False,
                 "target": target,

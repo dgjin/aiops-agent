@@ -42,6 +42,7 @@ from .fix_agent import (
     split_unified_diff,
 )
 from .models import Alert, CanaryResult, Patch, ReleaseResult
+from .page_health import page_problem
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 ARGOCD_DIR = BASE_DIR / "data" / "argocd"
@@ -385,13 +386,23 @@ def run_finalize(
     return ReleaseResult(version=version, rolled_back=True, reason=reason)
 
 
+# 直连发布页面探针的响应读取上限（达上限视为截断，跳过 HTML 结构判定）
+_PAGE_PROBE_READ_LIMIT = 256 * 1024
+
+
 def _page_probe_once(url: str, keyword: str) -> bool:
-    """对真实页面请求一次：HTTP 200 且（配置探针关键词时）响应体包含该关键词 → 健康。"""
+    """对真实页面请求一次：HTTP 200 且通过页面判据（page_health：关键字/通用白屏检测）→ 健康。"""
     request = urllib.request.Request(url, headers={"User-Agent": "aiops-canary/1.0"})
     try:
         with urllib.request.urlopen(request, timeout=3) as resp:
-            body = resp.read(256 * 1024).decode("utf-8", "replace")
-            return resp.status == 200 and (not keyword or keyword in body)
+            raw = resp.read(_PAGE_PROBE_READ_LIMIT)
+            if resp.status != 200:
+                return False
+            return not page_problem(
+                raw.decode("utf-8", "replace"),
+                keyword,
+                truncated=len(raw) >= _PAGE_PROBE_READ_LIMIT,
+            )
     except (OSError, urllib.error.URLError):
         return False
 
@@ -421,7 +432,7 @@ def run_canary_direct(
     适用于本机开发态前端（vite dev 落盘即生效）等无容器交付面的应用：
     备份补丁涉及文件 → 按 diff 改写真实仓库（含新增文件：--- /dev/null 形态直接创建）
     → 发布留痕（与容器路径一致写 data/argocd/<name>.json，供控制台「系统状态 → 最近发布」读取）
-    → 探针 URL（HTTP 200；配置探针关键词时须包含该关键词）
+    → 探针 URL（HTTP 200 且通过页面判据：配置关键词时须包含该关键词，未配置时通用白屏检测）
     → 健康：保持生效（=已全量发布）；劣化：还原补丁前文件（新增文件删除，=真实回滚）。
     应用阶段任一文件失败：还原已写文件后抛错（不留半成品，交由 Temporal 重试）。
     """

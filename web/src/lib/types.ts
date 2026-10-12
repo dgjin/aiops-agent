@@ -285,9 +285,9 @@ export interface MonitoredApp {
   service: string
   /** 应用落盘日志路径（供采集器按清单采集；支持通配） */
   log_path: string
-  /** 页面健康关键字（可选；空=仅连接级探测）：响应内容须包含该关键字才算在线 */
+  /** 页面健康关键字（可选）：配置后响应内容须包含该关键字才算在线；留空采用通用白屏判据（响应非空 + HTML 完整 + body 含可渲染容器） */
   probe_keyword: string
-  /** 健康检查路径（可选；空=根路径"/"）：Manifest 自动预填，探测/巡检按该路径校验关键字 */
+  /** 健康检查路径（可选；空=根路径"/"）：Manifest 自动预填，探测/巡检按该路径执行页面判据 */
   health_path?: string
   /** 修复目标仓库路径（AIOps 修复引擎据此定位并生成补丁；空=不参与自动修复） */
   repo: string

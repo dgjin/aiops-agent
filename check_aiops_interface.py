@@ -2,15 +2,16 @@
 """被监控应用标准接口（AIOps Manifest v1.0）校验工具。
 
 对被监控系统做「接入前体检」：探测并校验 ``GET /.well-known/aiops.json``，
-按 Manifest 声明验证健康页与 probe_keyword；``--extended`` 时再验证指标路径
-与日志文件，帮助在控制台「从标准接口自动探测」之前确认应用侧改造是否到位。
+验证健康页与页面判据（声明了 ``probe_keyword`` 时精确校验关键字，否则跑通用白屏
+检测——与在线探针同一判据）；``--extended`` 时再验证指标路径与日志文件，
+帮助在控制台「从标准接口自动探测」之前确认应用侧改造是否到位。
 
 用法::
 
     .venv/bin/python check_aiops_interface.py --url http://localhost:8000
     .venv/bin/python check_aiops_interface.py --url order.internal:8000 --extended
 
-退出码：core 检查（Manifest / 健康页 / 关键字）全部通过为 0，否则 1。
+退出码：core 检查（Manifest / 健康页 / 页面判据）全部通过为 0，否则 1。
 扩展检查仅告警不判失败（日志文件可能尚未产生）。
 """
 
@@ -26,6 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from aiops_agent import app_manifest  # noqa: E402 - 需先补齐 sys.path
+from aiops_agent.page_health import page_problem  # noqa: E402
 
 MAX_BODY = 256 * 1024
 _GLOB_CHARS = re.compile(r"[*?\[]")
@@ -93,14 +95,21 @@ def run_check(base_url: str, timeout: float, extended: bool) -> int:
         print(f"[2/{core_total}] 健康检查 {health_path}  ✗ {error or f'HTTP {status}'}")
 
     keyword = (manifest.get("probe_keyword") or "").strip()
-    if not keyword:
-        core_passed += 1
-        print(f"[3/{core_total}] 关键字  · Manifest 未声明 probe_keyword，跳过")
-    elif keyword in body.decode("utf-8", errors="replace"):
-        core_passed += 1
-        print(f"[3/{core_total}] 关键字 {keyword!r}  ✓ 命中健康页响应")
+    page_body = body.decode("utf-8", errors="replace")
+    if keyword:
+        if keyword in page_body:
+            core_passed += 1
+            print(f"[3/{core_total}] 关键字 {keyword!r}  ✓ 命中健康页响应")
+        else:
+            print(f"[3/{core_total}] 关键字 {keyword!r}  ✗ 未命中健康页响应（{health_path}）")
     else:
-        print(f"[3/{core_total}] 关键字 {keyword!r}  ✗ 未命中健康页响应（{health_path}）")
+        # 未声明关键字：跑与在线探针一致的通用白屏判据
+        problem = page_problem(page_body, truncated=len(body) >= MAX_BODY)
+        if not problem:
+            core_passed += 1
+            print(f"[3/{core_total}] 页面判据  ✓ 通用白屏检测通过（未声明 probe_keyword）")
+        else:
+            print(f"[3/{core_total}] 页面判据  ✗ {problem}（{health_path}）")
 
     if extended:
         metrics_path = (manifest.get("metrics_path") or "").strip()

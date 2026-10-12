@@ -414,6 +414,7 @@ class MonitoredAppProbeTest(unittest.TestCase):
              mock.patch("bff.aggregator.urllib.request.urlopen") as urlopen:
             resp = mock.MagicMock()
             resp.status = 200
+            resp.read.return_value = b'<html><body><div id="root"></div></body></html>'
             resp.__enter__.return_value = resp
             urlopen.return_value = resp
             result = aggregator.probe_monitored_app()
@@ -470,6 +471,55 @@ class MonitoredAppProbeTest(unittest.TestCase):
         self.assertEqual(result["status_code"], 200)
         self.assertIn("关键字", result["error"])
 
+    def test_no_keyword_blank_page_marks_down(self):
+        """未配置关键字：HTTP 200 但页面空壳（默认通用判据）→ 判失败（白屏）。"""
+        with mock.patch("bff.aggregator.urllib.request.urlopen") as urlopen:
+            resp = mock.MagicMock()
+            resp.status = 200
+            resp.read.return_value = b"<html><body></body></html>"
+            resp.__enter__.return_value = resp
+            urlopen.return_value = resp
+            result = aggregator.probe_monitored_app("http://x/")
+        self.assertFalse(result["running"])
+        self.assertEqual(result["status_code"], 200)
+        self.assertIn("白屏", result["error"])
+
+    def test_no_keyword_normal_page_online(self):
+        """未配置关键字：完整 HTML 页面（含可渲染容器）→ 在线。"""
+        with mock.patch("bff.aggregator.urllib.request.urlopen") as urlopen:
+            resp = mock.MagicMock()
+            resp.status = 200
+            resp.read.return_value = b'<html><body><div id="root"></div></body></html>'
+            resp.__enter__.return_value = resp
+            urlopen.return_value = resp
+            result = aggregator.probe_monitored_app("http://x/")
+        self.assertTrue(result["running"])
+
+    def test_no_keyword_json_health_online(self):
+        """未配置关键字：JSON 健康端点（非 HTML）→ 非空即在线。"""
+        with mock.patch("bff.aggregator.urllib.request.urlopen") as urlopen:
+            resp = mock.MagicMock()
+            resp.status = 200
+            resp.read.return_value = b'{"status": "ok"}'
+            resp.__enter__.return_value = resp
+            urlopen.return_value = resp
+            result = aggregator.probe_monitored_app("http://x/", health_path="/health")
+        self.assertTrue(result["running"])
+
+    def test_no_keyword_script_only_page_marks_down(self):
+        """未配置关键字：body 只剩入口脚本（挂载点缺失/被删）→ 判失败。"""
+        with mock.patch("bff.aggregator.urllib.request.urlopen") as urlopen:
+            resp = mock.MagicMock()
+            resp.status = 200
+            resp.read.return_value = (
+                b'<html><body><script type="module" src="/src/main.tsx"></script></body></html>'
+            )
+            resp.__enter__.return_value = resp
+            urlopen.return_value = resp
+            result = aggregator.probe_monitored_app("http://x/")
+        self.assertFalse(result["running"])
+        self.assertIn("挂载点缺失", result["error"])
+
     def test_health_path_appended_to_target(self):
         """Manifest 预填的健康路径拼接到探测地址（关键字在健康页上校验）。"""
         with mock.patch("bff.aggregator.urllib.request.urlopen") as urlopen:
@@ -490,6 +540,7 @@ class MonitoredAppProbeTest(unittest.TestCase):
         with mock.patch("bff.aggregator.urllib.request.urlopen") as urlopen:
             resp = mock.MagicMock()
             resp.status = 200
+            resp.read.return_value = b'<html><body><div id="root"></div></body></html>'
             resp.__enter__.return_value = resp
             urlopen.return_value = resp
             result = aggregator.probe_monitored_app("http://x/", health_path="/")

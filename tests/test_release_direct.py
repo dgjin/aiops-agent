@@ -235,7 +235,8 @@ class TestDeployCanaryRouting(unittest.TestCase):
     """activities.deploy_canary 发布模式路由（2026-10-11）：url 非空即直连发布，关键词可空。
 
     背景：注册表关键词被清空后，原门控（contract and url）令直连应用错走容器金丝雀；
-    现以 url 为直连标志——无关键词时页面探针仅校验 HTTP 200（release._page_probe_once）。
+    现以 url 为直连标志——无关键词时页面探针走通用白屏判据（release._page_probe_once
+    → aiops_agent.page_health），不再仅校验 HTTP 200。
     """
 
     def _ctx(self) -> tuple[Alert, Patch]:
@@ -311,6 +312,49 @@ class TestDeployCanaryRouting(unittest.TestCase):
         m_direct.assert_not_called()
         m_container.assert_called_once()
         self.assertEqual(result.mode, "container")
+
+
+class PageProbeOnceTest(unittest.TestCase):
+    """直连发布页面探针（release._page_probe_once）：空关键词走通用白屏判据，配置关键词精确校验。"""
+
+    def _probe(self, body: bytes, *, keyword: str = "", status: int = 200) -> bool:
+        with mock.patch("aiops_agent.release.urllib.request.urlopen") as urlopen:
+            resp = mock.MagicMock()
+            resp.status = status
+            resp.read.return_value = body
+            resp.__enter__.return_value = resp
+            urlopen.return_value = resp
+            return release._page_probe_once("http://127.0.0.1:1/", keyword)
+
+    def test_normal_page_healthy_by_default(self) -> None:
+        self.assertTrue(
+            self._probe(b'<!doctype html><html><body><div id="root"></div></body></html>')
+        )
+
+    def test_blank_page_unhealthy_by_default(self) -> None:
+        """空壳页面（通用判据白屏）→ 探针失败 → 金丝雀劣化回滚。"""
+        self.assertFalse(self._probe(b"<html><body></body></html>"))
+
+    def test_script_only_page_unhealthy_by_default(self) -> None:
+        """挂载点缺失（body 只剩入口脚本）→ 探针失败。"""
+        self.assertFalse(
+            self._probe(b'<html><body><script src="/src/main.tsx"></script></body></html>')
+        )
+
+    def test_keyword_mode_exact(self) -> None:
+        self.assertTrue(self._probe(b'<div id="root">', keyword='<div id="root"'))
+        self.assertFalse(self._probe(b'<div id="rroot">', keyword='<div id="root"'))
+
+    def test_non_200_unhealthy(self) -> None:
+        self.assertFalse(
+            self._probe(
+                b'<!doctype html><html><body><div id="root"></div></body></html>', status=204
+            )
+        )
+
+    def test_truncated_large_body_healthy_by_default(self) -> None:
+        """大响应读取达上限（截断）→ 跳过结构判定（保守放行）。"""
+        self.assertTrue(self._probe(b"<html><body>" + b"x" * (256 * 1024)))
 
 
 if __name__ == "__main__":
