@@ -195,6 +195,70 @@ class StateMachineTest(unittest.TestCase):
         self.assertEqual(entry["entry_snapshot"]["assessment"], "继续评估：补充验收口径")
 
 
+class TrackViewTest(unittest.TestCase):
+    """处理跟踪视图（被监控系统「我的反馈」展示进度）：阶段映射 / 时间线 / 未跟踪态。"""
+
+    def _entry(self) -> dict:
+        return store.new_entry("app-a", "svc-a", _SNAPSHOT, "admin1")
+
+    def test_complete_version_records_done_ts(self) -> None:
+        entry = self._entry()
+        store.complete_version(entry, 1, _ANALYSIS, _META)
+        self.assertTrue(entry["versions"][0].get("done_ts"))
+
+    def test_stage_mapping(self) -> None:
+        entry = self._entry()
+        self.assertEqual(store.track_stage(entry, None), "ANALYZING")
+        store.complete_version(entry, 1, _ANALYSIS, _META)
+        self.assertEqual(store.track_stage(entry, None), "ANALYZED")
+        store.apply_approved(entry, 1, "wf-1", "admin1")
+        self.assertEqual(store.track_stage(entry, None), "APPROVED")
+        self.assertEqual(store.track_stage(entry, "running"), "APPROVED")
+        self.assertEqual(store.track_stage(entry, "released"), "RELEASED")
+        self.assertEqual(store.track_stage(entry, "escalated"), "ESCALATED")
+        self.assertEqual(store.track_stage(entry, "cancelled"), "CANCELLED")
+        self.assertEqual(store.track_stage(entry, "failed"), "RELEASE_FAILED")
+
+    def test_stage_failed_when_degraded(self) -> None:
+        entry = self._entry()
+        store.complete_version(
+            entry, 1, _ANALYSIS, {**_META, "degraded": True, "reason": "LLM 超时"}
+        )
+        self.assertEqual(store.track_stage(entry, None), "ANALYSIS_FAILED")
+
+    def test_timeline_events_order(self) -> None:
+        entry = self._entry()
+        store.complete_version(entry, 1, _ANALYSIS, _META)
+        store.apply_approved(entry, 1, "wf-1", "admin1")
+        entry["approved"]["result"] = {"status": "released", "at": "2026-10-12T08:00:00+00:00"}
+        events = store.track_timeline(entry)
+        self.assertEqual(
+            [e["stage"] for e in events],
+            ["ANALYSIS_STARTED", "ANALYSIS_DONE", "APPROVED", "RELEASED"],
+        )
+        self.assertEqual(events[0]["detail"], "首次分析")
+        self.assertTrue(events[1]["at"])  # 完成时间（done_ts）
+        self.assertEqual(events[3]["at"], "2026-10-12T08:00:00+00:00")
+
+    def test_track_view_untracked(self) -> None:
+        view = store.track_view(None, None, "9")
+        self.assertFalse(view["tracked"])
+        self.assertEqual(view["stage"], "NOT_ANALYZED")
+        self.assertEqual(view["stage_label"], store.TRACK_STAGES["NOT_ANALYZED"])
+        self.assertEqual(view["timeline"], [])
+
+    def test_track_view_approved_running(self) -> None:
+        entry = self._entry()
+        store.complete_version(entry, 1, _ANALYSIS, _META)
+        store.apply_approved(entry, 1, "wf-1", "admin1")
+        view = store.track_view(entry, "running", "7")
+        self.assertTrue(view["tracked"])
+        self.assertEqual(view["stage"], "APPROVED")
+        self.assertEqual(view["entry_id"], "7")
+        self.assertEqual(view["approved_at"], entry["approved"]["at"])
+        self.assertEqual(view["release_status"], "running")
+
+
 class DemoFileStoreTest(unittest.TestCase):
     """demo 后端：文件读写 / create_or_touch 分派 / 执行线程体写回。"""
 

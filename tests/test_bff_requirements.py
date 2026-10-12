@@ -11,6 +11,7 @@ from unittest import mock
 
 from aiops_agent import requirements_client
 
+from bff import requirement_analyses
 from bff.deps import ApiError
 from bff.routes import requirements as routes
 
@@ -544,6 +545,74 @@ class AnalysisRoutesTest(unittest.TestCase):
         self._finish("ra-app-b-7")
         listed = asyncio.run(routes.api_requirement_analysis_list(app_id="app-b"))
         self.assertNotIn("release_status", listed["analyses"][0])
+
+
+class TrackEndpointTest(unittest.TestCase):
+    """处理进度跟踪端点：参数校验 / 未跟踪条目 / 会话映射 / 发布终态（服务令牌通道）。"""
+
+    def setUp(self) -> None:
+        patcher = mock.patch.object(routes.store, "list_all", return_value=list(_APPS))
+        self.list_all = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _analyzed_entry(self) -> dict:
+        entry = requirement_analyses.new_entry("app-b", "svc-b", _ENTRY, "admin")
+        requirement_analyses.complete_version(
+            entry, 1, {"degraded": False, "confidence": 0.8}, {"degraded": False}
+        )
+        return entry
+
+    def _call(self, **overrides):
+        params = dict(app_id="", entry_ids="7")
+        params.update(overrides)
+        return asyncio.run(routes.api_requirements_track(**params))
+
+    def test_missing_ids_rejected(self) -> None:
+        with self.assertRaises(ApiError) as ctx:
+            self._call(entry_ids=" , ")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_too_many_ids_rejected(self) -> None:
+        with self.assertRaises(ApiError):
+            self._call(entry_ids=",".join(str(i) for i in range(1, 102)))
+
+    def test_untracked_entry_returns_not_analyzed(self) -> None:
+        with mock.patch.object(routes.requirement_analyses, "find", return_value=None):
+            result = self._call(entry_ids="9")
+        item = result["entries"][0]
+        self.assertFalse(item["tracked"])
+        self.assertEqual(item["stage"], "NOT_ANALYZED")
+        self.assertEqual(item["timeline"], [])
+
+    def test_analyzed_entry_tracked(self) -> None:
+        entry = self._analyzed_entry()
+        with mock.patch.object(routes.requirement_analyses, "find", return_value=entry):
+            result = self._call(entry_ids="7")
+        item = result["entries"][0]
+        self.assertTrue(item["tracked"])
+        self.assertEqual(item["stage"], "ANALYZED")
+        self.assertEqual(
+            [e["stage"] for e in item["timeline"]], ["ANALYSIS_STARTED", "ANALYSIS_DONE"]
+        )
+
+    def test_approved_entry_release_status(self) -> None:
+        entry = self._analyzed_entry()
+        requirement_analyses.apply_approved(entry, 1, "wf-7", "admin")
+        with mock.patch.object(routes.requirement_analyses, "find", return_value=entry):
+            with mock.patch.object(
+                routes,
+                "_resolve_release_status",
+                new_callable=mock.AsyncMock,
+                return_value="released",
+            ):
+                result = self._call(entry_ids="7")
+        item = result["entries"][0]
+        self.assertEqual(item["stage"], "RELEASED")
+        self.assertEqual(item["release_status"], "released")
+
+    def test_route_registered(self) -> None:
+        paths = {getattr(r, "path", "") for r in routes.router.routes}
+        self.assertIn("/api/requirements/track", paths)
 
 
 class AnalysisWiringTest(unittest.TestCase):

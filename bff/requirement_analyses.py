@@ -237,6 +237,7 @@ def complete_version(entry: dict, version: int, analysis: dict, meta: dict) -> d
     target["meta"] = meta
     target["status"] = "failed" if degraded else "done"
     target["error"] = str((meta or {}).get("reason") or "") if degraded else ""
+    target["done_ts"] = ts  # 处理跟踪：版本完成时间（新写回携带；存量版本缺失时时间线降级为无时间）
     # 顶层状态以「最新版本」为准（旧版本迟到的写回不翻转已推进的状态）
     if int(entry.get("current_version") or 0) == version and entry.get("status") != "approved":
         entry["status"] = "failed" if degraded else "analyzed"
@@ -589,4 +590,149 @@ def summary(entry: dict) -> dict:
         "approved": approved,
         "created_at": entry.get("created_at"),
         "updated_at": entry.get("updated_at"),
+    }
+
+
+# ----------------------------------------------------------------------
+# 处理跟踪视图（供被监控系统「需求反馈 → 我的反馈」展示处理进度）
+#
+# 对外语义：stage 是面向需求提交者的「处理阶段」，timeline 是版本/批准/发布
+# 事件（升序）。被监控系统经服务令牌通道调用 GET /api/requirements/track，
+# 把该视图与本地条目状态合并展示，用户即可看到需求在智能运维系统中的进度。
+# ----------------------------------------------------------------------
+
+# 触发方式中文文案（时间线展示；值域见 TRIGGERS）
+TRIGGER_LABELS = {
+    "initial": "首次分析",
+    "feedback": "管理员反馈",
+    "retry": "重试分析",
+    "refresh": "继续评估同步",
+}
+
+# 处理阶段 → 中文标签（stage 值域 = 以下键）
+TRACK_STAGES = {
+    "NOT_ANALYZED": "等待智能运维系统处理",
+    "ANALYZING": "智能分析中",
+    "ANALYZED": "分析完成，待批准",
+    "ANALYSIS_FAILED": "分析未成功（可重试）",
+    "APPROVED": "已批准，修复与发布进行中",
+    "RELEASED": "已发布上线",
+    "ESCALATED": "已转人工跟进",
+    "CANCELLED": "修复流程已取消",
+    "RELEASE_FAILED": "修复流程失败",
+    "UNKNOWN": "状态未知",
+}
+
+# 修复流程发布终态（approved.result.status）→ stage（与 routes 的 _RELEASE_FINAL 同值域）
+_RELEASE_STAGE = {
+    "released": "RELEASED",
+    "escalated": "ESCALATED",
+    "cancelled": "CANCELLED",
+    "failed": "RELEASE_FAILED",
+}
+
+
+def track_stage(entry: dict, release_status: str | None) -> str:
+    """顶层处理阶段（纯函数便于单测）：approved 会话按发布状态细分终态。"""
+    status = entry.get("status")
+    if status == "analyzing":
+        return "ANALYZING"
+    if status == "analyzed":
+        return "ANALYZED"
+    if status == "failed":
+        return "ANALYSIS_FAILED"
+    if status == "approved":
+        return _RELEASE_STAGE.get(release_status or "", "APPROVED")
+    return "UNKNOWN"
+
+
+def track_timeline(entry: dict) -> list[dict]:
+    """版本与批准/发布事件 → 时间线（升序；存量版本无完成时间时 at 为空串）。"""
+    events: list[dict] = []
+    for version in entry.get("versions") or []:
+        events.append(
+            {
+                "stage": "ANALYSIS_STARTED",
+                "at": str(version.get("ts") or ""),
+                "version": version.get("version"),
+                "detail": TRIGGER_LABELS.get(
+                    str(version.get("trigger")), str(version.get("trigger") or "")
+                ),
+            }
+        )
+        vstatus = version.get("status")
+        if vstatus in ("done", "failed"):
+            events.append(
+                {
+                    "stage": "ANALYSIS_DONE" if vstatus == "done" else "ANALYSIS_FAILED",
+                    "at": str(version.get("done_ts") or ""),
+                    "version": version.get("version"),
+                    "detail": "",
+                }
+            )
+    approved = entry.get("approved") or {}
+    if approved.get("at"):
+        events.append(
+            {
+                "stage": "APPROVED",
+                "at": str(approved.get("at")),
+                "version": approved.get("version"),
+                "detail": "",
+            }
+        )
+        result = approved.get("result") or {}
+        final_stage = _RELEASE_STAGE.get(str(result.get("status") or ""))
+        if final_stage:
+            events.append(
+                {
+                    "stage": final_stage,
+                    "at": str(result.get("at") or ""),
+                    "version": approved.get("version"),
+                    "detail": "",
+                }
+            )
+    return events
+
+
+def track_view(entry: dict | None, release_status: str | None, entry_id: str) -> dict:
+    """单条目处理跟踪视图（纯函数；entry=None 表示智能运维系统尚未接收该需求）。"""
+    if entry is None:
+        return {
+            "entry_id": str(entry_id),
+            "tracked": False,
+            "stage": "NOT_ANALYZED",
+            "stage_label": TRACK_STAGES["NOT_ANALYZED"],
+            "current_version": 0,
+            "started_at": "",
+            "analysis_done_at": "",
+            "approved_at": "",
+            "release_status": None,
+            "release_at": "",
+            "updated_at": "",
+            "timeline": [],
+        }
+    stage = track_stage(entry, release_status)
+    latest_done = next(
+        (
+            str(version.get("done_ts") or "")
+            for version in reversed(entry.get("versions") or [])
+            if version.get("status") == "done"
+        ),
+        "",
+    )
+    approved = entry.get("approved") or {}
+    result = approved.get("result") or {}
+    return {
+        "entry_id": str(entry_id),
+        "tracked": True,
+        "stage": stage,
+        "stage_label": TRACK_STAGES.get(stage, TRACK_STAGES["UNKNOWN"]),
+        "current_version": int(entry.get("current_version") or 0),
+        "started_at": str(entry.get("created_at") or ""),
+        "analysis_done_at": latest_done,
+        "approved_at": str(approved.get("at") or ""),
+        "release_status": release_status,
+        "release_at": str(result.get("at") or ""),
+        "updated_at": str(entry.get("updated_at") or ""),
+        "timeline": track_timeline(entry),
     }

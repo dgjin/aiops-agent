@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from bff import aggregator, app, audit, config_items, temporal_gateway
+from bff import aggregator, app, audit, config_items, middleware, temporal_gateway
 from bff.routes.monitored_apps import _find_rollback_source
 from bff.temporal_gateway import _item_from_result, _item_from_status, check_stage_allowed
 
@@ -218,6 +218,50 @@ class RequiredRoleTest(unittest.TestCase):
     def test_unknown_write_defaults_to_admin(self):
         """未知写接口按最高要求（安全默认），避免新增端点漏配。"""
         self.assertEqual(app.required_role("POST", "/api/something-new"), "admin")
+
+
+class ServiceTokenTest(unittest.TestCase):
+    """服务令牌旁路：仅精确路径 + GET + 令牌匹配才生效（被监控系统只读集成通道）。"""
+
+    _PATH = "/api/requirements/track"
+    _ENV = "AIOPS_TRACK_SERVICE_TOKEN"
+
+    def _request(self, path: str | None = None, method: str = "GET", token: str | None = None):
+        from starlette.requests import Request
+
+        headers = []
+        if token is not None:
+            headers.append((b"authorization", f"Bearer {token}".encode("utf-8")))
+        return Request(
+            {
+                "type": "http",
+                "method": method,
+                "path": path or self._PATH,
+                "headers": headers,
+                "query_string": b"",
+            }
+        )
+
+    def test_disabled_when_env_missing(self):
+        with mock.patch.dict(os.environ, {self._ENV: ""}):
+            self.assertIsNone(middleware._service_identity(self._request(token="tok-svc")))
+
+    def test_matches_only_exact_path_get_and_token(self):
+        with mock.patch.dict(os.environ, {self._ENV: "tok-svc"}):
+            identity = middleware._service_identity(self._request(token="tok-svc"))
+            self.assertIsNotNone(identity)
+            self.assertEqual(identity.role, "viewer")
+            self.assertEqual(identity.level, 1)  # ROLE_ORDER["viewer"]
+            # 错令牌 / 非 GET / 其他路径一律回落到常规鉴权
+            self.assertIsNone(middleware._service_identity(self._request(token="bad")))
+            self.assertIsNone(
+                middleware._service_identity(self._request(method="POST", token="tok-svc"))
+            )
+            self.assertIsNone(
+                middleware._service_identity(
+                    self._request(path="/api/requirements", token="tok-svc")
+                )
+            )
 
 
 class AuditRecordTest(unittest.TestCase):

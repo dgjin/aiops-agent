@@ -118,6 +118,56 @@ async def api_requirements(
 
 
 # ----------------------------------------------------------------------
+# 处理进度跟踪（被监控系统「需求反馈 → 我的反馈」展示用）
+#
+# 被监控系统的最终用户在提交需求后，只能看到「待评估 / 已纳入基线」；需求在
+# AIOps 侧的分析 / 批准 / 修复发布进度对它不可见。本端点把分析会话视图翻译成
+# 面向提交者的 stage + timeline，由被监控系统经**服务令牌通道**（环境变量
+# AIOPS_TRACK_SERVICE_TOKEN，见 middleware）拉取并展示。
+# ----------------------------------------------------------------------
+
+_MAX_TRACK_IDS = 100
+
+
+@router.get("/api/requirements/track")
+async def api_requirements_track(
+    app_id: str = Query("", max_length=64, description="被监控应用 ID；缺省取清单中第一个启用项"),
+    entry_ids: str = Query(
+        "", max_length=1024, description="需求条目 ID 列表（逗号分隔，最多 100 个）"
+    ),
+) -> dict:
+    """需求处理进度跟踪（服务令牌通道可读；无会话的条目返回 NOT_ANALYZED）。"""
+    ids: list[str] = []
+    for raw in entry_ids.split(","):
+        value = raw.strip()
+        if value and value not in ids:
+            ids.append(value)
+    if not ids:
+        raise ApiError(400, "缺少 entry_ids（逗号分隔的需求条目 ID 列表）")
+    if len(ids) > _MAX_TRACK_IDS:
+        raise ApiError(400, f"entry_ids 最多 {_MAX_TRACK_IDS} 个")
+
+    apps = [_app_summary(app) for app in store.list_all()]
+    if app_id:
+        target = next((app for app in apps if app.get("id") == app_id), None)
+        if target is None:
+            raise ApiError(404, f"未找到被监控应用：{app_id}")
+    else:
+        target = next((app for app in apps if app.get("enabled")), apps[0] if apps else None)
+    if target is None:
+        return ok({"ok": False, "error": "被监控应用清单为空", "apps": [], "app": None, "entries": []})
+
+    tracked: list[dict] = []
+    for entry_id in ids:
+        entry = requirement_analyses.find(str(target.get("id")), entry_id)
+        release_status = None
+        if entry is not None and entry.get("status") == "approved":
+            release_status = await _resolve_release_status(entry)
+        tracked.append(requirement_analyses.track_view(entry, release_status, entry_id))
+    return ok({"ok": True, "apps": apps, "app": target, "entries": tracked})
+
+
+# ----------------------------------------------------------------------
 # 智能分析闭环：分析结果查看 → 管理员反馈 → 再次分析 → 批准进入修复工作流
 #
 # 写操作（POST）均为 admin：批准即启动「需求驱动修复工作流」（沙箱验证 / 人工审批 /

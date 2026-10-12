@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
+import os
 import time
 
 from fastapi import HTTPException, Request
@@ -39,6 +41,18 @@ _READ_ROLE_OVERRIDES: list[tuple[str, str]] = [
 # 认证前的唯一合法入口（登录换取会话令牌；失败限速在路由内，防口令爆破）
 _PUBLIC_ENDPOINTS = {"/api/auth/login"}
 
+# 服务令牌旁路（面向被监控系统的只读集成通道）：(精确路径, 环境变量名)。
+# 用途：被监控系统（如智能问数）在自己的「需求反馈」界面展示其需求在本系统的
+# 处理进度——该通道独立于控制台会话/注册表（不受令牌轮换与注册表故障影响），
+# 但仅限 GET 且路径精确匹配；env 未配置＝通道关闭（fail-closed 到常规鉴权）。
+_SERVICE_ENDPOINTS: tuple[tuple[str, str], ...] = (
+    ("/api/requirements/track", "AIOPS_TRACK_SERVICE_TOKEN"),
+)
+
+# 服务身份角色：只读通道，与读接口默认要求一致
+_SERVICE_ROLE = "viewer"
+_SERVICE_USER = "service:nl2sql"
+
 # kill switch 激活时仍可调用的写端点（否则激活后无法关闭/登出；角色校验仍生效）
 _KILL_SWITCH_EXEMPT = {
     "/api/system/kill-switch",
@@ -53,6 +67,31 @@ def _client_ip(request: Request) -> str:
     if forwarded:
         return forwarded.split(",")[0].strip() or "unknown"
     return request.client.host if request.client else "unknown"
+
+
+def _service_identity(request: Request) -> "auth_store.Identity | None":
+    """服务令牌旁路判定（纯函数）：路径/方法/令牌三重精确命中才返回服务身份。
+
+    - 仅 GET，且路径必须在 ``_SERVICE_ENDPOINTS`` 白名单中；
+    - 环境变量未配置、无 Bearer 或令牌不符（常数时间比较）→ None（走常规鉴权）。
+    """
+    if request.method.upper() != "GET":
+        return None
+    env_name = next(
+        (name for endpoint, name in _SERVICE_ENDPOINTS if endpoint == request.url.path), None
+    )
+    if env_name is None:
+        return None
+    expected = (os.environ.get(env_name) or "").strip()
+    if not expected:
+        return None
+    authorization = request.headers.get("authorization") or ""
+    if not authorization.lower().startswith("bearer "):
+        return None
+    token = authorization.split(" ", 1)[1].strip()
+    if not hmac.compare_digest(token, expected):
+        return None
+    return auth_store.Identity(user=_SERVICE_USER, role=_SERVICE_ROLE)
 
 
 def _rate_limited(retry_after: float) -> JSONResponse:
@@ -118,7 +157,11 @@ async def _auth_guard(request: Request, call_next):
     except auth_store.AuthConfigError as exc:
         resolved, session_error = None, str(exc)
 
-    if resolved is not None:
+    # 通道 0：服务令牌旁路（只读集成；命中后仍走限速与角色检查，独立于注册表状态）
+    service_identity = _service_identity(request)
+    if service_identity is not None:
+        identity, token_record = service_identity, {"source": "service"}
+    elif resolved is not None:
         identity, token_record = resolved
     else:
         if tokens is None and session_error is not None:
