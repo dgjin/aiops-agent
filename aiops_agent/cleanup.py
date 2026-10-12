@@ -191,7 +191,7 @@ def run_cleanup(
     ttl = dict(ttl or ttl_days())
     now = datetime.now(timezone.utc)
     audit_dir = Path(audit_dir) if audit_dir is not None else mode.data_root() / "web-audit"
-    sandbox_root = Path(sandbox_root) if sandbox_root is not None else sandbox.DEFAULT_SANDBOX_ROOT
+    sandbox_root = Path(sandbox_root) if sandbox_root is not None else sandbox.default_sandbox_root()
     notify_dir = Path(notify_dir) if notify_dir is not None else notify_mod.NOTIFY_DIR
     qoder_root = (
         Path(qoder_root)

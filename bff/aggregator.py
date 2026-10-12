@@ -5,7 +5,7 @@
 - data/historical_tickets.json  历史工单（tickets 计数）
 - data/notify/*.json       通知留痕（审批/公告/升级卡片）
 - data/argocd/*.json       ArgoCD Application manifest 留痕
-- data/sandbox/<patch_id>/ 沙箱工作区
+- 沙箱工作区（AIOPS_SANDBOX_ROOT 可覆盖，默认 data/sandbox/<patch_id>/）
 
 探测约定：
 - probe_stable：本系统发布出的稳定版服务（/health，解析 JSON）
@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from aiops_agent.page_health import page_problem
+from aiops_agent.sandbox import default_sandbox_root
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 _VERSION_RE = re.compile(r"v[\d.]+")
@@ -76,11 +77,11 @@ def artifacts_for_patch(patch_id: str) -> dict:
             return []
         return sorted(p.name for p in directory.glob(f"*{patch_id}*") if p.is_file())
 
-    sandbox = DATA_DIR / "sandbox" / patch_id
+    sandbox_dir = default_sandbox_root() / patch_id
     return {
         "notify": _glob("notify"),
         "argocd": _glob("argocd"),
-        "sandbox_dir": str(sandbox) if sandbox.is_dir() else None,
+        "sandbox_dir": str(sandbox_dir) if sandbox_dir.is_dir() else None,
     }
 
 

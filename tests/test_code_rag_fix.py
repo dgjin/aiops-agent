@@ -6,7 +6,7 @@
     - apply_unified_diff：应用成功（含围栏剥离）、上下文不匹配、垃圾输入；
     - validate_source：编译校验（对应验收「建议 diff 可编译」）；
     - locate_target_file：OrderService.java → order_service.py 模糊定位；
-    - run_fix：LLM 正常路径（validated）/ 垃圾输出（degraded 兜底）/ 演示分支短路；
+    - run_fix：LLM 正常路径（validated）/ 垃圾输出与调用异常（degraded 兜底）/ 未定位目标文件 / 演示分支短路；
     - activities 集成：test-fail 短路、RAG 检索降级与命中；
     - 自动适配（WP-ADAPT）：检索索引自动解析（环境变量覆盖 > 专属索引 > 默认），
       专属索引缺失/仓库变更时自动构建，构建失败不回退他仓索引。
@@ -533,6 +533,58 @@ class TestRunFix(unittest.TestCase):
         # 否则沙箱 5/6 → 走不到二级审批
         self.assertIn("auth/token_service.py", patch.files)
         self.assertEqual(patch.files, ["order_service.py", "auth/token_service.py"])
+
+
+class TestFixDegradation(unittest.TestCase):
+    """修复降级兜底回归（P1④）：LLM 不可用时必须输出**真实可应用**的确定性兜底补丁。
+
+    三条降级入口：调用异常（本类）/ 输出非法（TestRunFix 垃圾输出用例）/ 未定位到目标文件（本类）。
+    契约：patch 与 meta 双通道标记 degraded（前端据此拦截「自动修复」展示）、原因留痕、
+    目标文件可读时 diff 必须基于真实内容构造（沙箱可应用，不误报「无法应用」）。
+    """
+
+    def setUp(self) -> None:
+        # 与 TestRunFix 同理：环境里可能配置 AIOPS_FIX_PROVIDER=qoder，必须钉死 Ollama 分支
+        patcher = mock.patch.dict(os.environ, {"AIOPS_FIX_PROVIDER": "ollama"}, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_llm_exception_degrades_to_appliable_fallback(self) -> None:
+        with mock.patch(
+            "aiops_agent.fix_agent.call_ollama", side_effect=ConnectionError("ollama refused")
+        ):
+            patch, meta = fix_agent.run_fix(ALERT_REAL, ROOT_CAUSE, references=[], attempt=0)
+        self.assertTrue(meta["degraded"])
+        self.assertIn("ConnectionError", meta["reason"])
+        self.assertEqual(meta["generations"], 0)  # 失败发生在 LLM 调用本身
+        self.assertFalse(meta["validated"])
+        self.assertTrue(patch.degraded)
+        self.assertIn("ConnectionError", patch.degrade_reason)
+        self.assertEqual(patch.model_version, fix_agent.STUB_MODEL_VERSION)
+        # 兜底 diff 基于 order_service.py 真实内容：必须可应用且可编译（沙箱据此执行测试）
+        content = (code_rag.DEFAULT_REPO_DIR / "order_service.py").read_text(encoding="utf-8")
+        new_text = fix_agent.apply_unified_diff(content, patch.diff)
+        self.assertIsNotNone(new_text)
+        ok, error = fix_agent.validate_source(new_text, "order_service.py")
+        self.assertTrue(ok, error)
+
+    def test_target_not_located_degrades_without_llm_call(self) -> None:
+        """suspect 文件不在仓库 → 未定位分支：不调 LLM 直接安全侧兜底（省 token、不中断）。"""
+        root_cause = RootCause(
+            error_type="TimeoutError",
+            suspect_files=["src/nope/missing.py"],
+            confidence=0.7,
+            summary="未知模块超时。",
+        )
+        with mock.patch("aiops_agent.fix_agent.call_ollama") as llm:
+            patch, meta = fix_agent.run_fix(ALERT_REAL, root_cause, references=[], attempt=0)
+        llm.assert_not_called()
+        self.assertTrue(meta["degraded"])
+        self.assertIn("未定位到目标文件", meta["reason"])
+        self.assertTrue(patch.degraded)
+        self.assertIn("未定位到目标文件", patch.degrade_reason)
+        # 目标不可读 → 占位 diff（沙箱将如实报告「无法应用」，流程仍在安全侧）
+        self.assertEqual(patch.files, ["src/nope/missing.py"])
 
 
 class TestActivitiesWP4(unittest.TestCase):

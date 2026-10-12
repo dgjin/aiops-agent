@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""组件守护（P0-3）：巡检 6 个常驻组件，异常退出自动拉起，崩溃风暴自动冷却。
+"""组件守护（P0-3）：巡检 6 个常驻组件，异常退出自动拉起，崩溃风暴自动冷却，内存超限自动重启。
 
 背景：demo-up.sh 只负责启动、不负责守护——任一常驻组件（worker/BFF/告警接入/可用性巡检/
 日志采集/突增检测）崩溃后链路静默断裂。本脚本按固定周期巡检（pgrep 判活），发现缺失即按
-demo-up.sh 同款命令拉起，并写入日志。
+demo-up.sh 同款命令拉起，并写入日志；同时读取各组件 RSS，超过阈值（默认 1024MB）即重启，
+作为 macOS 无 cgroup 场景的宿主机组件软限额（P1，2026-10-12）。
 
 不变量：
     - 档位锁定（P1）：守护启动时解析一次生效档位（环境变量 > .env > production，与
@@ -24,7 +25,8 @@ demo-up.sh 同款命令拉起，并写入日志。
     python3 scripts/aiops-watchdog.py --status     # 只看存活状态（有任何缺失退出码 1）
     bash scripts/launchd-install.sh install        # 开机自启（launchd 用户级托管，可卸载）
     环境变量：AIOPS_WATCHDOG_INTERVAL（巡检周期秒，默认 30）；
-             AIOPS_WATCHDOG_SURGE_ARGS（突增检测器拉起参数覆盖，默认与 demo-up.sh 演示值一致）
+             AIOPS_WATCHDOG_SURGE_ARGS（突增检测器拉起参数覆盖，默认与 demo-up.sh 演示值一致）；
+             AIOPS_WATCHDOG_RSS_MB（组件内存上限 MB，默认 1024，0=关闭内存守护）
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ import argparse
 import fcntl
 import logging
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -47,6 +50,9 @@ if not PY.exists():  # 无 venv 时退回当前解释器（与 security-scan.sh 
 DEFAULT_INTERVAL = 30.0
 # 与 demo-up.sh 演示灵敏度一致（生产建议 --min-lines 100 --factor 3，可用环境变量覆盖）
 DEFAULT_SURGE_ARGS = "--min-lines 5 --factor 2 --cooldown 300"
+# 组件内存软限额（P1，2026-10-12）：RSS 超过该值即重启（实测基线：worker≈556MB 为最高，
+# BFF≈151MB，其余 ≤70MB；1024 对正常波动留足余量，内存失控/泄漏才会触发）
+DEFAULT_RSS_LIMIT_MB = 1024.0
 
 # 单实例锁（P1）：常驻模式独占，防止 launchd 托管与手动启动双守护并存
 LOCK_PATH = ROOT / "data" / "aiops-watchdog.lock"
@@ -163,6 +169,80 @@ def is_running(pattern: str) -> bool:
     )
 
 
+def _pids_for(pattern: str) -> list[int]:
+    """pgrep -f 返回全部匹配 pid（无匹配/执行失败返回空列表）。"""
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", pattern], capture_output=True, text=True, check=False
+        ).stdout
+    except OSError:
+        return []
+    return [int(tok) for tok in out.split() if tok.isdigit()]
+
+
+def _pid_alive(pid: int) -> bool:
+    """进程存活判定（僵尸感知）：自己的子进程用 waitpid 判定并顺带收割——
+
+    kill(pid, 0) 对已退出的僵尸子进程仍返回成功，会把「已死待收」误判为存活
+    （表现为 5s 宽限空转 + 误报 SIGKILL 升级）；非本进程子进程回退 kill(0) 探测。
+    """
+    try:
+        wpid, _ = os.waitpid(pid, os.WNOHANG)
+        if wpid == pid:  # 自己的子进程已退出：本次调用完成收割，判死
+            return False
+        if wpid == 0:  # 自己的子进程仍在运行
+            return True
+    except ChildProcessError:
+        pass  # 非本进程子进程（如 demo-up.sh 拉起的组件）→ 回退信号探测
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _rss_kb(pid: int) -> int | None:
+    """ps 读取 RSS（KB）；进程消失/读取失败返回 None。"""
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True, check=False
+        ).stdout.strip()
+    except OSError:
+        return None
+    try:
+        return int(out.split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _terminate_pids(pids: list[int], wait_s: float = 5.0) -> list[int]:
+    """先 SIGTERM 宽限 wait_s 秒，未退出再 SIGKILL，末尾再收割确认；
+
+    返回升级强杀后仍无法确认退出的 pid（正常为空；僵尸经 waitpid 收割不计入）。
+    """
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    deadline = time.monotonic() + wait_s
+    remaining = sorted({p for p in pids if _pid_alive(p)})
+    while remaining and time.monotonic() < deadline:
+        time.sleep(0.2)
+        remaining = sorted({p for p in remaining if _pid_alive(p)})
+    for pid in remaining:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if remaining:  # 升级强杀后短等一拍：waitpid 收割并确认，剔除僵尸误报
+        time.sleep(0.2)
+        remaining = sorted({p for p in remaining if _pid_alive(p)})
+    return remaining
+
+
 def start_component(comp: Component) -> int:
     """以独立会话拉起组件（语义同 nohup：stdin 关闭、日志追加），返回 pid。"""
     with open(comp.log_path, "ab") as log:
@@ -242,6 +322,69 @@ def check_once(
     return restarted
 
 
+def check_memory_once(
+    components: tuple[Component, ...],
+    guard: RestartGuard,
+    now: float,
+    logger: logging.Logger,
+    limit_mb: float,
+    dry_run: bool = False,
+    pids_fn=_pids_for,
+    rss_fn=_rss_kb,
+    kill_fn=_terminate_pids,
+    start_fn=start_component,
+) -> int:
+    """单轮内存巡检：RSS 超限的组件按重启守卫策略就地重启，返回本轮因超限重启数。
+
+    limit_mb<=0 表示关闭；组件缺失由存活巡检负责（本函数仅处置「在跑但超限」）。
+    与存活巡检共用 RestartGuard，防内存失控-重启风暴。
+    """
+    if limit_mb <= 0:
+        return 0
+    limit_kb = limit_mb * 1024
+    restarted = 0
+    for comp in components:
+        pids = pids_fn(comp.pattern)
+        if not pids:
+            continue
+        readings = [v for v in (rss_fn(pid) for pid in pids) if v is not None]
+        if not readings:
+            continue
+        peak_mb = max(readings) / 1024
+        if peak_mb <= limit_mb:
+            continue
+        if dry_run:
+            logger.warning(
+                "%s 内存超限（%.0fMB > %.0fMB，dry-run 未处置）", comp.name, peak_mb, limit_mb
+            )
+            continue
+        if not guard.allow(comp.name, now):
+            logger.warning(
+                "%s 内存超限（%.0fMB > %.0fMB），但处于崩溃冷却中（剩余 %.0fs），本轮跳过",
+                comp.name,
+                peak_mb,
+                limit_mb,
+                guard.cooldown_remaining(comp.name, now),
+            )
+            continue
+        stuck = kill_fn(pids)
+        pid = start_fn(comp)
+        guard.record(comp.name, now)
+        restarted += 1
+        note = f"，其中 {len(stuck)} 个升级 SIGKILL" if stuck else ""
+        logger.warning(
+            "%s 内存超限（%.0fMB > %.0fMB），已重启（旧 pid %s → 新 pid %d%s），日志 %s",
+            comp.name,
+            peak_mb,
+            limit_mb,
+            ",".join(str(p) for p in pids),
+            pid,
+            note,
+            comp.log_path,
+        )
+    return restarted
+
+
 def run_status(components: tuple[Component, ...], logger: logging.Logger) -> int:
     """输出各组件存活状态；有缺失返回 1。"""
     missing = 0
@@ -264,6 +407,12 @@ def main() -> None:
         default=float(os.environ.get("AIOPS_WATCHDOG_INTERVAL", DEFAULT_INTERVAL)),
         help="巡检周期秒（默认 30，或环境变量 AIOPS_WATCHDOG_INTERVAL）",
     )
+    parser.add_argument(
+        "--rss-mb",
+        type=float,
+        default=float(os.environ.get("AIOPS_WATCHDOG_RSS_MB", DEFAULT_RSS_LIMIT_MB)),
+        help="组件内存上限 MB，超限自动重启（默认 1024，或环境变量 AIOPS_WATCHDOG_RSS_MB；0=关闭）",
+    )
     parser.add_argument("--once", action="store_true", help="单轮巡检后退出（排查/CI 用）")
     parser.add_argument("--dry-run", action="store_true", help="只报告不拉起（配合 --once）")
     parser.add_argument("--status", action="store_true", help="只输出各组件存活状态（有缺失退出码 1）")
@@ -277,14 +426,20 @@ def main() -> None:
         sys.exit(run_status(components, logger))
 
     guard = RestartGuard()
+    rss_note = "已关闭" if args.rss_mb <= 0 else f"{args.rss_mb:.0f}MB"
     logger.info(
-        "组件守护已启动：周期 %.0fs，监控 %d 个组件（%s）",
+        "组件守护已启动：周期 %.0fs，监控 %d 个组件（%s），内存阈值 %s",
         args.interval,
         len(components),
         "、".join(c.name for c in components),
+        rss_note,
     )
     if args.once:
-        restarted = check_once(components, guard, time.monotonic(), logger, dry_run=args.dry_run)
+        now = time.monotonic()
+        restarted = check_once(components, guard, now, logger, dry_run=args.dry_run)
+        restarted += check_memory_once(
+            components, guard, now, logger, args.rss_mb, dry_run=args.dry_run
+        )
         logger.info("单轮巡检完成：拉起 %d 个组件", restarted)
         return
     # 常驻模式：单实例锁 + 档位锁定（P1/P2）
@@ -303,7 +458,9 @@ def main() -> None:
     try:
         while True:
             try:
-                check_once(components, guard, time.monotonic(), logger)
+                now = time.monotonic()
+                check_once(components, guard, now, logger)
+                check_memory_once(components, guard, now, logger, args.rss_mb)
             except Exception:  # noqa: BLE001 - 单轮故障不中断守护循环（与 ship/surge 同款语义）
                 logger.exception("本轮巡检异常，等待下一轮")
             time.sleep(args.interval)

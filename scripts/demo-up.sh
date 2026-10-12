@@ -62,6 +62,27 @@ wait_http() { # url timeout_s
   return 1
 }
 
+# Temporal 保留期校准（幂等，2026-10-12）：dev server 默认命名空间 retention=24h
+# 会静默清理超期历史；与仓库数据清理默认（7 天）对齐校准为 168h，容器重建后本步自动恢复。
+# 目标值可用 AIOPS_TEMPORAL_RETENTION 覆盖（Go duration 语法，如 72h / 336h）。
+calibrate_temporal_retention() {
+  if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx aiops-temporal; then
+    warn "Temporal 容器未见（非 Docker 场景），跳过保留期校准"
+    return 0
+  fi
+  local want cur
+  want="${AIOPS_TEMPORAL_RETENTION:-168h}"
+  cur="$(docker exec aiops-temporal temporal operator namespace describe default 2>/dev/null \
+    | awk '/WorkflowExecutionRetentionTtl/ {print $2}' || true)"
+  if [ "$cur" = "$want" ] || [ "$cur" = "${want}0m0s" ]; then
+    info "Temporal 保留期=${want}（已校准，无需变更）"
+  elif docker exec aiops-temporal temporal operator namespace update -n default --retention "$want" >/dev/null 2>&1; then
+    info "Temporal 保留期已校准：${cur:-未知} → ${want}（dev server 默认 24h 会静默清理历史）"
+  else
+    warn "Temporal 保留期校准失败（不影响启动；手动命令见部署手册 §2.4.1）"
+  fi
+}
+
 # 档位横幅（P2-1）：如实展示生效档位，防「以为是 demo、实际跑 production」的档位混用
 show_mode_banner() {
   if [ "${AIOPS_MODE}" = "demo" ]; then
@@ -147,6 +168,7 @@ cmd_env() {
   $cc up -d 2>&1 | sed 's/^/    /' || { err "依赖容器启动失败（请检查 ${cc} 与 docker-compose.yml）"; exit 1; }
   wait_tcp 127.0.0.1 7233 90 || { err "Temporal 未就绪（${TEMPORAL_ADDR}，超过 90 秒）"; exit 1; }
   info "Temporal 已就绪（${TEMPORAL_ADDR}，UI http://localhost:8233）"
+  calibrate_temporal_retention
   wait_http "$LOKI_URL/ready" 90 || { err "Loki 未就绪（${LOKI_URL}，超过 90 秒）"; exit 1; }
   info "Loki 已就绪（${LOKI_URL}）"
 }

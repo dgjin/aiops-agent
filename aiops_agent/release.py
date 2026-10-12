@@ -297,7 +297,7 @@ def run_canary(
 ) -> CanaryResult:
     """金丝雀发布编排：工作区 → ArgoCD 发布 → 镜像构建 → 金丝雀运行 → 真实观测。"""
     repo_dir = Path(repo_dir) if repo_dir else code_rag.DEFAULT_REPO_DIR
-    sandbox_root = Path(sandbox_root) if sandbox_root else sandbox.DEFAULT_SANDBOX_ROOT
+    sandbox_root = Path(sandbox_root) if sandbox_root else sandbox.default_sandbox_root()
     runner = runner or DockerRolloutRunner()
     version = release_version(patch.patch_id)
 

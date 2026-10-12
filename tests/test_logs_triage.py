@@ -5,6 +5,7 @@
     - is_surge：突增判定（绝对门槛、环比倍数、基线为 0）；
     - triage schema：pydantic 强校验（合法/越界/缺字段/extra 忽略）；
     - strip_code_fence / build_triage_prompt / fallback / run_triage 降级与成功路径（mock Ollama）；
+    - 降级契约（P1④）：fallback confidence=0.0 < 真实策略阈值（闸门 1 转人工不被配置静默破坏）；
     - build_surge_alert：Alertmanager 载荷标签完整性；
     - resolve_services：显式参数解析 / 清单动态去重 / 清单不可读容错。
 
@@ -20,7 +21,7 @@ from unittest import mock
 
 from pydantic import ValidationError
 
-from aiops_agent import logs, triage
+from aiops_agent import config, logs, triage
 from aiops_agent.models import Alert
 from log_surge_detector import build_surge_alert, main as surge_main, resolve_services
 
@@ -188,6 +189,37 @@ class TestRunTriage(unittest.TestCase):
         prompt = call.call_args.args[0]
         self.assertIn("## 最近变更", prompt)
         self.assertIn("阈值下调", prompt)
+
+
+class TestTriageDegradationContract(unittest.TestCase):
+    """LLM 降级契约回归（P1④）：降级输出必须被闸门 1（confidence < 策略阈值）拦截转人工。
+
+    run_triage 的异常/非法输出降级路径已由 TestRunTriage 覆盖；此处锁死**跨模块契约**：
+    读真实策略文件（release-gate-policy.yaml）的阈值，断言 fallback 永远低于它——
+    任何「降级却照样进入修复流程」的静默破坏（阈值被改小 / fallback 置信度被调高）都会被打红。
+    """
+
+    def test_fallback_root_cause_blocks_gate1_with_real_policy(self) -> None:
+        threshold = config.load_policy().release_gate.triage.confidence_threshold
+        self.assertGreater(threshold, 0.0)  # 阈值为 0 时任何置信度都放行，契约失效
+        fallback = triage.fallback_root_cause(ALERT, "Ollama 不可达")
+        self.assertEqual(fallback.confidence, 0.0)
+        self.assertLess(fallback.confidence, threshold)
+        self.assertEqual(fallback.error_type, "Unknown")
+        self.assertEqual(fallback.suspect_files, [])
+        self.assertIn("转人工", fallback.summary)
+
+    def test_degraded_meta_carries_reason_for_audit(self) -> None:
+        """降级原因必须随 meta 留痕（评测/审计/通知据此说明「为何转人工」）。"""
+        with mock.patch(
+            "aiops_agent.triage.call_ollama", side_effect=ConnectionError("refused")
+        ):
+            root_cause, meta = triage.run_triage(ALERT, {"templates": []})
+        self.assertTrue(meta["degraded"])
+        self.assertIn("ConnectionError", meta["reason"])
+        self.assertEqual(meta["confidence"], 0.0)
+        self.assertEqual(meta["error_type"], "Unknown")
+        self.assertIn("转人工", root_cause.summary)
 
 
 class TestBuildSurgeAlert(unittest.TestCase):

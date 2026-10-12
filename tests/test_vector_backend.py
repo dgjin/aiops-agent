@@ -5,6 +5,8 @@
     - FAISS 检索与纯 Python 余弦 top-k 一致（同口径回归，防双后端漂移）；
     - AIOPS_VECTOR_BACKEND=python 强制纯 Python（不产出 .faiss，结果不变）；
     - FAISS 依赖缺失 / 陈旧索引（行数不匹配）时自动回退，检索不中断；
+    - resolve_backend 分支回归（P1④）：python 强制不加载 FAISS / auto 依赖可用用 faiss /
+      显式 faiss 而依赖缺失回退 python；
     - run_fix 模型优先级：显式 model > DEFAULT_FIX_MODEL；timeout 透传。
 
 运行：
@@ -139,6 +141,28 @@ class TestBackendFallback(TestVectorBackendBase):
         hits = self._search(top_k=2)  # 默认 auto
         self.assertEqual(hits[0]["qualname"], "a1")
         self.assertEqual(len(hits), 2)
+
+    def test_explicit_faiss_falls_back_when_dependency_missing(self) -> None:
+        """显式请求 faiss 而依赖缺失：自动回退纯 Python（接口不变、不抛错）。"""
+        with mock.patch.object(code_rag, "_load_faiss", return_value=None), mock.patch.dict(
+            os.environ, {"AIOPS_VECTOR_BACKEND": "faiss"}
+        ):
+            self.assertEqual(code_rag.resolve_backend(), "python")
+
+    def test_auto_uses_faiss_when_dependency_available(self) -> None:
+        """auto 且依赖可用 → faiss（回退逻辑的反面对照，防「无条件回退 python」漂移）。"""
+        with mock.patch.object(
+            code_rag, "_load_faiss", return_value=object()
+        ), mock.patch.dict(os.environ, {"AIOPS_VECTOR_BACKEND": "auto"}):
+            self.assertEqual(code_rag.resolve_backend(), "faiss")
+
+    def test_python_backend_never_loads_faiss(self) -> None:
+        """强制 python 时不触发 FAISS 动态加载（无依赖环境零开销、无 ImportError 噪声）。"""
+        with mock.patch.object(code_rag, "_load_faiss") as loader, mock.patch.dict(
+            os.environ, {"AIOPS_VECTOR_BACKEND": "python"}
+        ):
+            self.assertEqual(code_rag.resolve_backend(), "python")
+        loader.assert_not_called()
 
 
 ALERT = Alert(alert_id="wp4-vec-1", service="order", description="错误率突增（模型选择单测）")

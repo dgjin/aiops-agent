@@ -21,6 +21,8 @@
 
 环境变量：
     AIOPS_SANDBOX_IMAGE   沙箱镜像（默认 python:3.12-slim）
+    AIOPS_SANDBOX_ROOT    沙箱产物根目录（默认 data/sandbox；生产建议指向独立卷/tmpfs，
+                          与 data/ 持久数据物理隔离——清理/写满只影响沙箱产物，不波及审计/令牌/清单）
 """
 
 from __future__ import annotations
@@ -43,6 +45,15 @@ from .models import Patch, TestReport
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_SANDBOX_ROOT = BASE_DIR / "data" / "sandbox"
 SANDBOX_IMAGE = os.environ.get("AIOPS_SANDBOX_IMAGE", "python:3.12-slim")
+
+
+def default_sandbox_root() -> Path:
+    """沙箱产物根目录（惰性解析）：AIOPS_SANDBOX_ROOT 可覆盖，缺省 data/sandbox。
+
+    生产建议指向独立卷/tmpfs（P1③，2026-10-12）——清理与写满只影响沙箱产物，不波及
+    data/ 下的审计/令牌/清单等持久数据；惰性读取保证 .env（config.load_dotenv）生效后取值。
+    """
+    return Path(os.environ.get("AIOPS_SANDBOX_ROOT") or DEFAULT_SANDBOX_ROOT)
 
 # 容器内执行的测试命令（与本地基线一致：CWD=demo-app 根）
 DEFAULT_COMMAND = ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
@@ -493,7 +504,7 @@ def run_patch_tests(
         静态验收（2026-10-11），不进入必然 0 用例的套件路径。
     """
     repo_dir = Path(repo_dir) if repo_dir else code_rag.DEFAULT_REPO_DIR
-    sandbox_root = Path(sandbox_root) if sandbox_root else DEFAULT_SANDBOX_ROOT
+    sandbox_root = Path(sandbox_root) if sandbox_root else default_sandbox_root()
 
     sast_ok, sast_detail = scan_patch_diff(patch.diff, files=patch.files)
     if not sast_ok:

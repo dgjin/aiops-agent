@@ -6,7 +6,7 @@
 | 日期 | 2026-10-12 |
 | 适用对象 | SRE / 实施工程师 / 环境维护人员 |
 | 关联文档 | 《系统设计说明书》、《用户操作手册》 |
-| 修订记录 | v1.1（2026-10-12）：同步最新工程现状——BFF 控制台（0.0.0.0:8600，支持局域网访问）、可用性巡检 / 日志采集 / 组件守护、需求基线闭环、Qoder 修复引擎、模型默认值切换（qwen3.8:27b-mlx）、测试基线 836 用例；v1.2（2026-10-12）：运维治理（沙箱清理 / 日志轮转 / 数据备份与恢复演练 / launchd 开机自启）、watchdog 单实例锁与档位锁定 |
+| 修订记录 | v1.1（2026-10-12）：同步最新工程现状——BFF 控制台（0.0.0.0:8600，支持局域网访问）、可用性巡检 / 日志采集 / 组件守护、需求基线闭环、Qoder 修复引擎、模型默认值切换（qwen3.8:27b-mlx）、测试基线 836 用例；v1.2（2026-10-12）：运维治理（沙箱清理 / 日志轮转 / 数据备份与恢复演练 / launchd 开机自启）、watchdog 单实例锁与档位锁定；v1.3（2026-10-12）：P1 生产就绪续轮——Temporal dev server 持久化语义实测文档化（§2.4.1）、watchdog RSS 内存守护（AIOPS_WATCHDOG_RSS_MB，doctor「组件内存」检查项）、沙箱产物独立卷 env 化（AIOPS_SANDBOX_ROOT / AIOPS_QODER_ROOT，代码/清理/doctor/K8s 同源）、测试基线 857 用例 |
 
 ---
 
@@ -134,6 +134,20 @@ docker run --rm -p 7233:7233 -p 8233:8233 temporalio/temporal \
 ```
 
 远程/自定义地址通过 `TEMPORAL_ADDRESS` 指定（worker 与 CLI 均生效，默认 `localhost:7233`）。
+
+#### 2.4.1 dev server 语义（2026-10-12 实测确认）
+
+本机演示形态接受 `temporal server start-dev`（Docker 版落 SQLite）。以下边界均为本机实测结论，作为「可接受的本地语义」明示：
+
+| 语义 | 实测结论 | 说明与命令 |
+| --- | --- | --- |
+| 重启持久化 | ✅ 历史不丢 | SQLite 落命名卷（`/home/temporal/temporal.db`）；`docker restart aiops-temporal` 前后工作流清单逐条一致（实测 5/5） |
+| 历史保留期 | ⚠️ 默认 24h 静默清理 | dev server 默认命名空间 `WorkflowExecutionRetentionTtl=24h`，超期历史会被清理；`scripts/demo-up.sh` 环境准备阶段**幂等校准为 168h（7 天）**，与仓库数据清理默认对齐。手动校准：`docker exec aiops-temporal temporal operator namespace update -n default --retention 168h`（目标值可用 `AIOPS_TEMPORAL_RETENTION` 覆盖） |
+| 高可用 | ❌ 单节点 | 无副本 / 无故障转移；生产切第 5 章集群形态（`deploy/k8s/temporal.yaml`：MySQL 后端 + retention 720h） |
+| 归档（Archival） | ❌ 未启用 | 超期历史直接清理、无冷归档；长期审计以 BFF 磁盘留痕为准（`data/web-audit`、`data/argocd`、`data/notify` 等，不依赖 Temporal 历史） |
+| 备份 / 恢复 | 卷或文件级 | 备份：`docker cp aiops-temporal:/home/temporal/temporal.db backups/`（容器停止更稳妥）；恢复：容器停止后回填 `temporal.db` 再启动 |
+
+> **结论**：本地形态的语义基线＝「重启不丢、保留 7 天、单点可接受」。演示与单机试点足够；对多副本 / 长保留 / 归档有要求的场景，按第 5 章切生产形态。
 
 ### 2.5 Ollama 与模型
 
@@ -275,7 +289,7 @@ bash scripts/demo-up.sh env        # 仅环境准备（Colima + Temporal/Loki �
 
 脚本缺省 `AIOPS_MODE=demo`（外部 `export` 可覆盖——启动横幅如实展示生效档位，非 demo 档红色警示），按序启动 worker → BFF(:8600) → 告警接入(:8099) → 可用性巡检 → 日志采集 → 突增检测 → **组件守护** → 灌入演示日志 → 发起修复流程。
 
-组件守护 `scripts/aiops-watchdog.py` 每 30 秒巡检 6 个常驻组件，异常自动拉起；崩溃风暴（窗口内 5 次）自动冷却 10 分钟。守护启动时获取单实例锁（`data/aiops-watchdog.lock`，防双守护）并锁定生效档位（环境变量 > .env > production），显式传给被拉起组件。参数：`AIOPS_WATCHDOG_INTERVAL`（巡检周期）、`AIOPS_WATCHDOG_SURGE_ARGS`（突增检测器拉起参数）。
+组件守护 `scripts/aiops-watchdog.py` 每 30 秒巡检 6 个常驻组件，异常自动拉起；崩溃风暴（窗口内 5 次）自动冷却 10 分钟。守护启动时获取单实例锁（`data/aiops-watchdog.lock`，防双守护）并锁定生效档位（环境变量 > .env > production），显式传给被拉起组件。参数：`AIOPS_WATCHDOG_INTERVAL`（巡检周期）、`AIOPS_WATCHDOG_SURGE_ARGS`（突增检测器拉起参数）。另按 RSS 内存水位守护（默认 1024MB，`AIOPS_WATCHDOG_RSS_MB` 可调，0=关闭）：超限即就地重启——macOS 无 cgroup 场景的组件软限额（P1，2026-10-12；`demo_cli.py doctor` 的「组件内存」检查项同口径）。
 
 开机自启（可选）：`bash scripts/launchd-install.sh install` 将守护交由 launchd 托管（登录自启、崩溃自动重启，详见 7.6）。
 
@@ -385,6 +399,7 @@ export AIOPS_NOTIFY_CALLBACK_BASE="https://<你的回调网关>/aiops/callback"
 | `AIOPS_EMBED_MODEL` | `bge-m3:latest` | code_rag | 嵌入模型（改后需重建索引） |
 | `AIOPS_VECTOR_BACKEND` | `auto` | code_rag | `auto` / `faiss` / `python` |
 | `AIOPS_SANDBOX_IMAGE` | `python:3.12-slim` | sandbox | 沙箱镜像 |
+| `AIOPS_SANDBOX_ROOT` | `data/sandbox` | sandbox / cleanup / release | 沙箱产物根目录（生产建议指向独立卷/tmpfs，与 data/ 持久数据物理隔离；清理侧 `cleanup-sandbox.sh` 同源取值） |
 | `AIOPS_LOKI_URL` | `http://localhost:3101` | logs / 检测器 | Loki 地址 |
 | `AIOPS_WEBHOOK_PORT` | `8099` | alert_webhook | 接入服务端口 |
 | `AIOPS_ARGOCD_URL` / `AIOPS_ARGOCD_TOKEN` | 空（留痕模式） | release | ArgoCD API 地址与令牌 |
@@ -415,7 +430,7 @@ export AIOPS_NOTIFY_CALLBACK_BASE="https://<你的回调网关>/aiops/callback"
 | `AIOPS_WEBHOOK_RATE_LIMIT` | `120` | alert_webhook | 接入限速（次/分钟/来源 IP，0 关闭） |
 | `AIOPS_PROBE_INTERVAL_SECONDS` / `_FAILURE_THRESHOLD` / `_TIMEOUT_SECONDS` | `15` / `3` / `2` | app_prober | 巡检间隔 / 连续失败阈值 / 单次探测超时 |
 | `AIOPS_ALERTMANAGER_URL` | `http://localhost:9093` | app_prober | 巡检告警注入地址 |
-| `AIOPS_WATCHDOG_INTERVAL` / `AIOPS_WATCHDOG_SURGE_ARGS` | `30` / 演示灵敏度 | aiops-watchdog | 组件守护巡检周期 / 突增检测器拉起参数 |
+| `AIOPS_WATCHDOG_INTERVAL` / `AIOPS_WATCHDOG_SURGE_ARGS` / `AIOPS_WATCHDOG_RSS_MB` | `30` / 演示灵敏度 / `1024` | aiops-watchdog | 组件守护巡检周期 / 突增检测器拉起参数 / 组件内存上限 MB（RSS 超限自动重启，0=关闭） |
 | `AIOPS_MONITOR_URL` | `http://localhost:3000/` | prober / BFF | 被监控应用根地址（首次播种，之后在控制台维护） |
 | `AIOPS_MONITOR_SERVICE` / `AIOPS_MONITOR_LOG_PATH` | `nl2sql` / 空 | ship_app_logs | 采集 service 标签与日志路径（首次播种） |
 | `AIOPS_CODE_INDEX` | `data/code_index.json` | worker | Code RAG 索引路径（仅对未注册清单的 service 生效；已注册自动用专属索引） |
@@ -651,7 +666,7 @@ docker compose --profile obs up -d    # Prometheus http://127.0.0.1:9095 / Grafa
 
 ### 7.4 数据清理与日志轮转
 
-- 沙箱产物（TTL 自动化）：`bash scripts/cleanup-sandbox.sh`（默认清理 `data/sandbox/`、`data/qoder/` 中 7 天前产物；`--dry-run` 预演 / `--status` 只看占用 / `--days N` 调整保留期）；
+- 沙箱产物（TTL 自动化）：`bash scripts/cleanup-sandbox.sh`（默认清理 `data/sandbox/`、`data/qoder/` 中 7 天前产物；产物根可经 `AIOPS_SANDBOX_ROOT` / `AIOPS_QODER_ROOT` 指向独立卷，脚本与代码侧同源取值；`--dry-run` 预演 / `--status` 只看占用 / `--days N` 调整保留期）；
 - 日志轮转：`bash scripts/rotate-logs.sh`（copytruncate：>1MB 的 `*.log` 压缩为 `.1.gz` 轮转、保留 7 份，进程无需重启）；
 - doctor 的「磁盘水位」项低于 20% 时会指向以上两个工具；
 - 手工清理参考——可安全清理：`data/notify/`、`data/argocd/`（审计归档后）、`data/sandbox-eval/`；旧 `data/sandbox/<patch_id>/`（确认无镜像构建引用后）；

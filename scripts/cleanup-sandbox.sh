@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# 沙箱产物清理（P0）：删除 data/sandbox/ 与 data/qoder/ 中 N 天前（默认 7）的流程产物。
+# 沙箱产物清理（P0）：删除沙箱产物根（默认 data/sandbox/ 与 data/qoder/）中 N 天前（默认 7）的产物。
 #
 # 背景：每次修复流程在 data/sandbox/ 留下工作区副本（代码+依赖），Qoder 修复在
 # data/qoder/ 留下快照——无 TTL 时持续线性增长（2026-10 实测两目录合计 132GB）。
+# 产物根可用 AIOPS_SANDBOX_ROOT / AIOPS_QODER_ROOT 覆盖（P1③ 独立卷部署），
+# 须与代码侧（sandbox.default_sandbox_root / qoder_fix）同一取值，否则清理不到目标目录。
 #
 # 用法：
 #   bash scripts/cleanup-sandbox.sh                # 清理 7 天前产物（先列清单再删）
@@ -12,7 +14,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-TARGETS="data/sandbox data/qoder"
+TARGETS="${AIOPS_SANDBOX_ROOT:-data/sandbox} ${AIOPS_QODER_ROOT:-data/qoder}"
 
 DAYS=7
 DRY_RUN=0

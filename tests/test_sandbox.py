@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -624,6 +625,42 @@ class TestRealContainerIntegration(unittest.TestCase):
         outcome = sandbox.DockerSandboxRunner().run(job)
         self.assertFalse(outcome.passed)
         self.assertNotEqual(outcome.exit_code, 0)
+
+
+class TestSandboxRootEnv(unittest.TestCase):
+    """沙箱产物根目录 env 可配（P1③）：AIOPS_SANDBOX_ROOT 覆盖缺省 data/sandbox。"""
+
+    def test_default_sandbox_root_honors_env(self) -> None:
+        with mock.patch.dict(os.environ, {"AIOPS_SANDBOX_ROOT": "/tmp/aiops-sbx-vol"}):
+            self.assertEqual(sandbox.default_sandbox_root(), Path("/tmp/aiops-sbx-vol"))
+
+    def test_default_sandbox_root_falls_back_when_unset(self) -> None:
+        env = {k: v for k, v in os.environ.items() if k != "AIOPS_SANDBOX_ROOT"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(sandbox.default_sandbox_root(), sandbox.DEFAULT_SANDBOX_ROOT)
+
+    def test_run_patch_tests_uses_env_root_when_unspecified(self) -> None:
+        """未显式传 sandbox_root 时工作区落在 AIOPS_SANDBOX_ROOT（独立卷部署链路生效）。"""
+        tmp = Path(tempfile.mkdtemp(prefix="wp6-env-root-"))
+        try:
+            patch = _patch_for("wp6-env-root")
+            fake = mock.Mock()
+            fake.run.return_value = sandbox.SandboxOutcome(
+                exit_code=0,
+                passed=True,
+                tests_run=6,
+                duration_seconds=0.1,
+                runner="fake",
+                image="python:3.12-slim",
+            )
+            with mock.patch.dict(os.environ, {"AIOPS_SANDBOX_ROOT": str(tmp)}):
+                report = sandbox.run_patch_tests(patch, 0, runner=fake)
+            self.assertTrue(report.passed, report.details)
+            job = fake.run.call_args[0][0]
+            self.assertEqual(job.workspace, tmp / patch.patch_id)
+            self.assertTrue(job.workspace.is_dir())
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

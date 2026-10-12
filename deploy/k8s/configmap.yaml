@@ -2,7 +2,8 @@
 #
 # 镜像内 env 约定（详见 .env.example 与 aiops_agent/mode.py / db.py）：
 #   - AIOPS_MODE=production 时 AIOPS_DATABASE_URL 必填（fail-fast，见 secret.example.yaml）
-#   - AIOPS_DATA_ROOT 指向 PVC 挂载点（沙箱工作区 / Qoder 工作区 / 审计兜底文件）
+#   - AIOPS_DATA_ROOT 指向 PVC 挂载点（审计兜底文件等）；沙箱 / Qoder 产物根经
+#     AIOPS_SANDBOX_ROOT / AIOPS_QODER_ROOT 显式指向同一 PVC（worker 写入与 cleanup CronJob 清理须同源）
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -11,6 +12,10 @@ metadata:
 data:
   AIOPS_MODE: "production"
   AIOPS_DATA_ROOT: "/var/lib/aiops"
+  # 沙箱 / Qoder 产物根（P1③）：显式指向同一 PVC——代码侧缺省为镜像内 data/，不配则产物
+  # 落在容器临时层（cleanup CronJob 无法清理）；生产可改指独立卷/tmpfs 与持久数据物理隔离
+  AIOPS_SANDBOX_ROOT: "/var/lib/aiops/sandbox"
+  AIOPS_QODER_ROOT: "/var/lib/aiops/qoder"
   # 策略文件已打入镜像（见 deploy/Dockerfile）；如需自定义，改为挂载 ConfigMap 路径
   AIOPS_POLICY_PATH: "/app/release-gate-policy.yaml"
   # Temporal 集群内服务名（deploy/k8s/temporal.yaml）

@@ -287,17 +287,82 @@ def _check_bff() -> tuple[bool, str]:
 
 
 def _check_disk() -> tuple[bool, str]:
-    """数据盘水位：剩余空间低于 20% 视为未就绪（指向清理/轮转工具）。"""
+    """磁盘水位：任一受管卷剩余空间低于 20% 视为未就绪（指向清理/轮转工具）。
+
+    除工程根外，显式配置的独立卷（AIOPS_SANDBOX_ROOT / AIOPS_QODER_ROOT，P1③）
+    一并纳管——沙箱产物迁移独立卷后，卷写满而工程卷健康时旧版检查会漏报。
+    """
     import shutil
 
-    usage = shutil.disk_usage(_ROOT)
-    free_pct = usage.free / usage.total * 100
-    if free_pct < 20:
+    probes: list[tuple[str, Path]] = [("工程卷", _ROOT)]
+    for label, key in (("沙箱卷", "AIOPS_SANDBOX_ROOT"), ("Qoder 卷", "AIOPS_QODER_ROOT")):
+        raw = (os.environ.get(key) or "").strip()
+        if raw:
+            probes.append((label, Path(raw).expanduser()))
+
+    seen_dev: set[int] = set()
+    worst_pct, worst_free, worst_label = 100.0, 0, ""
+    summary: list[str] = []
+    for label, path in probes:
+        anchor = path
+        while not anchor.exists() and anchor != anchor.parent:  # 未创建时上溯最近存在祖先
+            anchor = anchor.parent
+        try:
+            usage = shutil.disk_usage(anchor)
+            dev = anchor.stat().st_dev
+        except OSError:
+            continue
+        if dev in seen_dev:  # 与已检卷同设备（默认布局）：不重复统计
+            continue
+        seen_dev.add(dev)
+        free_pct = usage.free / usage.total * 100
+        summary.append(f"{label} {free_pct:.0f}%")
+        if free_pct < worst_pct:
+            worst_pct, worst_free, worst_label = free_pct, usage.free, label
+
+    if not summary:
+        return True, "磁盘水位不可读（跳过）"
+    if worst_pct < 20:
         return False, (
-            f"剩余 {free_pct:.0f}% → bash scripts/cleanup-sandbox.sh 与 "
-            "bash scripts/rotate-logs.sh"
+            f"{worst_label}剩余 {worst_pct:.0f}%（{worst_free // (1 << 30)} GiB 可用）→ "
+            "bash scripts/cleanup-sandbox.sh 与 bash scripts/rotate-logs.sh"
         )
-    return True, f"剩余 {free_pct:.0f}%（{usage.free // (1 << 30)} GiB 可用）"
+    if len(summary) == 1:
+        return True, f"剩余 {worst_pct:.0f}%（{worst_free // (1 << 30)} GiB 可用）"
+    return True, "；".join(summary)
+
+
+def _check_component_memory() -> tuple[bool, str]:
+    """组件内存水位：任一常驻组件 RSS 超过守护阈值（默认 1024MB）即未就绪。
+
+    组件清单与阈值直接取自组件守护（scripts/aiops-watchdog.py），避免双份维护；
+    无组件在跑视为就绪（存活巡检由守护另行负责）。
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "aiops_watchdog_probe", _ROOT / "scripts" / "aiops-watchdog.py"
+    )
+    if spec is None or spec.loader is None:
+        return True, "守护模块不可读，跳过内存水位检查"
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["aiops_watchdog_probe"] = module  # dataclass 字符串注解解析需要
+    spec.loader.exec_module(module)
+    limit_mb = float(os.environ.get("AIOPS_WATCHDOG_RSS_MB", module.DEFAULT_RSS_LIMIT_MB))
+    worst_name, worst_mb = "", 0.0
+    for comp in module.build_components():
+        for pid in module._pids_for(comp.pattern):
+            rss_kb = module._rss_kb(pid)
+            if rss_kb and rss_kb / 1024 > worst_mb:
+                worst_name, worst_mb = comp.name, rss_kb / 1024
+    if not worst_name:
+        return True, f"无组件在跑（阈值 {limit_mb:.0f}MB，由组件守护巡检）"
+    if worst_mb > limit_mb:
+        return False, (
+            f"{worst_name} 内存 {worst_mb:.0f}MB 超阈值 {limit_mb:.0f}MB → "
+            "守护将自动重启（AIOPS_WATCHDOG_RSS_MB 可调；日志 aiops_watchdog.log）"
+        )
+    return True, f"最高 {worst_name} {worst_mb:.0f}MB / 阈值 {limit_mb:.0f}MB"
 
 
 async def cmd_doctor(args: argparse.Namespace) -> None:
@@ -311,6 +376,7 @@ async def cmd_doctor(args: argparse.Namespace) -> None:
         ("前端构建", _check_web_dist()),
         ("BFF 控制台", _check_bff()),
         ("磁盘水位", _check_disk()),
+        ("组件内存", _check_component_memory()),
     ]
     print("AIOps 环境自检：\n")
     failed = 0

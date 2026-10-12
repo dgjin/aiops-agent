@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import os
+import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -98,6 +101,126 @@ class TestCheckOnce(unittest.TestCase):
         watchdog.check_once(COMPS, guard, 0.0, LOGGER, running_fn=lambda p: False, start_fn=start)
         watchdog.check_once(COMPS, guard, 5.0, LOGGER, running_fn=lambda p: False, start_fn=start)
         self.assertEqual(started, ["c1", "c2"])  # 第二轮两组件均在冷却中，跳过
+
+
+class TestTerminatePids(unittest.TestCase):
+    """真实子进程验证（POSIX）：僵尸收割、SIGTERM→SIGKILL 升级与「无残留」返回。"""
+
+    @staticmethod
+    def _spawn(cmd: list[str]) -> subprocess.Popen:
+        return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def test_exited_child_is_reaped_and_dead(self) -> None:
+        proc = self._spawn(["true"])
+        time.sleep(0.3)  # 等子进程退出成僵尸（父进程未 wait，kill(0) 仍会成功）
+        self.assertFalse(watchdog._pid_alive(proc.pid))
+        with self.assertRaises(ChildProcessError):  # 已被收割，再次 wait 报 ECHILD
+            os.waitpid(proc.pid, os.WNOHANG)
+        proc.wait()  # 回填状态，避免 GC 时的 ResourceWarning（进程已被收割）
+
+    def test_running_child_detected_alive(self) -> None:
+        proc = self._spawn(["sleep", "30"])
+        try:
+            self.assertTrue(watchdog._pid_alive(proc.pid))
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_terminate_reaps_child_no_stuck(self) -> None:
+        proc = self._spawn(["sleep", "30"])
+        stuck = watchdog._terminate_pids([proc.pid], wait_s=2.0)
+        self.assertEqual(stuck, [])  # SIGTERM 即退：不升级、不误报
+        self.assertFalse(watchdog._pid_alive(proc.pid))
+        proc.wait()  # 同上前述：回填状态消除 ResourceWarning
+
+    def test_terminate_escalates_to_sigkill_without_false_report(self) -> None:
+        code = "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)"
+        proc = self._spawn([sys.executable, "-c", code])
+        time.sleep(0.5)  # 等 SIG_IGN 生效
+        stuck = watchdog._terminate_pids([proc.pid], wait_s=0.6)
+        self.assertEqual(stuck, [])  # SIGKILL 后收割确认：无残留误报
+        self.assertFalse(watchdog._pid_alive(proc.pid))
+        proc.wait()  # 同上前述：回填状态消除 ResourceWarning
+
+
+class TestMemoryGuard(unittest.TestCase):
+    """内存超限守护（P1）：在跑但 RSS 超阈值的组件就地重启，与崩溃冷却共用守卫。"""
+
+    def _run(
+        self,
+        limit_mb: float = 100.0,
+        rss_kb: int | None = 200 * 1024,
+        pids: tuple[int, ...] = (11, 12),
+        guard=None,
+        dry_run: bool = False,
+        now: float = 0.0,
+    ):
+        killed: list[list[int]] = []
+        started: list[str] = []
+
+        def kill(pids_arg: list[int]) -> list[int]:
+            killed.append(list(pids_arg))
+            return []
+
+        def start(comp) -> int:
+            started.append(comp.name)
+            return 99
+
+        g = guard if guard is not None else watchdog.RestartGuard()
+        n = watchdog.check_memory_once(
+            COMPS,
+            g,
+            now,
+            LOGGER,
+            limit_mb,
+            dry_run=dry_run,
+            pids_fn=lambda p: list(pids),
+            rss_fn=lambda pid: rss_kb,
+            kill_fn=kill,
+            start_fn=start,
+        )
+        return n, killed, started
+
+    def test_below_limit_no_action(self) -> None:
+        n, killed, started = self._run(rss_kb=50 * 1024)
+        self.assertEqual((n, killed, started), (0, [], []))
+
+    def test_over_limit_restarts_with_kill_then_start(self) -> None:
+        n, killed, started = self._run()
+        self.assertEqual((n, sorted(started)), (2, ["c1", "c2"]))
+        self.assertEqual(killed, [[11, 12], [11, 12]])
+
+    def test_cooldown_blocks_memory_restart(self) -> None:
+        guard = watchdog.RestartGuard(window_s=100, max_restarts=1, cooldown_s=100)
+        n1, _, started1 = self._run(guard=guard, now=0.0)
+        n2, killed2, started2 = self._run(guard=guard, now=5.0)
+        self.assertEqual((n1, n2), (2, 0))  # 第二轮处于冷却：不杀不拉
+        self.assertEqual((killed2, started2), ([], []))
+        self.assertEqual(sorted(started1), ["c1", "c2"])
+
+    def test_missing_component_skipped(self) -> None:
+        n, killed, started = self._run(pids=())
+        self.assertEqual((n, killed, started), (0, [], []))
+
+    def test_unreadable_rss_skipped(self) -> None:
+        n, killed, started = self._run(rss_kb=None)
+        self.assertEqual((n, killed, started), (0, [], []))
+
+    def test_dry_run_no_kill(self) -> None:
+        n, killed, started = self._run(dry_run=True)
+        self.assertEqual((n, killed, started), (0, [], []))
+
+    def test_limit_zero_disables(self) -> None:
+        called: list[str] = []
+        n = watchdog.check_memory_once(
+            COMPS,
+            watchdog.RestartGuard(),
+            0.0,
+            LOGGER,
+            0,
+            pids_fn=lambda p: called.append(p) or [1],
+        )
+        self.assertEqual((n, called), (0, []))  # 关闭时不做任何探测
 
 
 class TestComponentTable(unittest.TestCase):

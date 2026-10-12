@@ -12,6 +12,10 @@
 #   Loki 未挂卷 → WAL/索引/块留在容器可写层，重建即丢。
 #   现改为：Temporal 落 SQLite 文件（/home/temporal/temporal.db，该目录属 temporal 用户可写），
 #   Loki 挂 /loki（WAL 默认开启，落在卷内）。两服务均加命名卷，重启/重建后数据仍在。
+# 保留期（2026-10-12 补记）：
+#   dev server 默认命名空间 retention=24h，超期工作流历史会被静默清理；
+#   scripts/demo-up.sh 环境准备阶段幂等校准为 168h（7 天，与仓库数据清理默认对齐），
+#   手动命令：docker exec aiops-temporal temporal operator namespace update -n default --retention 168h
 #
 # profiles（可选组件，生产化改造批次 8；不指定 profile 时行为与改造前完全一致）：
 #   --profile prod ：MySQL 8.0 + Redis 7（AIOPS_MODE=production 容器化运行所需）
