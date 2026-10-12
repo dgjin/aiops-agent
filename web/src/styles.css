@@ -223,6 +223,21 @@ textarea:focus-visible {
   box-shadow: inset 0 1px 0 0 color-mix(in srgb, var(--c-ink) 5%, transparent);
 }
 
+/* 流程列表行内展开：轻微下滑显影（reduced-motion 由下方全局块降级） */
+@keyframes row-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-row-reveal {
+  animation: row-reveal 0.18s ease-out;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

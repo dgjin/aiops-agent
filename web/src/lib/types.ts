@@ -42,6 +42,8 @@ export interface FlowItem {
   /** 待审批期的判断依据（工作流未结束时由 status 查询透出） */
   patch?: PatchInfo | null
   test_report?: TestReport | null
+  /** 闸门事件链（仅终态流程由 result 透出；行内流程图据此精确定位中断点） */
+  gate_events?: string[]
   stage_error: string | null
   /** 审批中心附加：待办类型 */
   pending?: 'approval' | 'second_approval'

@@ -1,11 +1,13 @@
 /** 流程列表：状态 / 阶段 / 服务过滤 + 明细表（设计方案 7.3）。 */
 
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
+import { ChevronRight } from 'lucide-react'
 import { api, describeError } from '../lib/api'
-import { fmtDateTime, fmtDuration } from '../lib/format'
+import { cn, fmtDateTime, fmtDuration } from '../lib/format'
 import { EmptyState } from '../components/EmptyState'
+import { FlowStageStrip } from '../components/FlowStageStrip'
 import { Pagination, usePagination } from '../components/Pagination'
 import { STAGE_META, StageBadge } from '../components/StageBadge'
 
@@ -34,6 +36,8 @@ export function Flows() {
   const [status, setStatus] = useState('all')
   const [stage, setStage] = useState(params.get('stage') ?? '')
   const [service, setService] = useState(params.get('service') ?? '')
+  // 单行手风琴：点击行在其下端展开简要流程图（再点收起；列表刷新不重置）
+  const [expandedId, setExpandedId] = useState<string | null>(null)
 
   const { data, isError, error } = useQuery({
     queryKey: ['flows', status, stage, service],
@@ -100,8 +104,17 @@ export function Flows() {
                 </tr>
               </thead>
               <tbody>
-                {view.map((item) => (
-                  <tr key={item.wf_id} className="border-b border-line/60 last:border-0 hover:bg-elevated/60">
+                {view.map((item) => {
+                  const expanded = expandedId === item.wf_id
+                  return (
+                  <Fragment key={item.wf_id}>
+                  <tr
+                    className={cn(
+                      'cursor-pointer border-b border-line/60 hover:bg-elevated/60',
+                      expanded ? 'bg-elevated/40' : undefined,
+                    )}
+                    onClick={() => setExpandedId(expanded ? null : item.wf_id)}
+                  >
                     <td className="px-4 py-2.5 font-mono text-xs">{item.wf_id}</td>
                     <td className="px-4 py-2.5">{item.alert?.service ?? '—'}</td>
                     <td className="px-4 py-2.5 font-mono text-xs text-muted">
@@ -114,16 +127,33 @@ export function Flows() {
                     <td className="px-4 py-2.5 font-mono text-xs text-muted">
                       {item.exec_status === 'RUNNING' ? '运行中' : fmtDuration(item.duration_seconds)}
                     </td>
-                    <td className="px-4 py-2.5 text-right">
-                      <Link
-                        to={`/flows/${encodeURIComponent(item.wf_id)}`}
-                        className="text-xs text-accent hover:underline"
-                      >
-                        详情
-                      </Link>
+                    <td className="px-4 py-2.5">
+                      <div className="flex items-center justify-end gap-3">
+                        <ChevronRight
+                          className={cn('size-3.5 text-idle transition-transform', expanded && 'rotate-90 text-accent')}
+                        />
+                        <Link
+                          to={`/flows/${encodeURIComponent(item.wf_id)}`}
+                          className="text-xs text-accent hover:underline"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          详情
+                        </Link>
+                      </div>
                     </td>
                   </tr>
-                ))}
+                  {expanded && (
+                    <tr className="border-b border-line/60 last:border-0">
+                      <td colSpan={7} className="animate-row-reveal bg-canvas/50 px-4 pb-4 pt-2">
+                        <div className="rounded-lg border border-line bg-panel">
+                          <FlowStageStrip item={item} className="px-4 py-3" />
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
+                  )
+                })}
               </tbody>
             </table>
           </div>
