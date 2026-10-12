@@ -29,11 +29,20 @@ const EMPTY_FORM: MonitoredAppInput = {
   probe_keyword: '',
   health_path: '',
   repo: '',
+  depends_on: [],
   enabled: true,
   note: '',
 }
 
 const SERVICE_RE = /^[\w\-.:]+$/
+
+/** 依赖服务输入框（逗号分隔，中英文逗号均可）→ 去空数组（P2-2 浅拓扑）。 */
+export function parseDepends(text: string): string[] {
+  return text
+    .split(/[,，]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
 
 /** 字段级校验（与服务端规则一致：名称必填唯一、地址需 http(s)、service 需匹配 label 规范）。 */
 export function validateApp(
@@ -109,6 +118,8 @@ function AppFormDialog({
   const [lastKey, setLastKey] = useState<string | null>(null)
   const [discovering, setDiscovering] = useState(false)
   const [discoverMsg, setDiscoverMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  // 依赖服务输入框的原始文本（保持输入体验；提交时经 parseDepends 转为数组随表单上行）
+  const [dependsText, setDependsText] = useState('')
 
   const key = `${open}:${initial?.id ?? 'new'}`
   if (open && key !== lastKey) {
@@ -123,11 +134,13 @@ function AppFormDialog({
             probe_keyword: initial.probe_keyword,
             health_path: initial.health_path ?? '',
             repo: initial.repo ?? '',
+            depends_on: initial.depends_on ?? [],
             enabled: initial.enabled,
             note: initial.note,
           }
         : EMPTY_FORM,
     )
+    setDependsText((initial?.depends_on ?? []).join(', '))
     setError(null)
     setTouched(false)
     setDiscoverMsg(null)
@@ -323,6 +336,20 @@ function AppFormDialog({
             value={form.repo ?? ''}
             onChange={(e) => patch({ repo: e.target.value })}
             placeholder="/path/to/app/repo"
+            className={cn(INPUT_CLS, 'font-mono text-xs')}
+          />
+        </Field>
+        <Field
+          label="依赖服务（可选，逗号分隔）"
+          hint="浅拓扑（P2-2）：本应用依赖的上游服务名（如 coupon, payment）；根因分析时注入「依赖关系 + 依赖健康」上下文，辅助判断故障位于本服务/上游依赖/下游调用方"
+        >
+          <input
+            value={dependsText}
+            onChange={(e) => {
+              setDependsText(e.target.value)
+              patch({ depends_on: parseDepends(e.target.value) })
+            }}
+            placeholder="例如 coupon, payment"
             className={cn(INPUT_CLS, 'font-mono text-xs')}
           />
         </Field>

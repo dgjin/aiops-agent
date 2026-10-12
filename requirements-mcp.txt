@@ -1,0 +1,8 @@
+# AIOps MCP server 可选依赖（P4⑬，市场对标 P2-4）
+#
+# 仅 mcp_server.py 使用；独立于主链路 requirements.txt —— 不安装不影响
+# worker/BFF/webhook 等常驻组件运行（mcp_server.py 顶层不 import mcp，
+# 仅 build_server() 惰性导入）。
+#
+# 安装：.venv/bin/pip install -r requirements-mcp.txt
+mcp>=2.3,<3

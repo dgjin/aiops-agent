@@ -383,6 +383,55 @@ export AIOPS_NOTIFY_CALLBACK_BASE="https://<你的回调网关>/aiops/callback"
 
 > 通知发送为「先留痕、后 POST」，失败自动降级（`failed`）不阻断修复流程。
 
+### 3.8 IM 通道（ChatOps：群内查询与审批）
+
+把「看待办、查状态、批准/驳回」前移到飞书/钉钉工作群（操作入口前移）。BFF 内置消息入口 `POST /api/im/command`，**无需新增进程**：IM 机器人出口（网桥）把群消息 POST 到该端点，再把响应中的 `reply` 字段原样发回群即可。
+
+```bash
+# .env（或进程环境）：通道令牌 + 发送者角色映射（JSON）
+AIOPS_IM_TOKEN=<openssl rand -hex 24>   # 通道鉴权；未配置 = 通道关闭（请求回落常规鉴权，fail-closed）
+AIOPS_IM_USERS='{"ou_xxxxxxxx":"operator","ou_yyyyyyyy":{"role":"admin"}}'   # 未映射发送者 = viewer（仅可查询）
+
+# 手工验证（通道令牌鉴权）
+curl -X POST http://127.0.0.1:8600/api/im/command \
+  -H "Authorization: Bearer $AIOPS_IM_TOKEN" -H "Content-Type: application/json" \
+  -d '{"sender":"ou_xxxxxxxx","text":"待办"}'
+# → {"ok":true,"reply":"待审批流程（…）…","server_time":…}
+```
+
+入站载荷兼容三种结构（自动规范化 + 去 @提及）：通用 `{"sender","text"}`、飞书事件 v2（`event.sender.sender_id.open_id` + `message.content`）、钉钉机器人回调（`senderStaffId`/`senderNick` + `text.content`）。
+
+回复契约：命令级失败（权限不足 / 未找到流程 / 前置校验不过）也返回 200 + `ok:false`（`reply` 含原因，由网桥转回群）；仅「载荷无法解析 = 400」「系统级故障（kill switch / Temporal 不可达）= 5xx」走错误状态码。审批执行复用流程域同款写守卫；写命令受 kill switch 阻断（查询命令保留可用），操作审计 actor 记为 `im:<sender>`。
+
+### 3.9 MCP server（能力对外暴露，可选）
+
+把控制台能力以 MCP 工具形态暴露给外部 Agent 平台（Claude Desktop / Cursor 等）。实现为薄 HTTP 适配层（仓库根 `mcp_server.py`），全部调用转发 BFF `/api/*`——**不绕过**控制台鉴权 / 写守卫 / 审计 / kill switch；独立可选依赖，不装不影响主链路。
+
+```bash
+# 依赖（独立 requirements 文件）
+.venv/bin/pip install -r requirements-mcp.txt
+
+# 环境变量
+export AIOPS_MCP_BASE_URL=http://127.0.0.1:8600   # 可选，默认即此值（指向 BFF）
+export AIOPS_MCP_TOKEN=<控制台令牌>                 # 透传 BFF 鉴权；未配置时工具调用在 BFF 侧 401
+
+# 运行方式 A：stdio（主模式；由 MCP 客户端本地拉起进程）
+.venv/bin/python mcp_server.py
+# 运行方式 B：streamable-http（默认 127.0.0.1:8700/mcp；--host/--port 可改）
+.venv/bin/python mcp_server.py --http
+```
+
+客户端配置示例（stdio；`mcpServers` 通用形态）：
+
+```json
+{"mcpServers": {"aiops": {"command": "/绝对路径/aiops-agent/.venv/bin/python", "args": ["/绝对路径/aiops-agent/mcp_server.py"], "env": {"AIOPS_MCP_BASE_URL": "http://127.0.0.1:8600", "AIOPS_MCP_TOKEN": "<控制台令牌>"}}}}
+```
+
+> 安全语义（重要）：
+> - `AIOPS_MCP_TOKEN` 直接决定能力边界：**只读工具用 viewer 令牌即可**，`approve_flow` / `second_approve_flow` 两个写工具要求 **operator 及以上**令牌（BFF 侧仍有写守卫与操作审计兜底）；
+> - 9 个工具：`ops_overview` / `list_flows` / `get_flow` / `list_pending_approvals` / `list_escalations` / `query_audit` / `check_system_health`（只读）+ `approve_flow` / `second_approve_flow`（写）；
+> - 错误语义：BFF 不可达 / 鉴权失败 / 写守卫拒绝均以 `is_error` 结果携带原因返回（不会静默失败）。
+
 ---
 
 ## 4 配置参考
@@ -438,6 +487,10 @@ export AIOPS_NOTIFY_CALLBACK_BASE="https://<你的回调网关>/aiops/callback"
 | `AIOPS_FIX_PROVIDER` | `ollama` | worker | 修复提供者：`ollama`（本地 LLM）/ `qoder`（CLI 无头，见 4.3） |
 | `AIOPS_QODER_MODEL` / `_TIMEOUT` / `_MAX_TURNS` | `DeepSeek-Flash` / `720` / `100` | worker（qoder） | Qoder 修复引擎参数（模型 ID 区分大小写，见 4.3） |
 | `AIOPS_QODER_ROOT` | `./data/qoder` | worker（qoder） | Qoder 隔离工作区根目录 |
+| `AIOPS_IM_TOKEN` | 空（通道关闭） | BFF | IM 通道（ChatOps）鉴权令牌，见 3.8 |
+| `AIOPS_IM_USERS` | 空（全员 viewer） | BFF | 发送者角色映射 JSON（`{"<sender>":"operator"}` 或 `{"<sender>":{"role":"admin"}}`） |
+| `AIOPS_MCP_BASE_URL` | `http://127.0.0.1:8600` | mcp_server | MCP server 转发的 BFF 地址，见 3.9 |
+| `AIOPS_MCP_TOKEN` | 空（工具调用 401） | mcp_server | MCP 侧透传的控制台令牌（决定能力边界），见 3.9 |
 
 > 快照语义提醒：`AIOPS_TRIAGE_MODEL` / `AIOPS_FIX_MODEL` / `AIOPS_EMBED_MODEL` / `AIOPS_LOKI_URL` 在模块 import 时读取，**修改后需重启 worker**。
 >

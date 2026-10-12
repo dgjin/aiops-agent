@@ -60,6 +60,35 @@ def _normalize_url(url: str) -> str:
     return value
 
 
+_MAX_DEPENDS = 20  # 依赖服务数量上限（浅拓扑注入与展示的实用边界）
+
+
+def _normalize_depends_on(value, self_service: str = "") -> list[str]:
+    """依赖服务名规范化（P2-2 浅拓扑）：去空/去重/去自身/限长限数。
+
+    ``None``/``[]`` → ``[]``；非列表或含非字符串元素 → 校验错误（400 语义）。
+    供清单维护、导入导出、triage 拓扑注入共用。
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise MonitorStoreError("依赖服务（depends_on）必须是字符串数组")
+    own = (self_service or "").strip()
+    cleaned: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise MonitorStoreError("依赖服务（depends_on）必须是字符串数组")
+        name = item.strip()
+        if not name or name == own or name in cleaned:
+            continue
+        if len(name) > 64:
+            raise MonitorStoreError(f"依赖服务名过长（>64 字符）：{name[:32]}…")
+        cleaned.append(name)
+        if len(cleaned) > _MAX_DEPENDS:
+            raise MonitorStoreError(f"依赖服务过多（最多 {_MAX_DEPENDS} 个）")
+    return cleaned
+
+
 def _seed() -> list[dict]:
     """首次播种：沿用既有环境变量约定，向后兼容单一默认项。"""
     url = os.environ.get("AIOPS_MONITOR_URL") or DEFAULT_URL
@@ -75,6 +104,7 @@ def _seed() -> list[dict]:
             "probe_keyword": "",
             "health_path": "",
             "repo": os.environ.get("AIOPS_MONITOR_REPO", ""),
+            "depends_on": [],
             "enabled": True,
             "note": "由 AIOPS_MONITOR_URL 初始化，可在控制台维护",
             "created_at": now,
@@ -110,6 +140,8 @@ def _row_to_app(row) -> dict:
         "health_path": row.get("health_path") or "",
         # 同上
         "repo": row.get("repo") or "",
+        # 同上（P2-2 浅拓扑）：旧库无此列时 None → []，读侧容错
+        "depends_on": row.get("depends_on") or [],
         "enabled": bool(row["enabled"]),
         "note": row["note"],
         "created_at": _dt_str(row["created_at"]),
@@ -133,6 +165,7 @@ def _insert_apps(conn, apps: list[dict]) -> None:
                 "probe_keyword": (app.get("probe_keyword") or "").strip(),
                 "health_path": (app.get("health_path") or "").strip(),
                 "repo": (app.get("repo") or "").strip(),
+                "depends_on": _normalize_depends_on(app.get("depends_on"), app.get("service") or ""),
                 "enabled": bool(app.get("enabled", True)),
                 "note": app.get("note") or "",
                 "created_at": db_layer.to_dt(app.get("created_at")) or fallback,
@@ -254,6 +287,7 @@ def add(
     probe_keyword: str = "",
     health_path: str = "",
     repo: str = "",
+    depends_on: list[str] | None = None,
     enabled: bool = True,
     note: str = "",
 ) -> dict:
@@ -264,15 +298,17 @@ def add(
     if any(app.get("name") == clean_name for app in apps):
         raise MonitorStoreError(f"名称已存在：{clean_name}")
     now = _now()
+    clean_service = (service or DEFAULT_SERVICE).strip()
     app = {
         "id": _unique_id(apps, clean_name),
         "name": clean_name,
         "url": _normalize_url(url),
-        "service": (service or DEFAULT_SERVICE).strip(),
+        "service": clean_service,
         "log_path": (log_path or "").strip(),
         "probe_keyword": (probe_keyword or "").strip(),
         "health_path": (health_path or "").strip(),
         "repo": (repo or "").strip(),
+        "depends_on": _normalize_depends_on(depends_on, clean_service),
         "enabled": bool(enabled),
         "note": (note or "").strip(),
         "created_at": now,
@@ -293,6 +329,7 @@ def update(
     probe_keyword: str | None = None,
     health_path: str | None = None,
     repo: str | None = None,
+    depends_on: list[str] | None = None,
     enabled: bool | None = None,
     note: str | None = None,
 ) -> tuple[dict, dict]:
@@ -321,6 +358,8 @@ def update(
         target["health_path"] = health_path.strip()
     if repo is not None:
         target["repo"] = repo.strip()
+    if depends_on is not None:
+        target["depends_on"] = _normalize_depends_on(depends_on, target.get("service") or "")
     if enabled is not None:
         target["enabled"] = bool(enabled)
     if note is not None:
@@ -340,7 +379,7 @@ def remove(app_id: str) -> dict | None:
     return dict(target)
 
 
-_IMPORTABLE = ("service", "log_path", "probe_keyword", "health_path", "repo", "enabled", "note")
+_IMPORTABLE = ("service", "log_path", "probe_keyword", "health_path", "repo", "depends_on", "enabled", "note")
 
 
 def import_many(items: list[dict], *, mode: str = "merge") -> dict:
@@ -425,7 +464,9 @@ def duplicate(app_id: str, *, new_name: str | None = None) -> dict:
         service=source["service"],
         log_path=source["log_path"],
         probe_keyword=source.get("probe_keyword") or "",
+        health_path=source.get("health_path") or "",
         repo=source.get("repo") or "",
+        depends_on=source.get("depends_on") or [],
         enabled=source["enabled"],
         note=source["note"],
     )

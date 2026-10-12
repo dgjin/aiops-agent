@@ -143,6 +143,28 @@ class TestBuildTriagePrompt(unittest.TestCase):
         prompt = triage.build_triage_prompt(ALERT, {"templates": []}, None, None)
         self.assertIn("（窗口内无发布/配置变更记录）", prompt)
 
+    def test_topology_section_rendered(self) -> None:
+        """P2-2 浅拓扑：依赖/被依赖 + 健康逐项注入（不健康附失败次数）。"""
+        topology = {
+            "service": "order",
+            "depends_on": [
+                {"service": "coupon", "probe": {"ok": False, "failures": 62, "last_error": "timeout"}},
+                {"service": "payment", "probe": {"ok": True, "failures": 0, "last_error": ""}},
+            ],
+            "depended_by": [{"service": "gateway", "probe": None}],
+            "unhealthy": ["coupon"],
+        }
+        prompt = triage.build_triage_prompt(ALERT, {"templates": []}, None, None, topology)
+        self.assertIn("## 依赖拓扑", prompt)
+        self.assertIn("coupon（探测不健康，连续失败 62 次）", prompt)
+        self.assertIn("payment（探测健康）", prompt)
+        self.assertIn("gateway", prompt)  # 被依赖但无探针数据 → 仅名称
+
+    def test_topology_absent_placeholder(self) -> None:
+        prompt = triage.build_triage_prompt(ALERT, {"templates": []})
+        self.assertIn("## 依赖拓扑", prompt)
+        self.assertIn("（未声明依赖关系）", prompt)
+
 
 class TestRunTriage(unittest.TestCase):
     def test_success_path_parses_and_truncates(self) -> None:
@@ -189,6 +211,22 @@ class TestRunTriage(unittest.TestCase):
         prompt = call.call_args.args[0]
         self.assertIn("## 最近变更", prompt)
         self.assertIn("阈值下调", prompt)
+
+    def test_topology_passed_into_prompt(self) -> None:
+        payload = json.dumps(
+            {"error_type": "TimeoutError", "suspect_files": [], "confidence": 0.9, "summary": "s"}
+        )
+        topology = {
+            "service": "nl2sql",
+            "depends_on": [{"service": "coupon", "probe": {"ok": False, "failures": 3, "last_error": ""}}],
+            "depended_by": [],
+            "unhealthy": ["coupon"],
+        }
+        with mock.patch("aiops_agent.triage.call_ollama", return_value=payload) as call:
+            triage.run_triage(ALERT, {"templates": []}, topology=topology)
+        prompt = call.call_args.args[0]
+        self.assertIn("## 依赖拓扑", prompt)
+        self.assertIn("coupon（探测不健康，连续失败 3 次）", prompt)
 
 
 class TestTriageDegradationContract(unittest.TestCase):

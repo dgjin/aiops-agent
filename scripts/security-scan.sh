@@ -24,7 +24,7 @@ echo "== Bandit SAST 扫描（Medium 及以上；HIGH 必须为 0）=="
 # 的门禁语义失真（文件头列出的历史接受 Medium 项会误杀 CI）。故用 --exit-zero 压制其
 # 退出码，门禁判定统一由下方 High 计数完成。
 OUT="$("$PY" -m bandit -r aiops_agent bff \
-    alert_webhook.py demo_cli.py index_codebase.py ship_app_logs.py \
+    alert_webhook.py demo_cli.py index_codebase.py ship_app_logs.py mcp_server.py \
     scripts/aiops-watchdog.py \
     "$LEVEL" --exit-zero 2>&1)"
 printf '%s\n' "$OUT" | tail -12

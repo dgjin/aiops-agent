@@ -189,14 +189,16 @@ async def _write_guard(
     return status
 
 
+def _first_approval_extra(status: dict) -> str | None:
+    """一级审批附加校验：已提交不能重复（Web 控制台与 ChatOps 双通道共用）。"""
+    if status.get("approval"):
+        return f"一级审批已提交（{status['approval']}），不能重复提交"
+    return None
+
+
 @router.post("/api/flows/{wf_id}/approval")
 async def api_approval(request: Request, wf_id: str, body: ApprovalBody) -> dict:
-    def _extra(status: dict) -> str | None:
-        if status.get("approval"):
-            return f"一级审批已提交（{status['approval']}），不能重复提交"
-        return None
-
-    await _write_guard(wf_id, {"WAIT_APPROVAL"}, _extra)
+    await _write_guard(wf_id, {"WAIT_APPROVAL"}, _first_approval_extra)
     await gw.signal_approval(wf_id, body.decision)
     gw.invalidate_cache()
     metrics.observe_gate_event("approval", body.decision)
@@ -209,18 +211,20 @@ async def api_approval(request: Request, wf_id: str, body: ApprovalBody) -> dict
     return ok({"ok": True, "wf_id": wf_id, "action": f"approval:{body.decision}"})
 
 
+def _second_approval_extra(status: dict) -> str | None:
+    """二级审批附加校验：受保护目录 + 一级已批 + 防重复（双通道共用）。"""
+    if not status.get("needs_second"):
+        return "该流程不涉及受保护目录，无需二级审批"
+    if status.get("approval") != "approve":
+        return "一级审批尚未批准，不能进行二级审批"
+    if status.get("second_approval"):
+        return f"二级审批已提交（{status['second_approval']}），不能重复提交"
+    return None
+
+
 @router.post("/api/flows/{wf_id}/second-approval")
 async def api_second_approval(request: Request, wf_id: str, body: ApprovalBody) -> dict:
-    def _extra(status: dict) -> str | None:
-        if not status.get("needs_second"):
-            return "该流程不涉及受保护目录，无需二级审批"
-        if status.get("approval") != "approve":
-            return "一级审批尚未批准，不能进行二级审批"
-        if status.get("second_approval"):
-            return f"二级审批已提交（{status['second_approval']}），不能重复提交"
-        return None
-
-    await _write_guard(wf_id, {"WAIT_APPROVAL"}, _extra)
+    await _write_guard(wf_id, {"WAIT_APPROVAL"}, _second_approval_extra)
     await gw.signal_second_approval(wf_id, body.decision)
     gw.invalidate_cache()
     metrics.observe_gate_event("second_approval", body.decision)

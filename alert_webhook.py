@@ -13,6 +13,10 @@ Alertmanager 侧接入点（本机 nl2sql-monitoring 栈 deploy/alertmanager.yml
       （resolved 后再次 firing）startsAt 刷新，避免 REJECT_DUPLICATE 永久拒绝新流程；
     - 幂等：workflow id = aiops-fix-{service}-{alert_id}，REJECT_DUPLICATE + FAIL，
       重复投递仅返回 duplicates，不产生第二个流程实例；
+    - 事件聚合（P2-1 修复风暴防护）：同故障域（service）告警在窗口内（默认 90s，
+      AIOPS_WEBHOOK_AGGREGATE_WINDOW 可配）聚合为单事件——仅事件首发告警开流程，
+      窗口内后续告警归并计数（响应 aggregated 字段 + aiops_alert_aggregated_total
+      指标 + 日志），防止一个故障域短时多告警并发开出多条修复流程；
     - kill switch：启动前检查，激活时返回 503 拒绝新流程；状态不可读时 fail-closed；
     - 鉴权（P0-1）：来源 IP 白名单 + 共享密钥（Authorization: Bearer / X-AIOps-Token）+
       可选 HMAC 签名（X-AIOps-Signature）+ 限速；production 档未配置密钥时 fail-closed（503），
@@ -32,8 +36,8 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -65,6 +69,10 @@ AUTH_IPS_ENV = "AIOPS_WEBHOOK_ALLOW_IPS"
 AUTH_RATE_ENV = "AIOPS_WEBHOOK_RATE_LIMIT"
 DEFAULT_RATE_LIMIT = 120  # 次/分钟/来源 IP；0 表示关闭限速
 MAX_BODY_BYTES = 1_048_576  # 1 MiB：Alertmanager 载荷远小于此，超出直接 413
+
+# ---- 事件聚合窗口（P2-1 修复风暴防护）----
+AGGREGATE_WINDOW_ENV = "AIOPS_WEBHOOK_AGGREGATE_WINDOW"
+DEFAULT_AGGREGATE_WINDOW = 90.0  # 秒；0 = 关闭聚合（保持旧行为）
 
 
 @dataclass(frozen=True)
@@ -217,6 +225,83 @@ def workflow_id_for(alert: Alert) -> str:
     return f"aiops-fix-{alert.service}-{alert.alert_id}"
 
 
+@dataclass
+class AggregateState:
+    """同故障域聚合事件的状态（窗口自首条告警起算，不滑动）。"""
+
+    event_key: str
+    service: str
+    first_at: float
+    count: int = 1
+    alert_ids: list[str] = field(default_factory=list)
+    wf_id: str | None = None
+
+
+class AggregateWindow:
+    """同故障域（service）聚合窗口：修复风暴防护（P2-1）。
+
+    语义：窗口内同 service 的后续告警归并入事件（不再开第二条流程）；窗口过期后
+    的新告警开新事件；``window_seconds<=0`` 关闭聚合（保持旧行为）。线程安全
+    （ThreadingHTTPServer 并发请求）。
+    """
+
+    def __init__(self, window_seconds: float) -> None:
+        self._window = max(0.0, window_seconds)
+        self._lock = threading.Lock()
+        self._state: dict[str, AggregateState] = {}
+
+    def route(
+        self, alerts: list[Alert], now: float | None = None
+    ) -> tuple[list[Alert], list[AggregateState]]:
+        """分流一批告警 →（应启动列表，被归并事件的当前状态列表）。"""
+        if self._window <= 0 or not alerts:
+            return list(alerts), []
+        now = time.monotonic() if now is None else now
+        to_start: list[Alert] = []
+        merged: dict[str, AggregateState] = {}
+        with self._lock:
+            for alert in alerts:
+                state = self._state.get(alert.service)
+                if state is not None and now - state.first_at < self._window:
+                    state.count += 1
+                    state.alert_ids.append(alert.alert_id)
+                    merged[state.event_key] = state
+                    metrics.observe_alert_aggregated(alert.service)
+                    continue
+                state = AggregateState(
+                    event_key=f"agg-{alert.service}-{int(now)}",
+                    service=alert.service,
+                    first_at=now,
+                    alert_ids=[alert.alert_id],
+                )
+                self._state[alert.service] = state
+                to_start.append(alert)
+            if len(self._state) > 1024:  # 内存兜底：清理过期事件
+                self._state = {
+                    k: v for k, v in self._state.items() if now - v.first_at < self._window
+                }
+        return to_start, list(merged.values())
+
+    def attach_wf(self, service: str, wf_id: str) -> None:
+        """启动后回填事件代表流程 id（重复投递同样回填既有流程 id）。"""
+        with self._lock:
+            state = self._state.get(service)
+            if state is not None:
+                state.wf_id = wf_id
+
+    def discard(self, services: Iterable[str]) -> None:
+        """启动失败时回滚本批新建的事件（仅无归并、无流程 id 的干净状态）。"""
+        with self._lock:
+            for service in services:
+                state = self._state.get(service)
+                if state is not None and state.count == 1 and state.wf_id is None:
+                    del self._state[service]
+
+
+# 进程内聚合窗口（main 启动时按 env 重建；此处默认值供直接调用 handler 的场合兜底）
+_AGGREGATE_WINDOW = AggregateWindow(DEFAULT_AGGREGATE_WINDOW)
+
+
 def check_kill_switch() -> dict | None:
     """kill switch 检查：放行返回 None；拒绝返回响应体（含 error；fail-closed）。"""
     try:
@@ -296,7 +381,10 @@ class _WebhookHandler(BaseHTTPRequestHandler):
         alerts, resolved = parse_alertmanager_payload(payload)
         if not alerts:
             logger.info("收到载荷：0 条 firing（忽略 resolved=%d）", resolved)
-            self._respond(200, {"started": [], "duplicates": [], "ignored_resolved": resolved})
+            self._respond(
+                200,
+                {"started": [], "duplicates": [], "aggregated": [], "ignored_resolved": resolved},
+            )
             return
 
         # kill switch：激活时拒绝启动新流程；状态不可读 fail-closed（503）
@@ -308,20 +396,45 @@ class _WebhookHandler(BaseHTTPRequestHandler):
             self._respond(503, blocked)
             return
 
+        # 事件聚合（P2-1）：同故障域窗口内的后续告警归并为单事件，仅首发启动流程
+        to_start, merged = _AGGREGATE_WINDOW.route(alerts)
         try:
-            started, duplicates = asyncio.run(_start_workflows(alerts, _POLICY_SNAPSHOT))
+            started, duplicates = asyncio.run(_start_workflows(to_start, _POLICY_SNAPSHOT))
         except Exception as exc:  # noqa: BLE001 - 返回 5xx 让 Alertmanager 重试投递
+            _AGGREGATE_WINDOW.discard(alert.service for alert in to_start)
             logger.exception("启动 workflow 失败: %s", exc)
             self._respond(500, {"error": str(exc)})
             return
+        for alert in to_start:  # 回填事件代表流程 id（started / duplicates 同一幂等键）
+            _AGGREGATE_WINDOW.attach_wf(alert.service, workflow_id_for(alert))
 
         for wf_id in started:
             logger.info("已启动 workflow: %s", wf_id)
         for wf_id in duplicates:
             logger.info("重复告警（幂等拒绝，不重复开流程）: %s", wf_id)
+        aggregated = [
+            {
+                "event_key": state.event_key,
+                "service": state.service,
+                "count": state.count,
+                "wf_id": state.wf_id,
+                "alert_ids": state.alert_ids[:8],  # 展示截断（窗口内可能持续追加）
+            }
+            for state in merged
+        ]
+        for item in aggregated:
+            logger.info(
+                "故障域聚合（修复风暴防护）：service=%s 归入事件 %s（窗口内第 %d 条，代表流程 %s）",
+                item["service"], item["event_key"], item["count"], item["wf_id"],
+            )
         self._respond(
             200,
-            {"started": started, "duplicates": duplicates, "ignored_resolved": resolved},
+            {
+                "started": started,
+                "duplicates": duplicates,
+                "aggregated": aggregated,
+                "ignored_resolved": resolved,
+            },
         )
 
     def _respond(self, status: int, body: dict) -> None:
@@ -357,7 +470,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    global _POLICY_SNAPSHOT, _AUTH_CONFIG, _RATE_LIMITER
+    global _POLICY_SNAPSHOT, _AUTH_CONFIG, _RATE_LIMITER, _AGGREGATE_WINDOW
     policy = load_policy()
     _POLICY_SNAPSHOT = snapshot_for_workflow(policy)
     logger.info(
@@ -381,6 +494,19 @@ def main() -> None:
                 AUTH_TOKEN_ENV,
             )
     logger.info("接入鉴权姿态: %s", _AUTH_CONFIG.describe())
+
+    try:
+        window_seconds = float(
+            (os.environ.get(AGGREGATE_WINDOW_ENV) or str(DEFAULT_AGGREGATE_WINDOW)).strip()
+        )
+    except ValueError:
+        window_seconds = DEFAULT_AGGREGATE_WINDOW
+    _AGGREGATE_WINDOW = AggregateWindow(window_seconds)
+    logger.info(
+        "事件聚合姿态: 窗口=%.0fs%s",
+        window_seconds,
+        "（已关闭）" if window_seconds <= 0 else "（同故障域聚合，P2-1 修复风暴防护）",
+    )
 
     server = ThreadingHTTPServer((args.host, args.port), _WebhookHandler)
     logger.info("告警接入服务已启动: http://%s:%d%s", args.host, args.port, WEBHOOK_PATH)

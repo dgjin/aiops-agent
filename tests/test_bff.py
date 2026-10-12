@@ -12,6 +12,7 @@ from unittest import mock
 
 from bff import aggregator, app, audit, config_items, middleware, temporal_gateway
 from bff.deps import ApiError
+from bff.routes import chatops as chatops_routes
 from bff.routes import flows as flows_routes
 from bff.routes import systems as systems_routes
 from bff.routes.monitored_apps import _find_rollback_source
@@ -223,6 +224,10 @@ class RequiredRoleTest(unittest.TestCase):
         """未知写接口按最高要求（安全默认），避免新增端点漏配。"""
         self.assertEqual(app.required_role("POST", "/api/something-new"), "admin")
 
+    def test_im_command_requires_viewer(self):
+        """IM 通道（ChatOps）：通道级 viewer，命令级权限（发送者角色）在路由内判定。"""
+        self.assertEqual(app.required_role("POST", "/api/im/command"), "viewer")
+
 
 class ServiceTokenTest(unittest.TestCase):
     """服务令牌旁路：仅精确路径 + GET + 令牌匹配才生效（被监控系统只读集成通道）。"""
@@ -265,6 +270,48 @@ class ServiceTokenTest(unittest.TestCase):
                 middleware._service_identity(
                     self._request(path="/api/requirements", token="tok-svc")
                 )
+            )
+
+
+class ImTokenTest(unittest.TestCase):
+    """IM 通道旁路（ChatOps）：仅精确路径 + POST + 令牌匹配才生效（群消息入口）。"""
+
+    _PATH = "/api/im/command"
+    _ENV = "AIOPS_IM_TOKEN"
+
+    def _request(self, path: str | None = None, method: str = "POST", token: str | None = None):
+        from starlette.requests import Request
+
+        headers = []
+        if token is not None:
+            headers.append((b"authorization", f"Bearer {token}".encode("utf-8")))
+        return Request(
+            {
+                "type": "http",
+                "method": method,
+                "path": path or self._PATH,
+                "headers": headers,
+                "query_string": b"",
+            }
+        )
+
+    def test_disabled_when_env_missing(self):
+        with mock.patch.dict(os.environ, {self._ENV: ""}):
+            self.assertIsNone(middleware._im_identity(self._request(token="tok-im")))
+
+    def test_matches_only_exact_path_post_and_token(self):
+        with mock.patch.dict(os.environ, {self._ENV: "tok-im"}):
+            identity = middleware._im_identity(self._request(token="tok-im"))
+            self.assertIsNotNone(identity)
+            self.assertEqual(identity.user, "im:gateway")
+            self.assertEqual(identity.role, "viewer")
+            # 错令牌 / 非 POST / 其他路径一律回落到常规鉴权
+            self.assertIsNone(middleware._im_identity(self._request(token="bad")))
+            self.assertIsNone(
+                middleware._im_identity(self._request(method="GET", token="tok-im"))
+            )
+            self.assertIsNone(
+                middleware._im_identity(self._request(path="/api/im/other", token="tok-im"))
             )
 
 
@@ -1018,6 +1065,202 @@ class SystemsEndpointsTest(unittest.IsolatedAsyncioTestCase):
                 await systems_routes.api_system_timeline("missing-app", flows=5)
         self.assertEqual(ctx.exception.status_code, 404)
         self.assertIn("missing-app", ctx.exception.message)
+
+
+# ----------------------------------------------------------------------
+# P4⑫（ChatOps）：IM 指令端点 / 审批附加校验双通道共用
+# ----------------------------------------------------------------------
+
+
+class ApprovalExtraTest(unittest.TestCase):
+    """P4⑫：审批附加校验提取为模块级函数（Web 控制台与 ChatOps 双通道共用防漂移）。"""
+
+    def test_first_approval_extra(self):
+        self.assertIsNone(flows_routes._first_approval_extra({"approval": None}))
+        message = flows_routes._first_approval_extra({"approval": "approve"})
+        self.assertIn("不能重复提交", message)
+
+    def test_second_approval_extra(self):
+        self.assertIn("无需二级审批", flows_routes._second_approval_extra({"needs_second": False}))
+        self.assertIn(
+            "一级审批尚未批准",
+            flows_routes._second_approval_extra({"needs_second": True, "approval": None}),
+        )
+        self.assertIn(
+            "不能重复提交",
+            flows_routes._second_approval_extra(
+                {"needs_second": True, "approval": "approve", "second_approval": "reject"}
+            ),
+        )
+        self.assertIsNone(
+            flows_routes._second_approval_extra(
+                {"needs_second": True, "approval": "approve", "second_approval": None}
+            )
+        )
+
+
+class ImCommandEndpointTest(unittest.IsolatedAsyncioTestCase):
+    """P4⑫ ChatOps：IM 指令端点（Temporal / kill switch / 审计落盘均打桩或隔离）。"""
+
+    _WF_ID = "aiops-fix-order-a-201"
+    _WAIT_ITEM: dict = {
+        "wf_id": _WF_ID,
+        "exec_status": "RUNNING",
+        "stage": "WAIT_APPROVAL",
+        "alert": {"service": "order", "alert_id": "a-201"},
+        "patch_id": "patch-201",
+        "needs_second": False,
+        "approval": None,
+        "second_approval": None,
+        "root_cause": None,
+        "deadline": {"kind": "approval", "at": "2026-10-12T10:10:00+00:00"},
+        "start_time": "2026-10-12T10:00:00+00:00",
+    }
+
+    def _status(self, **overrides) -> dict:
+        base = {
+            "stage": "WAIT_APPROVAL",
+            "approval": None,
+            "needs_second": False,
+            "second_approval": None,
+        }
+        base.update(overrides)
+        return base
+
+    def _detail(self, **overrides) -> dict:
+        base = {
+            "wf_id": self._WF_ID,
+            "exec_status": "RUNNING",
+            "status": self._status(),
+            "errors": [],
+        }
+        base.update(overrides)
+        return base
+
+    async def test_help_reply(self):
+        payload = await chatops_routes.api_im_command({"sender": "alice", "text": "帮助"})
+        self.assertTrue(payload["ok"])
+        self.assertIn("可用命令", payload["reply"])
+        self.assertIn("server_time", payload)
+
+    async def test_pending_lists_only_wait_approval(self):
+        items = [
+            dict(self._WAIT_ITEM),
+            {"wf_id": "wf-done", "exec_status": "COMPLETED", "stage": "DONE"},
+        ]
+        with mock.patch.object(chatops_routes.gw, "list_flows", mock.AsyncMock(return_value=items)):
+            payload = await chatops_routes.api_im_command({"sender": "alice", "text": "待办"})
+        self.assertTrue(payload["ok"])
+        self.assertIn(self._WF_ID, payload["reply"])
+        self.assertNotIn("wf-done", payload["reply"])
+
+    async def test_status_unique_prefix(self):
+        items = [dict(self._WAIT_ITEM)]
+        with mock.patch.object(chatops_routes.gw, "list_flows", mock.AsyncMock(return_value=items)):
+            payload = await chatops_routes.api_im_command(
+                {"sender": "alice", "text": "状态 aiops-fix-order"}
+            )
+        self.assertTrue(payload["ok"])
+        self.assertIn("等待人工审批", payload["reply"])
+
+    async def test_status_not_found_and_ambiguous(self):
+        with mock.patch.object(chatops_routes.gw, "list_flows", mock.AsyncMock(return_value=[])):
+            payload = await chatops_routes.api_im_command({"sender": "alice", "text": "状态 nope"})
+        self.assertFalse(payload["ok"])
+        self.assertIn("未找到流程", payload["reply"])
+        items = [dict(self._WAIT_ITEM), {**self._WAIT_ITEM, "wf_id": "aiops-fix-order-a-202"}]
+        with mock.patch.object(chatops_routes.gw, "list_flows", mock.AsyncMock(return_value=items)):
+            payload = await chatops_routes.api_im_command(
+                {"sender": "alice", "text": "状态 aiops-fix-order"}
+            )
+        self.assertFalse(payload["ok"])
+        self.assertIn("不唯一", payload["reply"])
+
+    async def test_unmapped_sender_cannot_approve(self):
+        with mock.patch.dict(os.environ, {"AIOPS_IM_USERS": ""}):
+            payload = await chatops_routes.api_im_command(
+                {"sender": "alice", "text": f"批准 {self._WF_ID}"}
+            )
+        self.assertFalse(payload["ok"])
+        self.assertIn("权限不足", payload["reply"])
+
+    async def test_approve_happy_path(self):
+        roles = json.dumps({"alice": "operator"})
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"AIOPS_IM_USERS": roles}), \
+                 mock.patch.object(chatops_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+                 mock.patch.object(chatops_routes.gw, "flow_detail", mock.AsyncMock(return_value=self._detail())), \
+                 mock.patch.object(chatops_routes.gw, "signal_approval", mock.AsyncMock()) as signal, \
+                 mock.patch.object(chatops_routes.gw, "invalidate_cache") as invalidate, \
+                 mock.patch.object(chatops_routes.kill_switch, "get_state", return_value={"active": False}), \
+                 mock.patch.object(chatops_routes.audit, "DATA_DIR", Path(tmp)):
+                payload = await chatops_routes.api_im_command(
+                    {"sender": "alice", "text": f"批准 {self._WF_ID}"}
+                )
+                rows = audit.read_audit()
+        self.assertTrue(payload["ok"])
+        self.assertIn("一级审批已批准", payload["reply"])
+        signal.assert_awaited_once_with(self._WF_ID, "approve")
+        invalidate.assert_called_once()
+        self.assertEqual(rows[0]["actor"], "im:alice")
+        self.assertEqual(rows[0]["action"], "chatops:approval:approve")
+        self.assertEqual(rows[0]["result"], "signaled")
+        self.assertEqual(rows[0]["params"]["channel"], "im")
+
+    async def test_approve_guard_rejections(self):
+        """前置校验与 Web 控制台同款：阶段不符 / 已结束 / 已决策均被拒绝（ok:false）。"""
+        roles = json.dumps({"alice": "operator"})
+        cases = [
+            (self._detail(status=self._status(stage="FIXING")), "不允许该操作"),
+            (self._detail(exec_status="COMPLETED"), "流程已结束"),
+            (self._detail(status=self._status(approval="approve")), "不能重复提交"),
+        ]
+        for detail, expected in cases:
+            with mock.patch.dict(os.environ, {"AIOPS_IM_USERS": roles}), \
+                 mock.patch.object(chatops_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+                 mock.patch.object(chatops_routes.gw, "flow_detail", mock.AsyncMock(return_value=detail)), \
+                 mock.patch.object(chatops_routes.kill_switch, "get_state", return_value={"active": False}):
+                payload = await chatops_routes.api_im_command(
+                    {"sender": "alice", "text": f"批准 {self._WF_ID}"}
+                )
+            self.assertFalse(payload["ok"], expected)
+            self.assertIn("未执行", payload["reply"])
+            self.assertIn(expected, payload["reply"])
+
+    async def test_second_approve_requires_protected_dir(self):
+        roles = json.dumps({"alice": "operator"})
+        with mock.patch.dict(os.environ, {"AIOPS_IM_USERS": roles}), \
+             mock.patch.object(chatops_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+             mock.patch.object(chatops_routes.gw, "flow_detail", mock.AsyncMock(return_value=self._detail())), \
+             mock.patch.object(chatops_routes.kill_switch, "get_state", return_value={"active": False}):
+            payload = await chatops_routes.api_im_command(
+                {"sender": "alice", "text": f"二级批准 {self._WF_ID}"}
+            )
+        self.assertFalse(payload["ok"])
+        self.assertIn("无需二级审批", payload["reply"])
+
+    async def test_kill_switch_blocks_decision_but_not_query(self):
+        roles = json.dumps({"alice": "operator"})
+        active = {"active": True, "reason": "演练", "actor": "admin"}
+        with mock.patch.dict(os.environ, {"AIOPS_IM_USERS": roles}), \
+             mock.patch.object(chatops_routes.kill_switch, "get_state", return_value=active), \
+             mock.patch.object(chatops_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])):
+            with self.assertRaises(ApiError) as ctx:
+                await chatops_routes.api_im_command(
+                    {"sender": "alice", "text": f"批准 {self._WF_ID}"}
+                )
+            self.assertEqual(ctx.exception.status_code, 503)
+            self.assertIn("kill switch", ctx.exception.message)
+            payload = await chatops_routes.api_im_command({"sender": "alice", "text": "待办"})
+        self.assertTrue(payload["ok"])  # 查询命令保留可用（与控制台 GET 行为对齐）
+
+    async def test_unknown_command_and_bad_payload(self):
+        payload = await chatops_routes.api_im_command({"sender": "alice", "text": "部署 abc"})
+        self.assertFalse(payload["ok"])
+        self.assertIn("未识别命令", payload["reply"])
+        with self.assertRaises(ApiError) as ctx:
+            await chatops_routes.api_im_command({"foo": "bar"})
+        self.assertEqual(ctx.exception.status_code, 400)
 
 
 if __name__ == "__main__":

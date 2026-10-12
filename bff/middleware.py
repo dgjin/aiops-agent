@@ -30,6 +30,8 @@ _WRITE_ROLE_RULES: list[tuple[str, str]] = [
     ("/api/users", "admin"),            # 用户管理（CRUD / 重置密码 / 强制下线）
     ("/api/auth/logout", "viewer"),     # 登出：任何已认证角色
     ("/api/auth/password", "viewer"),   # 本人改密：任何已认证角色（需原密码）
+    # IM 通道（ChatOps）：通道身份固定 viewer，命令级权限（发送者角色）在路由内判定
+    ("/api/im/command", "viewer"),
 ]
 
 # 读接口里需要更高角色的少数路径（令牌清单 / 用户清单属敏感信息）
@@ -53,11 +55,24 @@ _SERVICE_ENDPOINTS: tuple[tuple[str, str], ...] = (
 _SERVICE_ROLE = "viewer"
 _SERVICE_USER = "service:nl2sql"
 
+# IM 通道旁路（ChatOps）：(精确路径, 环境变量名)。IM 网桥（飞书/钉钉机器人出口）
+# 把群消息 POST 到 /api/im/command——与 _SERVICE_ENDPOINTS 同构：精确路径 + 令牌
+# 常数时间比较；env 未配置＝通道关闭（fail-closed 到常规鉴权）。通道身份固定
+# viewer，发送者角色（AIOPS_IM_USERS）与命令级权限在路由内判定。
+_IM_ENDPOINTS: tuple[tuple[str, str], ...] = (
+    ("/api/im/command", "AIOPS_IM_TOKEN"),
+)
+_IM_ROLE = "viewer"
+_IM_USER = "im:gateway"
+
 # kill switch 激活时仍可调用的写端点（否则激活后无法关闭/登出；角色校验仍生效）
+# /api/im/command：单端点承载读+写命令（middleware 无法区分），写命令在路由内做
+# kill switch 细粒度校验——查询命令保留可用，与控制台 GET 行为对齐。
 _KILL_SWITCH_EXEMPT = {
     "/api/system/kill-switch",
     "/api/auth/logout",
     "/api/auth/password",
+    "/api/im/command",
 }
 
 
@@ -92,6 +107,32 @@ def _service_identity(request: Request) -> "auth_store.Identity | None":
     if not hmac.compare_digest(token, expected):
         return None
     return auth_store.Identity(user=_SERVICE_USER, role=_SERVICE_ROLE)
+
+
+def _im_identity(request: Request) -> "auth_store.Identity | None":
+    """IM 通道旁路判定（ChatOps）：精确路径 + POST + 令牌常数时间比较。
+
+    - 仅 POST，且路径必须在 ``_IM_ENDPOINTS`` 白名单中；
+    - 环境变量未配置、无 Bearer 或令牌不符 → None（走常规鉴权，fail-closed）；
+    - 本函数仅通道级（viewer）；命令级权限由路由按 AIOPS_IM_USERS 判定。
+    """
+    if request.method.upper() != "POST":
+        return None
+    env_name = next(
+        (name for endpoint, name in _IM_ENDPOINTS if endpoint == request.url.path), None
+    )
+    if env_name is None:
+        return None
+    expected = (os.environ.get(env_name) or "").strip()
+    if not expected:
+        return None
+    authorization = request.headers.get("authorization") or ""
+    if not authorization.lower().startswith("bearer "):
+        return None
+    token = authorization.split(" ", 1)[1].strip()
+    if not hmac.compare_digest(token, expected):
+        return None
+    return auth_store.Identity(user=_IM_USER, role=_IM_ROLE)
 
 
 def _rate_limited(retry_after: float) -> JSONResponse:
@@ -157,9 +198,13 @@ async def _auth_guard(request: Request, call_next):
     except auth_store.AuthConfigError as exc:
         resolved, session_error = None, str(exc)
 
-    # 通道 0：服务令牌旁路（只读集成；命中后仍走限速与角色检查，独立于注册表状态）
+    # 通道 0a+0b：服务令牌 / IM 通道旁路（只读集成 / ChatOps；命中后仍走限速与角色检查，
+    # 独立于注册表状态）
+    im_identity = _im_identity(request)
     service_identity = _service_identity(request)
-    if service_identity is not None:
+    if im_identity is not None:
+        identity, token_record = im_identity, {"source": "im"}
+    elif service_identity is not None:
         identity, token_record = service_identity, {"source": "service"}
     elif resolved is not None:
         identity, token_record = resolved

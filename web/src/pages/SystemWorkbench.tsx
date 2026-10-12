@@ -76,6 +76,17 @@ function KV({ label, value, mono = true }: { label: string; value: React.ReactNo
   )
 }
 
+/** 依赖服务名 → 已纳管系统的工作台链接（P2-2 浅拓扑；未纳管则纯文本）。 */
+function ServiceRef({ service, apps }: { service: string; apps: MonitoredApp[] }) {
+  const target = apps.find((item) => item.service === service)
+  if (!target) return <span title="未纳管（仅声明依赖名）">{service}</span>
+  return (
+    <Link to={`/systems/${encodeURIComponent(target.id)}`} className="text-accent hover:underline">
+      {service}
+    </Link>
+  )
+}
+
 /** 需求基线卡：最近一次分析会话的摘要（按系统过滤）。 */
 function RequirementsCard({ appId }: { appId: string }) {
   const { data } = useQuery({
@@ -172,6 +183,12 @@ export function SystemWorkbench() {
   const items: FlowItem[] = flows.data?.items ?? []
   const running = items.filter((item) => item.exec_status === 'RUNNING')
   const timelineGroups = timeline.data?.groups ?? []
+  // 浅拓扑（P2-2）：上游依赖（清单声明）+ 下游调用方（反查全量清单）
+  const allApps = apps.data.items
+  const deps = app.depends_on ?? []
+  const dependents = allApps.filter(
+    (item) => item.service !== app.service && (item.depends_on ?? []).includes(app.service),
+  )
 
   return (
     <div>
@@ -424,6 +441,45 @@ export function SystemWorkbench() {
               )}
               {app.health_path && <KV label="健康路径" value={app.health_path} />}
               {app.repo && <KV label="修复仓库" value={<span title={app.repo}>{app.repo}</span>} />}
+              <KV
+                label="依赖服务"
+                value={
+                  deps.length > 0 ? (
+                    <span title={deps.join(', ')}>
+                      {deps.map((svc, i) => (
+                        <span key={svc}>
+                          {i > 0 && '、'}
+                          <ServiceRef service={svc} apps={allApps} />
+                        </span>
+                      ))}
+                    </span>
+                  ) : (
+                    <span className="text-idle">未声明</span>
+                  )
+                }
+                mono={false}
+              />
+              {dependents.length > 0 && (
+                <KV
+                  label="被依赖"
+                  value={
+                    <span title={dependents.map((d) => d.service).join(', ')}>
+                      {dependents.map((d, i) => (
+                        <span key={d.id}>
+                          {i > 0 && '、'}
+                          <Link
+                            to={`/systems/${encodeURIComponent(d.id)}`}
+                            className="text-accent hover:underline"
+                          >
+                            {d.service}
+                          </Link>
+                        </span>
+                      ))}
+                    </span>
+                  }
+                  mono={false}
+                />
+              )}
             </div>
             <Link
               to="/monitored-apps"

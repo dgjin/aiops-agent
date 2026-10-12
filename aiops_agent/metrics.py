@@ -77,6 +77,9 @@ if _AVAILABLE:
         "aiops_bff_request_duration_seconds", "BFF 请求耗时", ["method", "path"]
     )
     GATE_EVENTS = Counter("aiops_gate_events_total", "闸门事件数", ["gate", "decision", "mode"])
+    AGGREGATED_ALERTS = Counter(
+        "aiops_alert_aggregated_total", "同故障域聚合归并的告警数（P2-1）", ["service", "mode"]
+    )
 else:  # pragma: no cover - 降级分支
     WORKFLOW_STARTED = _NoopMetric()
     WORKFLOW_COMPLETED = _NoopMetric()
@@ -90,6 +93,7 @@ else:  # pragma: no cover - 降级分支
     BFF_REQUESTS = _NoopMetric()
     BFF_REQUEST_DURATION = _NoopMetric()
     GATE_EVENTS = _NoopMetric()
+    AGGREGATED_ALERTS = _NoopMetric()
 
 
 def available() -> bool:
@@ -153,6 +157,11 @@ def observe_gate_event(gate: str, decision: str) -> None:
     GATE_EVENTS.labels(
         gate=_label(gate), decision=_label(decision), mode=current_mode()
     ).inc()
+
+
+def observe_alert_aggregated(service: str) -> None:
+    """同故障域聚合归并一条告警（webhook 接入层，P2-1 修复风暴防护）。"""
+    AGGREGATED_ALERTS.labels(service=_label(service), mode=current_mode()).inc()
 
 
 def observe_bff_request(method: str, path: str, status: int, duration: float) -> None:

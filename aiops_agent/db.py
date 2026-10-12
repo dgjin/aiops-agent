@@ -104,6 +104,10 @@ monitored_apps = Table(
     # 修复目标仓库路径（可选，空=不参与自动修复）；AIOps 修复引擎据此定位并生成补丁。
     # 旧生产库升级需迁移：ALTER TABLE monitored_apps ADD COLUMN repo VARCHAR(1024) NOT NULL DEFAULT '';
     Column("repo", String(1024), nullable=False, server_default=""),
+    # 依赖关系（P2-2 浅拓扑）：本应用依赖的服务名 JSON 数组（如 ["coupon"]）；
+    # 供 triage 注入「上游依赖/下游调用方 + 依赖健康」上下文。
+    # 旧生产库升级需迁移：ALTER TABLE monitored_apps ADD COLUMN depends_on JSON NULL;
+    Column("depends_on", JSON),
     Column("enabled", Boolean, nullable=False, server_default=text("1")),
     # 注意：MySQL 8 严格模式下 TEXT 列不允许 DEFAULT（''）——不设 server_default，
     # 由写入路径显式提供空串（bff/monitored_apps.py 的 _insert_apps 恒赋值）

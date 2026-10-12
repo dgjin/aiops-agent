@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from . import (
     approvals,
     audit,
+    chatops,
     escalations,
     flows,
     health,
@@ -25,6 +26,7 @@ def include_routers(app: FastAPI) -> None:
         health,
         flows,
         approvals,
+        chatops,
         escalations,
         ops_metrics,
         audit,

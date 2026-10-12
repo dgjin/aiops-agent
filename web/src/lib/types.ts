@@ -341,6 +341,8 @@ export interface MonitoredApp {
   health_path?: string
   /** 修复目标仓库路径（AIOps 修复引擎据此定位并生成补丁；空=不参与自动修复） */
   repo: string
+  /** 依赖服务（P2-2 浅拓扑）：本应用依赖的服务名列表；供 triage 注入依赖上下文与工作台展示 */
+  depends_on: string[]
   enabled: boolean
   note: string
   created_at: string
@@ -379,6 +381,8 @@ export interface MonitoredAppInput {
   probe_keyword?: string
   health_path?: string
   repo?: string
+  /** 依赖服务（P2-2 浅拓扑）：本应用依赖的服务名列表；缺省=保留原值，[]=显式清空 */
+  depends_on?: string[]
   enabled: boolean
   note?: string
 }

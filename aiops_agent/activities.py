@@ -200,9 +200,10 @@ async def analyze_root_cause(
 
     安全侧降级：LLM 不可用/输出非法 → confidence=0.0 → 闸门 1 自动转人工。
     变更关联（P1-1）：注入近 2 小时发布/配置事件，供 LLM 判定故障与变更的相关性。
+    依赖拓扑（P2-2）：注入本服务依赖/被依赖列表与依赖健康，供 LLM 判断根因位置。
     演示关键词（low-conf / protected）走确定性桩，保证演示矩阵回归不依赖 LLM。
     """
-    from . import changes, triage
+    from . import changes, topology, triage
 
     await _tiny_delay()
     desc = alert.description.lower()
@@ -227,8 +228,21 @@ async def analyze_root_cause(
     recent_changes = await asyncio.to_thread(changes.recent_changes, alert.service)
     if recent_changes:
         log.info("[triage] 变更关联：近 2 小时命中 %d 条变更记录", len(recent_changes))
+    topology_ctx = await asyncio.to_thread(topology.dependency_context, alert.service)
+    if topology_ctx:
+        log.info(
+            "[triage] 拓扑注入：依赖 %d 个、被依赖 %d 个、不健康依赖 %s",
+            len(topology_ctx["depends_on"]),
+            len(topology_ctx["depended_by"]),
+            topology_ctx["unhealthy"] or "无",
+        )
     root_cause, meta = await asyncio.to_thread(
-        triage.run_triage, alert, clustered, trace_ids, changes=recent_changes
+        triage.run_triage,
+        alert,
+        clustered,
+        trace_ids,
+        changes=recent_changes,
+        topology=topology_ctx,
     )
     log.info(
         "[triage] LLM triage：%s confidence=%.2f（model=%s, elapsed=%.1fs, degraded=%s）",

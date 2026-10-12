@@ -15,6 +15,7 @@ import unittest
 import demo_cli
 from aiops_agent.models import Alert
 from alert_webhook import (
+    AggregateWindow,
     AuthConfig,
     RateLimiter,
     check_request_auth,
@@ -248,6 +249,88 @@ class TestRateLimiter(unittest.TestCase):
         lim = RateLimiter(0)
         for _ in range(5):
             self.assertTrue(lim.allow("a", now=0.0))
+
+
+class TestAggregateWindow(unittest.TestCase):
+    """P2-1 事件聚合窗口：同故障域窗口内归并、过期开新事件、可关闭、可回滚。"""
+
+    @staticmethod
+    def _alert(alert_id: str, service: str = "nl2sql") -> Alert:
+        return Alert(alert_id=alert_id, service=service)
+
+    def test_same_service_within_window_merges(self) -> None:
+        window = AggregateWindow(90.0)
+        to_start, merged = window.route([self._alert("a-1")], now=100.0)
+        self.assertEqual([a.alert_id for a in to_start], ["a-1"])
+        self.assertEqual(merged, [])
+        to_start, merged = window.route([self._alert("a-2")], now=130.0)
+        self.assertEqual(to_start, [])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].count, 2)
+        self.assertEqual(merged[0].alert_ids, ["a-1", "a-2"])
+        self.assertEqual(merged[0].service, "nl2sql")
+
+    def test_window_expiry_starts_new_event(self) -> None:
+        window = AggregateWindow(90.0)
+        window.route([self._alert("a-1")], now=100.0)
+        to_start, merged = window.route([self._alert("a-2")], now=191.0)  # 91s 后：过期
+        self.assertEqual([a.alert_id for a in to_start], ["a-2"])
+        self.assertEqual(merged, [])
+
+    def test_disabled_window_passes_all(self) -> None:
+        window = AggregateWindow(0)
+        to_start, merged = window.route([self._alert("a-1"), self._alert("a-2")], now=100.0)
+        self.assertEqual(len(to_start), 2)
+        self.assertEqual(merged, [])
+
+    def test_different_services_isolated(self) -> None:
+        window = AggregateWindow(90.0)
+        to_start, _ = window.route(
+            [self._alert("a-1"), self._alert("b-1", service="order")], now=100.0
+        )
+        self.assertEqual(len(to_start), 2)
+
+    def test_same_batch_same_service_merges_into_first(self) -> None:
+        window = AggregateWindow(90.0)
+        to_start, merged = window.route(
+            [self._alert("a-1"), self._alert("a-2"), self._alert("a-3")], now=100.0
+        )
+        self.assertEqual([a.alert_id for a in to_start], ["a-1"])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].count, 3)
+        self.assertEqual(merged[0].alert_ids, ["a-1", "a-2", "a-3"])
+
+    def test_attach_wf_visible_in_later_merge(self) -> None:
+        window = AggregateWindow(90.0)
+        window.route([self._alert("a-1")], now=100.0)
+        window.attach_wf("nl2sql", "aiops-fix-nl2sql-a-1")
+        _, merged = window.route([self._alert("a-2")], now=110.0)
+        self.assertEqual(merged[0].wf_id, "aiops-fix-nl2sql-a-1")
+
+    def test_discard_only_removes_clean_new_events(self) -> None:
+        window = AggregateWindow(90.0)
+        window.route([self._alert("a-1")], now=100.0)  # 干净新事件
+        window.discard(["nl2sql"])
+        # 回滚后同 service 再投递：仍视为首发（启动失败不吞告警）
+        to_start, _ = window.route([self._alert("a-2")], now=105.0)
+        self.assertEqual([a.alert_id for a in to_start], ["a-2"])
+        # 已有归并（count>1）的事件不回滚
+        window.route([self._alert("a-3")], now=106.0)
+        window.discard(["nl2sql"])
+        to_start, merged = window.route([self._alert("a-4")], now=107.0)
+        self.assertEqual(to_start, [])
+        self.assertEqual(merged[0].count, 3)
+
+    def test_state_boundary_cleanup_drops_expired(self) -> None:
+        window = AggregateWindow(90.0)
+        for i in range(1024):
+            window.route([self._alert(f"s{i}-1", service=f"svc{i}")], now=100.0)
+        # 窗口过期后新增第 1025 个域：触发内存兜底清理，过期项被清掉
+        to_start, _ = window.route([self._alert("x-1", service="svcX")], now=200.0)
+        self.assertEqual(len(to_start), 1)
+        # svc0 已被清理：再投递视为新事件（开新流程，不被误吞）
+        to_start, _ = window.route([self._alert("s0-2", service="svc0")], now=201.0)
+        self.assertEqual(len(to_start), 1)
 
 
 if __name__ == "__main__":

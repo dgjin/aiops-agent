@@ -145,6 +145,39 @@ class MonitorStoreTest(unittest.TestCase):
         src = store.add(name="A", url="http://a.test/", probe_keyword='<div id="root"')
         self.assertEqual(store.duplicate(src["id"])["probe_keyword"], '<div id="root"')
 
+    # ---------- depends_on（P2-2 浅拓扑） ----------
+
+    def test_depends_on_roundtrip_and_normalize(self) -> None:
+        app = store.add(
+            name="A",
+            url="http://a.test/",
+            service="order",
+            depends_on=["coupon", " coupon ", "", "order", "payment", "payment"],
+        )
+        self.assertEqual(app["depends_on"], ["coupon", "payment"])  # 去空 / 去重 / 去自身
+        self.assertEqual(store.get(app["id"])["depends_on"], ["coupon", "payment"])  # 持久化
+
+    def test_depends_on_none_keeps_and_empty_clears_on_update(self) -> None:
+        app = store.add(name="A", url="http://a.test/", depends_on=["coupon"])
+        _before, kept = store.update(app["id"], note="改备注")  # 未携带（None）→ 保留原值
+        self.assertEqual(kept["depends_on"], ["coupon"])
+        _before, cleared = store.update(app["id"], depends_on=[])
+        self.assertEqual(cleared["depends_on"], [])  # 显式清空
+
+    def test_depends_on_validation(self) -> None:
+        with self.assertRaises(store.MonitorStoreError):
+            store.add(name="A", url="http://a.test/", depends_on="coupon")  # 非列表
+        with self.assertRaises(store.MonitorStoreError):
+            store.add(name="B", url="http://b.test/", depends_on=[123])  # 含非字符串
+        with self.assertRaises(store.MonitorStoreError):
+            store.add(name="C", url="http://c.test/", depends_on=["x" * 65])  # 单名超长
+        with self.assertRaises(store.MonitorStoreError):
+            store.add(name="D", url="http://d.test/", depends_on=[f"s{i}" for i in range(21)])  # 超数量
+
+    def test_duplicate_copies_depends_on(self) -> None:
+        src = store.add(name="A", url="http://a.test/", depends_on=["coupon"])
+        self.assertEqual(store.duplicate(src["id"])["depends_on"], ["coupon"])
+
     def test_log_targets_filters_enabled_and_path(self) -> None:
         store.add(name="A", url="http://a.test/", service="svc-a", log_path="/tmp/a.log")
         second = store.add(name="B", url="http://b.test/", service="svc-b", log_path="/tmp/b.log")
@@ -222,6 +255,15 @@ class ImportBatchDuplicateTest(unittest.TestCase):
         self.assertEqual(apps["A"]["url"], "http://a-new.test/")
         self.assertFalse(apps["A"]["enabled"])
         self.assertEqual(apps["B"]["service"], "svc-b")
+
+    def test_import_carries_depends_on(self) -> None:
+        result = store.import_many(
+            [{"name": "A", "url": "http://a.test/", "service": "order", "depends_on": ["coupon"]}],
+            mode="merge",
+        )
+        self.assertEqual(result["added"], 1)
+        apps = {a["name"]: a for a in store.list_all()}
+        self.assertEqual(apps["A"]["depends_on"], ["coupon"])
 
     def test_merge_collects_errors_without_aborting(self) -> None:
         result = store.import_many(
@@ -318,6 +360,10 @@ class DiffFieldsTest(unittest.TestCase):
     def test_no_change_is_empty(self) -> None:
         self.assertEqual(store.diff_fields({"url": "x"}, {"url": "x"}), {})
 
+    def test_depends_on_change_reported(self) -> None:
+        diff = store.diff_fields({"depends_on": []}, {"depends_on": ["coupon"]})
+        self.assertEqual(diff, {"depends_on": {"from": [], "to": ["coupon"]}})
+
     def test_new_field_shows_none_from(self) -> None:
         self.assertEqual(store.diff_fields({}, {"note": "hi"}), {"note": {"from": None, "to": "hi"}})
 
@@ -382,6 +428,17 @@ class ProductionDbBackendTest(unittest.TestCase):
             repo=str(Path(self._tmp.name) / "not-exist"),
         )
         self.assertIsNone(app_registry.resolve("svc-bad"))
+
+    def test_depends_on_persists_in_db(self) -> None:
+        """production 后端（SQLite 注入）：depends_on JSON 列落库并原样读回。"""
+        app = store.add(
+            name="拓扑应用", url="http://topo.test/", service="order", depends_on=["coupon", "payment"]
+        )
+        row = store.get(app["id"])
+        self.assertEqual(row["depends_on"], ["coupon", "payment"])
+        _before, updated = store.update(app["id"], depends_on=[])
+        self.assertEqual(updated["depends_on"], [])
+        self.assertEqual(store.get(app["id"])["depends_on"], [])
 
 
 if __name__ == "__main__":

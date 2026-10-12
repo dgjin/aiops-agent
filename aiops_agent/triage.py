@@ -55,13 +55,38 @@ def strip_code_fence(text: str) -> str:
     return text.strip()
 
 
+def _topology_lines(topology: dict | None) -> str:
+    """拓扑上下文 → prompt 行（P2-2 浅拓扑：依赖 + 健康，供根因位置判断）。"""
+    if not topology:
+        return "- （未声明依赖关系）"
+
+    def fmt(items: list[dict]) -> str:
+        parts = []
+        for item in items:
+            name = item.get("service", "")
+            probe = item.get("probe") or {}
+            if probe.get("ok") is False:
+                parts.append(f"{name}（探测不健康，连续失败 {probe.get('failures', 0)} 次）")
+            elif probe.get("ok") is True:
+                parts.append(f"{name}（探测健康）")
+            else:
+                parts.append(str(name))
+        return "、".join(parts) or "（无）"
+
+    return (
+        f"- 本服务依赖（上游提供者）：{fmt(topology.get('depends_on') or [])}\n"
+        f"- 依赖本服务（下游调用方）：{fmt(topology.get('depended_by') or [])}"
+    )
+
+
 def build_triage_prompt(
     alert: Alert,
     clustered: dict,
     trace_ids: list[str] | None = None,
     changes: list[dict] | None = None,
+    topology: dict | None = None,
 ) -> str:
-    """构造 triage prompt：告警 + 聚类模板（降噪后）+ 调用链 ID + 最近变更（P1-1）。"""
+    """构造 triage prompt：告警 + 聚类模板（降噪后）+ 调用链 ID + 最近变更（P1-1）+ 依赖拓扑（P2-2）。"""
     templates = clustered.get("templates", [])[:10]
     template_lines = (
         "\n".join(f"- [{t['count']}x] {t['pattern']}" for t in templates)
@@ -77,6 +102,7 @@ def build_triage_prompt(
         if changes
         else "- （窗口内无发布/配置变更记录）"
     )
+    topology_lines = _topology_lines(topology)
     return f"""你是资深 SRE 故障根因分析专家。请基于以下证据判定故障根因，只输出一个 JSON 对象。
 
 ## 告警
@@ -94,6 +120,9 @@ def build_triage_prompt(
 ## 最近变更（发布/配置事件，时间倒序；用于故障与变更的相关性判断）
 {change_lines}
 
+## 依赖拓扑（用于判断根因位置：本服务 / 上游依赖 / 下游调用方）
+{topology_lines}
+
 ## 输出要求（JSON，不要输出其他内容）
 {{
   "error_type": "异常/故障类型，如 NullPointerException / TimeoutError / OutOfMemoryError",
@@ -107,6 +136,7 @@ def build_triage_prompt(
 - 证据不足、模板全是正常日志或日志极少、无法定位具体异常时，confidence 必须低于 0.8；
 - 若日志证据与某项变更高度相关（如发布/配置变更后短时间内爆发故障），在 summary 中明确指出该变更关联；
 - 变更记录仅是时间线索：若日志证据与该变更无关，不得仅凭时间接近判定根因、不得虚增 confidence；
+- 若「本服务依赖」中某项同时探测不健康，根因可能位于该依赖服务（本服务异常是下游表现），在 summary 中说明；
 - confidence 必须是 0 到 1 之间的小数。"""
 
 
@@ -151,13 +181,14 @@ def run_triage(
     model: str | None = None,
     timeout: int = 45,
     changes: list[dict] | None = None,
+    topology: dict | None = None,
 ) -> tuple[RootCause, dict]:
-    """执行一次 triage：返回 (RootCause, meta)。meta 含 degraded/elapsed 等评测所需信息。"""
+    """执行一次 triage：返回 (RootCause, meta)。meta 含 degraded/elapsed 等评测 所需信息。"""
     used_model = model or DEFAULT_MODEL
     meta: dict = {"model": used_model, "degraded": False, "reason": ""}
     start = time.monotonic()
     try:
-        prompt = build_triage_prompt(alert, clustered, trace_ids, changes)
+        prompt = build_triage_prompt(alert, clustered, trace_ids, changes, topology)
         raw = call_ollama(prompt, model=used_model, timeout=timeout)
         parsed = TriageOutput.model_validate_json(strip_code_fence(raw))
         root_cause = RootCause(

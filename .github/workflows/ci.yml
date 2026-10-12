@@ -34,8 +34,8 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: requirements.txt
-      - name: 安装依赖
-        run: pip install -r requirements.txt
+      - name: 安装依赖（含可选 MCP 组件，保证 mcp_server 用例不跳过）
+        run: pip install -r requirements.txt -r requirements-mcp.txt
       - name: 运行单元测试（必须带 -t .）
         run: python -m unittest discover -s tests -t . -v
 

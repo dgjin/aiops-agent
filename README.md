@@ -221,6 +221,41 @@ export AIOPS_QODER_BIN="$HOME/.local/bin/qodercli"   # 建议显式指定
 
 > 沙箱与 Qoder 工作区须位于**容器可挂载路径**：colima 默认仅挂载 `$HOME`，把 `AIOPS_QODER_ROOT` / 沙箱目录放在 `/tmp` 会导致容器内工作区为空（测试报 `Start directory is not importable`）。
 
+### ChatOps（IM 指令查询/审批）
+
+IM 群里直接查询与审批（操作入口前移，P2-3）：IM 机器人出口把群消息 POST 到 BFF `/api/im/command`，回复 `{"ok", "reply"}` 原样发回群即可。兼容通用 `{"sender","text"}`、飞书事件 v2、钉钉回调三种载荷。
+
+```bash
+# 启动前在 .env 配置（或进程环境）：通道令牌 + 发送者角色映射
+AIOPS_IM_TOKEN=<openssl rand -hex 24>
+AIOPS_IM_USERS='{"ou_xxxxxxxx":"operator"}'
+
+# 手工验证（通道令牌鉴权；未映射发送者默认 viewer 仅可查询）
+curl -X POST http://127.0.0.1:8600/api/im/command \
+  -H "Authorization: Bearer $AIOPS_IM_TOKEN" -H "Content-Type: application/json" \
+  -d '{"sender":"ou_xxxxxxxx","text":"待办"}'
+```
+
+命令：`帮助` / `待办` / `状态 <流程ID前缀>` / `批准|驳回 <流程ID前缀>` / `二级批准|二级驳回 <流程ID前缀>`（中英别名均可）。安全语义与控制台一致：审批复用同款写守卫（运行中 + 阶段允许 + 防重复）、kill switch、操作审计（actor=`im:<sender>`）。
+
+### MCP server（能力对外暴露，可选）
+
+把控制台能力以 MCP 工具形态暴露给外部 Agent 平台（P2-4）——薄 HTTP 适配层，全部调用转发 BFF `/api/*`，复用鉴权/审计/写守卫/kill switch，行为与控制台一致：
+
+```bash
+.venv/bin/pip install -r requirements-mcp.txt     # 可选依赖（不装不影响主链路）
+AIOPS_MCP_TOKEN=<控制台令牌> .venv/bin/python mcp_server.py          # stdio（MCP 客户端本地拉起，主模式）
+AIOPS_MCP_TOKEN=<控制台令牌> .venv/bin/python mcp_server.py --http   # streamable-http（127.0.0.1:8700/mcp）
+```
+
+客户端配置示例（stdio；Claude Desktop / Cursor 等 mcpServers 通用形态）：
+
+```json
+{"mcpServers": {"aiops": {"command": "/绝对路径/aiops-agent/.venv/bin/python", "args": ["/绝对路径/aiops-agent/mcp_server.py"], "env": {"AIOPS_MCP_BASE_URL": "http://127.0.0.1:8600", "AIOPS_MCP_TOKEN": "<控制台令牌>"}}}}
+```
+
+9 个工具：`ops_overview` / `list_flows` / `get_flow` / `list_pending_approvals` / `list_escalations` / `query_audit` / `check_system_health`（只读，viewer 令牌即可）+ `approve_flow` / `second_approve_flow`（写，需 operator+；BFF 侧仍有写守卫与审计）。
+
 ---
 
 ## 七、目录结构
@@ -231,13 +266,14 @@ aiops-agent/
 ├── bff/                # 运维控制台 BFF（FastAPI；routes/ 按域拆分 + middleware 鉴权/限速/指标）
 ├── web/                # 运维控制台前端（React 19 + Vite + TS + Tailwind 深色主题）
 ├── demo-app/           # 被修复的示例应用（order 服务）
-├── tests/              # 单元测试（unittest；663 用例）
+├── tests/              # 单元测试（unittest；991 用例）
 ├── data/               # 运行产物（索引 / 沙箱 / 留痕 / 审计）；生产数据在 data/prod/ 或 MySQL
 ├── scripts/            # 演示脚本 + production-smoke.py（生产冒烟）+ security-scan.sh（SAST）
 ├── deploy/             # 生产交付物：Dockerfile / k8s manifests / prometheus / grafana
 ├── demo_cli.py         # 演示 CLI（启动流程 / 发信号 / 自检）
 ├── analyze_requirements.py # 需求基线主动分析 CLI（拉取基线条目 → 报告 / JSON）
 ├── demo_log_generator.py  # 演示日志生成器
+├── mcp_server.py       # MCP server（能力对外暴露；可选依赖 requirements-mcp.txt）
 ├── demo-policy.yaml    # 演示加速策略
 └── release-gate-policy.yaml  # 生产闸门策略
 ```

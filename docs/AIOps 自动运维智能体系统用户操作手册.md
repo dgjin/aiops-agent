@@ -226,6 +226,39 @@ python demo_cli.py result --wf-id aiops-fix-order-a-1001
 | `duration_seconds` | 全流程耗时 |
 | `queued_patches` | 结束时仍滞留队列的补丁 |
 
+### 4.6 IM 群指令（ChatOps：查询与审批）
+
+值班人也可不打开控制台，直接在飞书/钉钉工作群里发消息完成查询与审批（操作入口前移）。前置：管理员已完成 IM 机器人网桥接入与通道配置（见部署手册 §3.8）。
+
+命令一览（除中文外兼容英文别名，如 `pending` / `approve`；发送「帮助」可随时查看）：
+
+| 命令 | 说明 | 最低角色 |
+| --- | --- | --- |
+| `帮助` | 命令说明 | viewer |
+| `待办` | 列出待审批流程（受保护目录流程会标注二级审批进度） | viewer |
+| `状态 <流程ID前缀>` | 单流程状态：阶段/根因/补丁/审批进度/截止时间 | viewer |
+| `批准` / `驳回 <流程ID前缀>` | 一级审批决策（闸门 2） | operator |
+| `二级批准` / `二级驳回 <流程ID前缀>` | 二级审批决策（受保护目录流程） | operator |
+
+一段典型的群内对话：
+
+```text
+[值班人]    @AIOps助手 待办
+[AIOps助手] 待审批流程（2 个）：
+              1. aiops-fix-order-a-1001（order）· 补丁 p-a-1001-r1（受保护目录，需二级审批）
+              2. aiops-fix-coupon-a-1002（coupon）· 补丁 p-a-1002-r1
+              发送「批准 <ID前缀>」或「驳回 <ID前缀>」处置。
+
+[值班人]    @AIOps助手 批准 aiops-fix-order-a-1001
+[AIOps助手] ✓ aiops-fix-order-a-1001：一级审批已批准（操作者 ou_xxxx）
+```
+
+> 要点：
+> - 流程 ID 支持**唯一前缀**；前缀命中多条时机器人回复候选列表，补充字符后再发即可；
+> - 发送者未在 `AIOPS_IM_USERS` 中映射时按 **viewer** 处理（仅可查询）；审批类命令要求 operator 及以上；
+> - 审批安全语义与控制台完全一致：复用同款写守卫（仅运行中 + 等待审批 + 防重复）、kill switch 与操作审计（审计 actor 记为 `im:<发送者>`）；
+> - 命令级失败（无权限 / 流程已结束 / 前缀不唯一等）会以文字直接回复原因，不会静默失败。
+
 ---
 
 ## 5 通知卡片说明
@@ -529,6 +562,11 @@ bash scripts/cleanup-sandbox.sh --status      # 数据清理：查看沙箱/Qode
 bash scripts/rotate-logs.sh                   # 日志轮转：>1MB 的 *.log 压缩轮转（copytruncate，进程免重启）
 python scripts/backup-data.py                 # 数据备份（MySQL + 关键 JSON → backups/）；--restore-test 恢复演练
 bash scripts/launchd-install.sh install       # 组件守护交 launchd 托管（登录自启/崩溃自动重启）；status/uninstall 管理
+
+# 对外通道（可选；详见部署手册 §3.8 / §3.9）
+curl -X POST http://127.0.0.1:8600/api/im/command -H "Authorization: Bearer $AIOPS_IM_TOKEN" \
+  -H "Content-Type: application/json" -d '{"sender":"ou_xx","text":"待办"}'   # IM 群指令（ChatOps）手工验证
+.venv/bin/python mcp_server.py               # MCP server（stdio；需装 requirements-mcp.txt 并设 AIOPS_MCP_TOKEN）
 ```
 
 ## 附录 B 阶段字典
