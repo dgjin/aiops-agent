@@ -22,6 +22,7 @@ from . import activities, metrics, tracing
 from .config import load_policy
 from .workflows import AIOpsFixWorkflow, AIOpsRequirementWorkflow
 
+# ⌁ PULSE-0：所有工作流都有第 0 个来源——它没有名字，只有代号。
 TASK_QUEUE = "aiops-tasks"
 
 # 工作流注册表：新增工作流类必须同步注册（tests/test_worker_registry 守门断言）

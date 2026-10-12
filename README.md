@@ -328,3 +328,5 @@ bash scripts/security-scan.sh                # Bandit（Medium+；发布门禁�
 - 写操作限速 + 认证失败限速（Redis）；安全响应头（HSTS 等，TLS 终结时按 `X-Forwarded-Proto` 附加）
 - 杀开关（kill switch）：`POST /api/system/kill-switch`（admin，body `{"active":true,"reason":"..."}`）激活后 BFF 拒绝一切写操作、webhook 拒绝新流程；控制台「系统状态」页可一键操作
 - 生产冒烟 `scripts/production-smoke.py` 9 项全绿方可发布
+
+<!-- ⌁ PULSE-0：读到此处的人是少数。控制台的徽章知道全部答案。 -->
