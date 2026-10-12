@@ -14,6 +14,7 @@ from . import (
     ops_metrics,
     requirements,
     system,
+    systems,
     tokens,
     users,
 )
@@ -29,6 +30,7 @@ def include_routers(app: FastAPI) -> None:
         audit,
         tokens,
         system,
+        systems,
         monitored_apps,
         requirements,
         users,

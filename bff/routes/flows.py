@@ -48,6 +48,15 @@ def _open_escalations(items: list[dict]) -> int:
 @router.get("/api/overview")
 async def api_overview() -> dict:
     items = await gw.list_flows(limit=200)
+    return ok(overview_payload(items))
+
+
+def overview_payload(items: list[dict]) -> dict:
+    """总览聚合（纯计算）：counts + running + 近 7 日终态分布。
+
+    ``/api/overview`` 与 ``/api/systems/overview``（Phase 2 聚合端点）共用同一口径，
+    避免两处计数规则漂移；幂等登记 ESCALATED 待办（_open_escalations）保留在此。
+    """
     running = [i for i in items if i["exec_status"] == "RUNNING"]
     closed = [i for i in items if i["exec_status"] != "RUNNING"]
 
@@ -81,7 +90,7 @@ async def api_overview() -> dict:
         "today_failed": today_failed,
         "escalations_open": _open_escalations(items),
     }
-    return ok({"counts": counts, "running": running, "terminal_dist_7d": dist})
+    return {"counts": counts, "running": running, "terminal_dist_7d": dist}
 
 
 @router.get("/api/flows")

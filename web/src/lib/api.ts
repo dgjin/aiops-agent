@@ -29,6 +29,8 @@ import type {
   SessionItem,
   SubsystemsResp,
   SystemResp,
+  SystemTimelineResp,
+  SystemsOverviewResp,
   UserItem,
   WindowResp,
   WriteResp,
@@ -175,6 +177,11 @@ export interface QueuePatchInput {
 export const api = {
   health: () => request<HealthResp>('/api/health'),
   overview: () => request<OverviewResp>('/api/overview'),
+  /** 系统总览聚合（P3⑦）：清单+探测+计数+未纳管一次返回，替代两路轮询+前端 join。 */
+  systemsOverview: () => request<SystemsOverviewResp>('/api/systems/overview'),
+  /** 单系统活动时间线（P3⑨）：服务端聚合 gate_events 翻译与运行态快照推导。 */
+  systemTimeline: (appId: string, params: { flows?: number } = {}) =>
+    request<SystemTimelineResp>(`/api/systems/${encodeURIComponent(appId)}/timeline${qs(params)}`),
   flows: (params: { status?: string; service?: string; stage?: string; limit?: number } = {}) =>
     request<FlowsResp>(`/api/flows${qs(params)}`),
   flowDetail: (wfId: string) =>

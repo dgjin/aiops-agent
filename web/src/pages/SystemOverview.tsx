@@ -2,7 +2,8 @@
  *
  * 三级钻取的第一级：平台健康带（只读）→ 需要注意（异常前置）→ 系统卡片墙
  * （健康 / 活跃流程 / 就绪度）→ 全局态势（折叠，原流程看板能力完整保留）。
- * 数据全部来自现有 API（overview / monitored-apps / health / system / subsystems）。
+ * 主数据来自 P3⑦ 聚合端点 /api/systems/overview（清单+探测+计数+未纳管一次返回），
+ * 平台健康带另走 health / system / subsystems。
  */
 
 import { useState } from 'react'
@@ -13,6 +14,7 @@ import {
   ChevronRight,
   ClipboardCheck,
   Inbox,
+  PackageSearch,
   Timer,
   TriangleAlert,
 } from 'lucide-react'
@@ -30,7 +32,7 @@ import { CountdownText } from '../components/CountdownText'
 import { EmptyState } from '../components/EmptyState'
 import { GlobalSituation } from '../components/GlobalSituation'
 import { StageBadge } from '../components/StageBadge'
-import type { FlowItem, MonitoredApp, OverviewCounts } from '../lib/types'
+import type { FlowItem, MonitoredApp, OverviewCounts, UnmanagedService } from '../lib/types'
 
 /** 平台健康 chip（只读；异常自动变红/黄）。 */
 function Chip({
@@ -118,15 +120,17 @@ function AttentionRow({
   )
 }
 
-/** 需要注意区：探测/巡检异常 → 转人工 → 待审批 → 公告窗口；全绿时收成一行。 */
+/** 需要注意区：探测/巡检异常 → 转人工 → 待审批 → 公告窗口 → 未纳管服务；全绿时收成一行。 */
 function AttentionSection({
   apps,
   counts,
   running,
+  unmanaged,
 }: {
   apps: MonitoredApp[]
   counts: OverviewCounts
   running: FlowItem[]
+  unmanaged: UnmanagedService[]
 }) {
   const rows: React.ReactNode[] = []
 
@@ -238,6 +242,26 @@ function AttentionSection({
     )
   }
 
+  // P3⑧：清单外服务检测——产生过流程但未纳管，不参与探测/巡检/自动修复（信息级提醒）
+  if (unmanaged.length > 0) {
+    const names = unmanaged.slice(0, 3).map((item) => item.service).join('、')
+    rows.push(
+      <AttentionRow
+        key="unmanaged"
+        tone="warn"
+        icon={PackageSearch}
+        text={
+          <>
+            <b className="font-medium text-ink">{unmanaged.length} 个服务触发过流程但未纳管</b>（{names}
+            {unmanaged.length > 3 ? ' 等' : ''}）· 未纳管系统不参与探测 / 巡检 / 自动修复
+          </>
+        }
+        action="前往纳管"
+        to="/monitored-apps"
+      />,
+    )
+  }
+
   return (
     <section className="mt-6">
       <h2 className="mb-3 text-sm font-medium text-muted">
@@ -311,37 +335,35 @@ function SystemCard({ app, running }: { app: MonitoredApp; running: FlowItem[] }
 
 export function SystemOverview() {
   const [showSituation, setShowSituation] = useState(false)
+  // P3⑦：单请求聚合端点（清单+探测+计数+未纳管一次返回）；
+  // 10s 轮询——每次请求触发一轮实时探测，避免 5s 级别过密（详见 BFF systems.py 注释）
   const overview = useQuery({
-    queryKey: ['overview'],
-    queryFn: api.overview,
-    refetchInterval: 5000,
-  })
-  const apps = useQuery({
-    queryKey: ['monitored-apps'],
-    queryFn: api.monitoredApps,
-    refetchInterval: 15000,
+    queryKey: ['systems-overview'],
+    queryFn: api.systemsOverview,
+    refetchInterval: 10000,
   })
 
-  if (apps.isError) {
-    return <EmptyState title="无法加载被监控系统清单" hint={describeError(apps.error)} />
+  if (overview.isError) {
+    return <EmptyState title="无法加载系统总览" hint={describeError(overview.error)} />
   }
-  if (!overview.data || !apps.data) return <div className="text-sm text-muted">加载中…</div>
+  if (!overview.data) return <div className="text-sm text-muted">加载中…</div>
 
   // 异常前置排序：不可达（danger）→ 正常（ok）→ 停用（idle）
   const order: Record<AppHealth, number> = { danger: 0, ok: 1, idle: 2 }
-  const sorted = [...apps.data.items].sort((a, b) => order[appHealth(a)] - order[appHealth(b)])
+  const sorted = [...overview.data.apps].sort((a, b) => order[appHealth(a)] - order[appHealth(b)])
 
   return (
     <div>
       <h1 className="text-lg font-medium">系统总览</h1>
-      <p className="mt-1 text-xs text-muted">以被监控系统为第一视角 · 异常前置排序 · 5 秒自动刷新</p>
+      <p className="mt-1 text-xs text-muted">以被监控系统为第一视角 · 异常前置排序 · 10 秒自动刷新</p>
 
       <HealthStrip />
 
       <AttentionSection
-        apps={apps.data.items}
+        apps={overview.data.apps}
         counts={overview.data.counts}
         running={overview.data.running}
+        unmanaged={overview.data.unmanaged}
       />
 
       <section className="mt-7">

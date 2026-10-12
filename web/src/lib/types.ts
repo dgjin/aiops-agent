@@ -69,6 +69,54 @@ export interface OverviewResp extends Timed {
   terminal_dist_7d: Record<'DONE' | 'SHADOWED' | 'ESCALATED' | 'CANCELLED' | 'FAILED', number>
 }
 
+/** 未纳管服务（P3⑧）：触发过流程但不在被监控清单中的 service（按 service join）。 */
+export interface UnmanagedService {
+  service: string
+  flows: number
+  running: number
+  last_start: string | null
+  last_wf_id: string | null
+}
+
+/** 系统总览聚合响应（P3⑦ /api/systems/overview）：清单+探测+计数+未纳管一次返回。 */
+export interface SystemsOverviewResp extends Timed {
+  counts: OverviewCounts
+  running: FlowItem[]
+  terminal_dist_7d: Record<'DONE' | 'SHADOWED' | 'ESCALATED' | 'CANCELLED' | 'FAILED', number>
+  apps: MonitoredApp[]
+  unmanaged: UnmanagedService[]
+}
+
+/** 时间线事件色调（映射 Tailwind 语义色）。 */
+export type TimelineTone = 'info' | 'ok' | 'warn' | 'danger' | 'idle' | 'muted'
+
+/** 时间线事件：seq 序号 + 文案 + 色调；at 仅「告警接收」（流程开始）与终态（流程关闭）有精确时间。 */
+export interface TimelineEvent {
+  seq: number
+  text: string
+  tone: TimelineTone
+  at: string | null
+}
+
+/** 单流程事件分组（运行中优先；events 已按阶段顺序排列）。 */
+export interface TimelineGroup {
+  wf_id: string
+  stage: string | null
+  exec_status: string
+  current: boolean
+  start_time: string | null
+  close_time: string | null
+  duration_seconds: number | null
+  events: TimelineEvent[]
+}
+
+/** 单系统活动时间线（P3⑨ /api/systems/{app_id}/timeline）。 */
+export interface SystemTimelineResp extends Timed {
+  app_id: string
+  service: string
+  groups: TimelineGroup[]
+}
+
 export interface FlowsResp extends Timed {
   items: FlowItem[]
 }

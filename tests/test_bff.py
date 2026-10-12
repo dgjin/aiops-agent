@@ -6,10 +6,14 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
 from bff import aggregator, app, audit, config_items, middleware, temporal_gateway
+from bff.deps import ApiError
+from bff.routes import flows as flows_routes
+from bff.routes import systems as systems_routes
 from bff.routes.monitored_apps import _find_rollback_source
 from bff.temporal_gateway import _item_from_result, _item_from_status, check_stage_allowed
 
@@ -605,6 +609,415 @@ class MonitoredAppProbeTest(unittest.TestCase):
                             side_effect=ConnectionRefusedError("nope")):
                 result = aggregator.probe_monitored_app(timeout=0.2)
         self.assertEqual(result["target"], aggregator.DEFAULT_MONITOR_URL)
+
+
+# ----------------------------------------------------------------------
+# P3（UI 重构 Phase 2）：系统聚合端点 / 未纳管检测 / 时间线聚合
+# ----------------------------------------------------------------------
+
+_NOW = datetime.now(timezone.utc)
+
+
+def _iso_at(minutes: float) -> str:
+    return (_NOW + timedelta(minutes=minutes)).isoformat()
+
+
+# 运行中（待审批）：无 gate_events，事件由状态快照推导，尾部为「当前进展」
+_RUNNING_ITEM: dict = {
+    "wf_id": "aiops-fix-order-a-101",
+    "run_id": "run-101",
+    "exec_status": "RUNNING",
+    "start_time": _iso_at(-10),
+    "close_time": None,
+    "stage": "WAIT_APPROVAL",
+    "alert": {
+        "alert_id": "alert-101",
+        "service": "order",
+        "description": "订单错误率激增",
+        "severity": "critical",
+    },
+    "needs_second": False,
+    "patch_id": "patch-101",
+    "approval": None,
+    "second_approval": None,
+    "deploy_command": None,
+    "queued_patches": [],
+    "duration_seconds": None,
+    "root_cause": {
+        "error_type": "timeout",
+        "suspect_files": ["order_service.py"],
+        "confidence": 0.9,
+        "summary": "下游优惠券服务超时导致订单积压",
+    },
+    "patch": {
+        "patch_id": "patch-101",
+        "files": ["order_service.py"],
+        "diff": "--- a/order_service.py\n+++ b/order_service.py\n",
+        "description": "增加超时重试",
+        "risk": "low",
+        "model_version": "qwen3:8b",
+        "confidence": 0.9,
+    },
+    "test_report": {
+        "patch_id": "patch-101",
+        "passed": True,
+        "unit_tests": "OK",
+        "regression_tests": "OK",
+        "sast": "OK",
+        "details": "",
+    },
+    "gate_events": [],
+    "stage_error": None,
+}
+
+# 终态（已完成）：gate_events 链（5 条）为权威事件源，翻译后尾部补终态事件
+_TERMINAL_ITEM: dict = {
+    "wf_id": "aiops-fix-order-a-102",
+    "run_id": "run-102",
+    "exec_status": "COMPLETED",
+    "start_time": _iso_at(-30),
+    "close_time": _iso_at(-5),
+    "stage": "DONE",
+    "alert": {
+        "alert_id": "alert-102",
+        "service": "order",
+        "description": "",
+        "severity": "critical",
+    },
+    "needs_second": False,
+    "patch_id": "patch-102",
+    "approval": "approve",
+    "second_approval": None,
+    "deploy_command": "deploy_now",
+    "queued_patches": [],
+    "duration_seconds": 1500.0,
+    "confidence": 0.92,
+    "model_version": "qwen3:8b",
+    "gate_events": [
+        "tests:passed:attempt=0",
+        "mr:created:mr-102",
+        "gate2:approved",
+        "gate3:announced:v1.2.0",
+        "gate3:command:deploy_now",
+    ],
+    "stage_error": None,
+}
+
+# 硬失败：读不到 result（无 gate_events / close_time），stage_error 透出读取异常
+_HARD_FAILED_ITEM: dict = {
+    "wf_id": "aiops-fix-ghost-a-103",
+    "run_id": "run-103",
+    "exec_status": "FAILED",
+    "start_time": _iso_at(-60),
+    "close_time": None,
+    "stage": "FAILED",
+    "alert": {
+        "alert_id": "alert-103",
+        "service": "ghost-svc",
+        "description": "探活连续失败",
+        "severity": "critical",
+    },
+    "needs_second": False,
+    "patch_id": None,
+    "approval": None,
+    "second_approval": None,
+    "deploy_command": None,
+    "queued_patches": [],
+    "duration_seconds": None,
+    "gate_events": [],
+    "stage_error": "无法读取工作流结果：RPC timeout",
+}
+
+
+class GateEventTranslateTest(unittest.TestCase):
+    """P3⑨：gate_events 机器串 → 时间线中文文案（未知格式降级原文，不丢信息）。"""
+
+    def test_exact_formats(self):
+        cases = {
+            "gate2:approved": ("闸门2（人工审批）：已批准", "ok"),
+            "gate2:reject": ("闸门2（人工审批）：已拒绝", "danger"),
+            "gate2:timeout->reject": ("闸门2（人工审批）：超时自动拒绝", "danger"),
+            "gate2b:approved:protected-dir": ("闸门2b（二级审批 · 受保护目录）：已批准", "ok"),
+            "gate2b:reject": ("闸门2b（二级审批 · 受保护目录）：已拒绝", "danger"),
+            "gate2b:timeout->reject": ("闸门2b（二级审批 · 受保护目录）：超时自动拒绝", "danger"),
+            "gate3:cancelled": ("发布窗口已取消（用户指令）", "idle"),
+            "shadow:suggestion-only": ("影子模式：仅出建议，不执行变更", "idle"),
+            "canary:degraded->rollback": ("金丝雀劣化 → 已自动回滚，转人工", "danger"),
+            "canary:healthy->full-rollout": ("金丝雀健康 → 全量发布完成", "ok"),
+        }
+        for event, expected in cases.items():
+            got = systems_routes._translate_gate_event(event)
+            self.assertEqual((got["text"], got["tone"]), expected, event)
+
+    def test_gate1_blocked_keeps_detail(self):
+        got = systems_routes._translate_gate_event("gate1:blocked:confidence=0.42<0.8")
+        self.assertEqual(got["tone"], "danger")
+        self.assertIn("闸门1", got["text"])
+        self.assertIn("confidence=0.42<0.8", got["text"])
+        bare = systems_routes._translate_gate_event("gate1:blocked")
+        self.assertIn("低于阈值", bare["text"])
+
+    def test_tests_rounds_are_one_based(self):
+        """workflows.py 的 attempt 为 0 基（初次=0），时间线展示统一 1 基，不出现「第 0 轮」。"""
+        self.assertEqual(
+            systems_routes._translate_gate_event("tests:passed:attempt=0")["text"],
+            "沙箱测试通过（第 1 轮）",
+        )
+        passed = systems_routes._translate_gate_event("tests:passed:attempt=2")
+        self.assertEqual(passed["tone"], "ok")
+        self.assertIn("第 3 轮", passed["text"])
+        failed = systems_routes._translate_gate_event("tests:failed:attempt=1:unit test error: boom")
+        self.assertEqual(failed["tone"], "danger")
+        self.assertIn("第 2 轮", failed["text"])
+        self.assertIn("boom", failed["text"])
+        no_attempt = systems_routes._translate_gate_event("tests:passed")
+        self.assertEqual(no_attempt["text"], "沙箱测试通过")  # 无轮次信息不臆造
+
+    def test_requirement_approved_event(self):
+        got = systems_routes._translate_gate_event(
+            "requirement:approved:ra-app-d42214-26:v1:by=admin"
+        )
+        self.assertEqual(got["tone"], "ok")
+        self.assertIn("v1", got["text"])
+        self.assertIn("审批人 admin", got["text"])
+        self.assertIn("ra-app-d42214-26", got["text"])
+        bare = systems_routes._translate_gate_event("requirement:approved:ra-1")
+        self.assertEqual(bare["text"], "需求批准启动修复：ra-1")
+
+    def test_mr_and_gate3_dynamic_segments(self):
+        self.assertEqual(
+            systems_routes._translate_gate_event("mr:created:mr-102")["text"], "变更单已创建：mr-102"
+        )
+        announced = systems_routes._translate_gate_event("gate3:announced:v1.2.0")
+        self.assertIn("已公告 v1.2.0", announced["text"])
+        self.assertEqual(announced["tone"], "warn")
+        self.assertEqual(
+            systems_routes._translate_gate_event("gate3:command:deploy_now")["text"],
+            "发布指令：立即发布",
+        )
+        self.assertEqual(systems_routes._translate_gate_event("gate3:command:cancel")["tone"], "warn")
+        self.assertEqual(
+            systems_routes._translate_gate_event("gate3:patch-queued:alert-9")["text"],
+            "窗口内新补丁入队：alert-9",
+        )
+
+    def test_unknown_format_falls_back_to_raw(self):
+        got = systems_routes._translate_gate_event("future:unknown-thing")
+        self.assertEqual(got["text"], "future:unknown-thing")
+        self.assertEqual(got["tone"], "muted")
+
+
+class UnmanagedServicesTest(unittest.TestCase):
+    """P3⑧：清单外服务检测（按 service join；停用/空值语义）。"""
+
+    def test_detects_unlisted_running_first(self):
+        apps = [
+            {"service": "order", "enabled": True},
+            {"service": "legacy-off", "enabled": False},  # 停用仍在清单 → 视为已纳管
+        ]
+        items = [
+            {"alert": {"service": "order"}, "exec_status": "RUNNING", "start_time": "2026-10-12T10:00:00+00:00", "wf_id": "wf-o1"},
+            {"alert": {"service": "legacy-off"}, "exec_status": "RUNNING", "start_time": "2026-10-12T10:00:00+00:00", "wf_id": "wf-o2"},
+            {"alert": {"service": ""}, "exec_status": "RUNNING", "start_time": "2026-10-12T10:00:00+00:00", "wf_id": "wf-o3"},
+            {"alert": None, "exec_status": "RUNNING", "start_time": "2026-10-12T10:00:00+00:00", "wf_id": "wf-o4"},
+            {"alert": {"service": "ghost-svc"}, "exec_status": "RUNNING", "start_time": "2026-10-12T10:00:00+00:00", "wf_id": "wf-g1"},
+            {"alert": {"service": "ghost-svc"}, "exec_status": "COMPLETED", "start_time": "2026-10-12T09:00:00+00:00", "wf_id": "wf-g0"},
+            {"alert": {"service": "ghost-2"}, "exec_status": "COMPLETED", "start_time": "2026-10-12T11:00:00+00:00", "wf_id": "wf-g2"},
+        ]
+        out = systems_routes._unmanaged_services(items, apps)
+        self.assertEqual([e["service"] for e in out], ["ghost-svc", "ghost-2"])  # 运行中优先
+        ghost = out[0]
+        self.assertEqual(ghost["flows"], 2)
+        self.assertEqual(ghost["running"], 1)
+        self.assertEqual(ghost["last_start"], "2026-10-12T10:00:00+00:00")
+        self.assertEqual(ghost["last_wf_id"], "wf-g1")
+        self.assertEqual(out[1]["running"], 0)
+
+    def test_empty_inputs(self):
+        self.assertEqual(systems_routes._unmanaged_services([], []), [])
+
+
+class TimelineAggregationTest(unittest.TestCase):
+    """P3⑨：单流程事件流与多流程分组（运行中优先 / 时间倒序 / 上限截断）。"""
+
+    def test_running_item_derives_events_from_snapshot(self):
+        events = systems_routes._timeline_events(_RUNNING_ITEM)
+        self.assertEqual([e["seq"] for e in events], [1, 2, 3, 4, 5])
+        self.assertIn("告警接收：alert-101", events[0]["text"])
+        self.assertEqual(events[0]["at"], _RUNNING_ITEM["start_time"])
+        self.assertIn("根因分析（置信度 0.90）", events[1]["text"])
+        self.assertEqual(events[2]["text"], "补丁已生成：1 个文件")
+        self.assertEqual(events[3]["text"], "沙箱测试通过")
+        self.assertIn("等待人工审批", events[4]["text"])  # 尾部当前进展
+        self.assertEqual(events[4]["tone"], "warn")
+        self.assertNotIn("流程终态", events[-1]["text"])  # 运行中无终态
+
+    def test_terminal_item_translates_gate_events(self):
+        events = systems_routes._timeline_events(_TERMINAL_ITEM)
+        self.assertEqual(len(events), 7)  # 告警 + 5 条翻译 + 终态
+        self.assertEqual([e["seq"] for e in events], list(range(1, 8)))
+        texts = [e["text"] for e in events]
+        self.assertIn("沙箱测试通过（第 1 轮）", texts)
+        self.assertIn("变更单已创建：mr-102", texts)
+        self.assertIn("闸门2（人工审批）：已批准", texts)
+        self.assertIn("发布指令：立即发布", texts)
+        self.assertEqual(texts[-1], "流程终态：已完成（金丝雀健康 → 全量发布成功）")
+        self.assertEqual(events[-1]["tone"], "ok")
+        self.assertEqual(events[-1]["at"], _TERMINAL_ITEM["close_time"])
+
+    def test_hard_failure_uses_stage_error_and_terminal(self):
+        events = systems_routes._timeline_events(_HARD_FAILED_ITEM)
+        self.assertEqual(len(events), 3)
+        self.assertIn("告警接收：alert-103", events[0]["text"])
+        self.assertEqual(events[1]["text"], "数据读取异常：无法读取工作流结果：RPC timeout")
+        self.assertEqual(events[1]["tone"], "danger")
+        self.assertEqual(events[2]["text"], "流程终态：硬失败（执行异常或超时，无终态审计）")
+        self.assertEqual(events[2]["tone"], "danger")
+        self.assertIsNone(events[2]["at"])  # close_time 缺失：不臆造时间
+
+    def test_escalated_with_gate1_blocked(self):
+        item = {
+            "exec_status": "COMPLETED",
+            "stage": "ESCALATED",
+            "start_time": "2026-10-12T08:00:00+00:00",
+            "close_time": "2026-10-12T08:01:00+00:00",
+            "alert": {"alert_id": "alert-9", "service": "order", "description": ""},
+            "gate_events": ["gate1:blocked:confidence=0.42<0.8"],
+            "stage_error": None,
+        }
+        events = systems_routes._timeline_events(item)
+        self.assertEqual(len(events), 3)
+        self.assertIn("confidence=0.42<0.8", events[1]["text"])
+        self.assertEqual(events[2]["text"], "流程终态：已转人工（等待运维处置后可重试修复）")
+
+    def test_wait_approval_with_decision_uses_derived_approval(self):
+        item = {
+            "exec_status": "RUNNING",
+            "stage": "WAIT_APPROVAL",
+            "alert": None,
+            "approval": "approve",
+            "needs_second": True,
+            "second_approval": "reject",
+            "gate_events": [],
+        }
+        events = systems_routes._timeline_events(item)
+        texts = [e["text"] for e in events]
+        self.assertIn("一级审批：已批准", texts)
+        self.assertIn("二级审批（受保护目录）：已拒绝", texts)
+        # 已有审批结论 → 不再输出「当前：等待人工审批」尾事件
+        self.assertNotIn("当前：等待人工审批（倒计时结束将自动拒绝并转人工）", texts)
+
+    def test_notifying_meta_event(self):
+        item = {"exec_status": "RUNNING", "stage": "NOTIFYING", "alert": None, "gate_events": []}
+        events = systems_routes._timeline_events(item)
+        self.assertEqual(len(events), 1)
+        self.assertIn("公告倒计时", events[0]["text"])
+
+    def test_degraded_patch_marked_warn(self):
+        item = {
+            "exec_status": "RUNNING",
+            "stage": "FIXING",
+            "alert": None,
+            "patch": {"degraded": True, "files": ["a.py", "b.py"]},
+            "gate_events": [],
+        }
+        events = systems_routes._timeline_events(item)
+        self.assertEqual(events[0]["text"], "补丁（降级兜底产物）已生成：2 个文件")
+        self.assertEqual(events[0]["tone"], "warn")
+
+    def test_groups_running_first_then_closed_by_time(self):
+        def mk(wf_id: str, status: str, start: str, close: str | None = None) -> dict:
+            return {
+                "wf_id": wf_id,
+                "exec_status": status,
+                "start_time": start,
+                "close_time": close,
+                "stage": "FIXING" if status == "RUNNING" else "DONE",
+                "alert": None,
+                "gate_events": ["gate2:approved"],
+            }
+
+        items = [
+            mk("r1", "RUNNING", "2026-10-12T10:00:00+00:00"),
+            mk("r2", "RUNNING", "2026-10-12T12:00:00+00:00"),
+            mk("r3", "RUNNING", "2026-10-12T11:00:00+00:00"),
+            mk("c1", "COMPLETED", "2026-10-12T07:00:00+00:00", "2026-10-12T13:00:00+00:00"),
+            mk("c2", "COMPLETED", "2026-10-12T06:00:00+00:00", "2026-10-12T14:00:00+00:00"),
+        ]
+        groups = systems_routes.build_timeline_groups(items, max_flows=4)
+        self.assertEqual([g["wf_id"] for g in groups], ["r2", "r3", "r1", "c2"])
+        self.assertEqual([g["current"] for g in groups], [True, True, True, False])
+
+    def test_groups_empty_input(self):
+        self.assertEqual(systems_routes.build_timeline_groups([]), [])
+
+
+class SystemsEndpointsTest(unittest.IsolatedAsyncioTestCase):
+    """P3⑦⑧：聚合端点装配（Temporal/探测/escalations 打桩，不依赖运行中服务与写盘）。"""
+
+    async def test_systems_overview_merges_payload_apps_and_unmanaged(self):
+        apps = [{"id": "app-1", "name": "订单服务", "service": "order", "enabled": True}]
+        items = [dict(_RUNNING_ITEM), dict(_TERMINAL_ITEM), dict(_HARD_FAILED_ITEM)]
+        with mock.patch.object(systems_routes.gw, "list_flows", mock.AsyncMock(return_value=items)), \
+             mock.patch.object(systems_routes, "apps_with_probe", mock.AsyncMock(return_value=apps)), \
+             mock.patch.object(flows_routes, "_open_escalations", return_value=2):
+            payload = await systems_routes.api_systems_overview()
+        self.assertIn("server_time", payload)
+        self.assertEqual(payload["counts"]["running"], 1)
+        self.assertEqual(payload["counts"]["wait_approval"], 1)
+        self.assertEqual(payload["counts"]["escalations_open"], 2)  # 打桩口径透传
+        self.assertEqual(payload["terminal_dist_7d"]["DONE"], 1)
+        self.assertEqual(payload["apps"], apps)
+        self.assertEqual(
+            payload["unmanaged"],
+            [
+                {
+                    "service": "ghost-svc",
+                    "flows": 1,
+                    "running": 0,
+                    "last_start": _HARD_FAILED_ITEM["start_time"],
+                    "last_wf_id": _HARD_FAILED_ITEM["wf_id"],
+                }
+            ],
+        )
+
+    async def test_systems_timeline_filters_by_service_and_orders_groups(self):
+        app = {"id": "app-1", "name": "订单服务", "service": "order", "enabled": True}
+        other = {
+            "wf_id": "aiops-fix-coupon-a-200",
+            "exec_status": "COMPLETED",
+            "stage": "DONE",
+            "start_time": "2026-10-12T07:00:00+00:00",
+            "close_time": "2026-10-12T07:10:00+00:00",
+            "alert": {"alert_id": "alert-200", "service": "coupon", "description": ""},
+            "gate_events": [],
+            "stage_error": None,
+        }
+        items = [dict(_RUNNING_ITEM), dict(other), dict(_TERMINAL_ITEM)]
+        with mock.patch.object(systems_routes.store, "get", return_value=app), \
+             mock.patch.object(systems_routes.gw, "list_flows", mock.AsyncMock(return_value=items)):
+            payload = await systems_routes.api_system_timeline("app-1", flows=5)
+        self.assertEqual(payload["app_id"], "app-1")
+        self.assertEqual(payload["service"], "order")
+        groups = payload["groups"]
+        self.assertEqual([g["wf_id"] for g in groups], [_RUNNING_ITEM["wf_id"], _TERMINAL_ITEM["wf_id"]])
+        self.assertTrue(groups[0]["current"])
+        self.assertFalse(groups[1]["current"])
+
+    async def test_systems_timeline_respects_flows_cap(self):
+        app = {"id": "app-1", "service": "order"}
+        items = [dict(_RUNNING_ITEM), dict(_TERMINAL_ITEM)]
+        with mock.patch.object(systems_routes.store, "get", return_value=app), \
+             mock.patch.object(systems_routes.gw, "list_flows", mock.AsyncMock(return_value=items)):
+            payload = await systems_routes.api_system_timeline("app-1", flows=1)
+        self.assertEqual(len(payload["groups"]), 1)
+
+    async def test_systems_timeline_404_for_unknown_app(self):
+        with mock.patch.object(systems_routes.store, "get", return_value=None):
+            with self.assertRaises(ApiError) as ctx:
+                await systems_routes.api_system_timeline("missing-app", flows=5)
+        self.assertEqual(ctx.exception.status_code, 404)
+        self.assertIn("missing-app", ctx.exception.message)
 
 
 if __name__ == "__main__":

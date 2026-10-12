@@ -1,9 +1,10 @@
 /** 系统工作台（/systems/:appId）：以单个被监控系统为视角的一屏聚合。
  *
- * 三级钻取的第二级：健康 / 进行中流程 / 最近活动 / 流程历史 / 数据链路 /
+ * 三级钻取的第二级：健康 / 进行中流程 / 活动时间线 / 流程历史 / 数据链路 /
  * 配置摘要 / 需求基线——全部围绕「该系统」组织，数据来自现有 API：
  * - monitored-apps 单条（probe / watcher / readiness）
  * - flows?service=X（后端已支持按系统过滤）
+ * - systems/{appId}/timeline（P3⑨ 服务端聚合：gate_events 翻译 + 快照推导）
  * - requirements/analyses?app_id=X（后端已支持按系统过滤）
  */
 
@@ -23,7 +24,7 @@ import { CountdownText } from '../components/CountdownText'
 import { EmptyState } from '../components/EmptyState'
 import { RELEASE_STATUS_META } from '../components/RequirementAnalysisModal'
 import { StageBadge } from '../components/StageBadge'
-import type { FlowItem, MonitoredApp, RequirementAnalysisSummary } from '../lib/types'
+import type { FlowItem, MonitoredApp, RequirementAnalysisSummary, TimelineTone } from '../lib/types'
 
 /** 发布结果 → 工作台纯文本颜色（徽标配色见 RELEASE_STATUS_META，此处只取文字色）。 */
 const RELEASE_TEXT_CLS: Record<string, string> = {
@@ -33,6 +34,24 @@ const RELEASE_TEXT_CLS: Record<string, string> = {
   cancelled: 'text-muted',
   failed: 'text-danger',
   unknown: 'text-ok',
+}
+
+/** 时间线事件色调 → 色点 / 文本类名（muted 降级为 idle 灰，保持可读）。 */
+const TONE_DOT: Record<TimelineTone, string> = {
+  info: 'bg-info',
+  ok: 'bg-ok',
+  warn: 'bg-warn',
+  danger: 'bg-danger',
+  idle: 'bg-idle',
+  muted: 'bg-idle',
+}
+const TONE_TEXT: Record<TimelineTone, string> = {
+  info: 'text-muted',
+  ok: 'text-ok',
+  warn: 'text-warn',
+  danger: 'text-danger',
+  idle: 'text-idle',
+  muted: 'text-idle',
 }
 
 /** 侧区卡片壳（统一标题 + 内容节奏）。 */
@@ -129,6 +148,14 @@ export function SystemWorkbench() {
     refetchInterval: 20000,
   })
 
+  // P3⑨：活动时间线（服务端聚合——gate_events 翻译 + 运行态快照推导，替代逐流程拉详情）
+  const timeline = useQuery({
+    queryKey: ['system-timeline', appId],
+    queryFn: () => api.systemTimeline(appId, { flows: 5 }),
+    enabled: Boolean(appId),
+    refetchInterval: 20000,
+  })
+
   if (apps.isError) {
     return <EmptyState title="无法加载被监控系统清单" hint={describeError(apps.error)} />
   }
@@ -144,10 +171,7 @@ export function SystemWorkbench() {
 
   const items: FlowItem[] = flows.data?.items ?? []
   const running = items.filter((item) => item.exec_status === 'RUNNING')
-  const recent = items
-    .filter((item) => item.exec_status !== 'RUNNING')
-    .sort((a, b) => Date.parse(b.close_time ?? b.start_time ?? '') - Date.parse(a.close_time ?? a.start_time ?? ''))
-    .slice(0, 6)
+  const timelineGroups = timeline.data?.groups ?? []
 
   return (
     <div>
@@ -241,30 +265,60 @@ export function SystemWorkbench() {
             )}
           </section>
 
-          {/* 最近活动（终态流程） */}
+          {/* 活动时间线（P3⑨：服务端聚合——gate_events 中文翻译 + 运行态快照推导） */}
           <section className="rounded-xl border border-line bg-panel p-4">
-            <h2 className="mb-3 text-sm font-medium">最近活动</h2>
-            {recent.length > 0 ? (
-              <div className="space-y-2">
-                {recent.map((item) => (
-                  <Link
-                    key={item.wf_id}
-                    to={`/flows/${encodeURIComponent(item.wf_id)}`}
-                    className="flex items-center gap-3 text-xs transition-colors hover:text-accent"
-                  >
-                    <span className="w-24 shrink-0 font-mono text-[11px] text-idle">
-                      {fmtDateTime(item.close_time ?? item.start_time)}
-                    </span>
-                    <StageBadge stage={item.stage} />
-                    <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted" title={item.wf_id}>
-                      {item.wf_id}
-                    </span>
-                    <span className="shrink-0 font-mono text-[11px] text-idle">{fmtDuration(item.duration_seconds)}</span>
-                  </Link>
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-sm font-medium">活动时间线</h2>
+              <span className="text-[11px] text-idle">按流程分组 · 运行中优先 · 最近 5 个</span>
+            </div>
+            {timeline.isError ? (
+              <div className="text-xs text-danger">{describeError(timeline.error)}</div>
+            ) : timelineGroups.length > 0 ? (
+              <div className="space-y-3">
+                {timelineGroups.map((group) => (
+                  <div key={group.wf_id} className="overflow-hidden rounded-lg border border-line">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line/60 bg-elevated/40 px-3 py-2">
+                      <span className="flex min-w-0 items-center gap-2">
+                        <StageBadge stage={group.stage} />
+                        <Link
+                          to={`/flows/${encodeURIComponent(group.wf_id)}`}
+                          className="truncate font-mono text-[11px] text-muted transition-colors hover:text-accent"
+                          title={group.wf_id}
+                        >
+                          {group.wf_id}
+                        </Link>
+                        {group.current && (
+                          <span className="shrink-0 rounded-full border border-info/40 bg-info/10 px-1.5 py-0.5 text-[10px] text-info">
+                            进行中
+                          </span>
+                        )}
+                      </span>
+                      <span className="shrink-0 font-mono text-[10px] text-idle">
+                        {fmtDateTime(group.start_time)}
+                        {group.close_time ? ` → ${fmtDateTime(group.close_time)}` : ''}
+                        {group.duration_seconds != null ? ` · ${fmtDuration(group.duration_seconds)}` : ''}
+                      </span>
+                    </div>
+                    <ol className="px-3.5 py-2">
+                      {group.events.map((event) => (
+                        <li key={event.seq} className="flex items-start gap-2.5 py-[3px] text-xs">
+                          <span
+                            className={cn('mt-[5px] h-1.5 w-1.5 shrink-0 rounded-full', TONE_DOT[event.tone])}
+                          />
+                          <span className={cn('min-w-0 flex-1', TONE_TEXT[event.tone])}>{event.text}</span>
+                          {event.at && (
+                            <span className="shrink-0 font-mono text-[10px] text-idle">{fmtTime(event.at)}</span>
+                          )}
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
                 ))}
               </div>
             ) : (
-              <div className="text-xs text-idle">暂无历史流程（新告警或需求触发后出现在这里）</div>
+              <div className="text-xs text-idle">
+                暂无活动记录（新告警或需求触发后，修复全链路的闸门事件将在这里展开）
+              </div>
             )}
           </section>
 
