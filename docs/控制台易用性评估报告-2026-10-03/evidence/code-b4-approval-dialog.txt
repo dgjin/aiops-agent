@@ -1,0 +1,28 @@
+# 证据 B4：审批确认框的 detail 只含 工作流/服务/告警/决策（无 diff / 测试报告 / 置信度）
+# 文件：web/src/pages/Approvals.tsx
+
+  18| function openDecision(item: FlowItem, second: boolean, decision: 'approve' | 'reject', write: WriteHandle) {
+  19|   const approve = decision === 'approve'
+  20|   write.open({
+  21|     title: second ? `确认二级${approve ? '批准' : '驳回'}？` : `确认${approve ? '批准' : '驳回'}？`,
+  22|     tone: approve ? 'default' : 'danger',
+  23|     confirmLabel: second ? `二级${approve ? '批准' : '驳回'}` : approve ? '批准' : '驳回',
+  24|     detail: (
+  25|       <div className="space-y-1.5">
+  26|         <div>
+  27|           工作流：<span className="font-mono text-xs">{item.wf_id}</span>
+  28|         </div>
+  29|         <div>服务：{item.alert?.service ?? '—'}</div>
+  30|         <div>
+  31|           告警：<span className="font-mono text-xs">{item.alert?.alert_id ?? '—'}</span>
+  32|         </div>
+  33|         <div className="text-ink">
+  34|           决策：{approve ? '批准（进入公告窗口）' : '驳回（转人工处理）'}
+  35|         </div>
+  36|       </div>
+  37|     ),
+  38|     run: () =>
+  39|       second ? api.secondApproval(item.wf_id, decision) : api.approval(item.wf_id, decision),
+  40|     success: `${second ? '二级' : '一级'}审批已提交：${approve ? '批准' : '驳回'}`,
+  41|   })
+  42| }

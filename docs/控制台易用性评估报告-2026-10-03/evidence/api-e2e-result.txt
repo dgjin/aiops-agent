@@ -1,0 +1,44 @@
+$ curl -sS http://127.0.0.1:8600/api/flows/aiops-fix-order-qoder-full-2/result | jq '.result'
+{
+  "deploy_result": {
+    "reason": "金丝雀达标，已全量发布（aiops-stable-order 运行于 :18080，镜像 aiops-demo-app:p-qoder-full-2-r0）",
+    "rolled_back": false,
+    "version": "v1.0.678"
+  },
+  "workflow_id": "aiops-fix-order-qoder-full-2",
+  "model_version": "qoder-cli:1.1.65",
+  "approvals": [
+    {
+      "decision": "approve",
+      "gate": "approval"
+    }
+  ],
+  "test_report": {
+    "details": "隔离执行[docker-container] Ran 6 tests in 0.28s（镜像 python:3.12-slim，attempt=0）",
+    "passed": true,
+    "patch_id": "p-qoder-full-2-r0",
+    "regression_tests": "demo-app/tests 全量 6 用例：通过",
+    "sast": "无高危模式，无硬编码敏感信息（新增 1 行已扫描）",
+    "unit_tests": "6/6 passed"
+  },
+  "patch_id": "p-qoder-full-2-r0",
+  "duration_seconds": 275.535253,
+  "stage": "DONE",
+  "root_cause": {
+    "confidence": 0.95,
+    "error_type": "NullPointerException",
+    "summary": "订单服务中优惠券为空导致 NullPointerException，引发下单链路异常。",
+    "suspect_files": [
+      "order-service/src/main/java/com/example/service/OrderService.java"
+    ]
+  },
+  "gate_events": [
+    "tests:passed:attempt=0",
+    "mr:created:!2478",
+    "gate2:approved",
+    "gate3:announced:v1.0.678",
+    "gate3:command:deploy_now",
+    "canary:healthy->full-rollout"
+  ],
+  "confidence": 0.95
+}

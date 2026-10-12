@@ -1,0 +1,27 @@
+# 访问令牌自动轮换 —— 实现与验证 2026-10-03
+
+## 设计要点
+  令牌运行时注册表 = data/console_tokens.json（权限 600、原子写、含明文令牌，勿提交）
+  AIOPS_CONSOLE_AUTH_TOKENS 仅作**首次播种**（文件存在时不再覆盖）
+  自动轮换：为每个身份生成新令牌；旧令牌转 previous 并在**宽限期**内继续有效 → 不会把在用运维锁在门外
+  默认：间隔 30 天 / 宽限 7 天；间隔设 0 关闭；令牌值默认不经接口回显
+
+## 单元测试
+  .venv/bin/python -m unittest discover -s tests  →  304 passed（本轮新增 12 个 auth 用例）
+
+## 真机验证
+1) GET /api/auth/status（viewer）：自动轮换=True 间隔=2592000s 宽限=604800s 下次=2026-11-02…
+   self_token={user:viewer01, role:viewer, state:active, expires_at:2026-11-09…}；不含令牌清单
+2) GET /api/auth/tokens：viewer→403；admin→3 条，id 为 sha256 前 8 位指纹（如 aeb6c0f7），无令牌明文/片段
+3) POST /api/auth/rotate（admin）：rotated_at/reason/identities(li,viewer01,zhang)/grace=604800s/reveal_enabled=false
+   → 轮换后【旧 tok-adm 仍返回 200】（宽限期内）；self_token.state=previous；清单 active:3 previous:3
+4) 自动轮换演示（临时实例 8602：间隔 3s / 检查 1s / 独立注册表）：
+   日志：[auth] 令牌已自动轮换：3 个身份，宽限 60s（旧令牌宽限期内仍可用）×2
+   清单 active:3 previous:6；旧令牌 tok-adm 仍 200
+5) 前端（DOM）：令牌控件显示「自动轮换 每 30 天 / 下次 11/02 13:38:28 / 立即轮换」；
+   轮换后出现横幅「当前访问令牌已轮换 —— 将在宽限期（7 天）结束后失效，请在左下角更新」
+6) 审计留痕：auth:rotate | actor=li | target=li/admin,viewer01/viewer,zhang/operator | grace_seconds=604800
+
+## 过程中修掉的两个真实缺陷
+  a) 播种时 rotated_at 为空 → due 恒为 False → 自动轮换**永远不会启动**（改为播种即视为首次发放）
+  b) 令牌清单 id 原用「令牌前 6 位」→ 对短令牌近乎泄露（改为 sha256 前 8 位指纹，不可反推）

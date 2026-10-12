@@ -1,0 +1,2 @@
+$ curl -sS 'http://127.0.0.1:8600/api/flows' | jq '.items[] | select(.stage==null or .alert==null)'
+{"wf_id": "aiops-fix-order-qoder-full-1", "exec_status": "FAILED", "stage": null, "alert": null, "stage_error": "result 读取失败: Workflow execution failed"}

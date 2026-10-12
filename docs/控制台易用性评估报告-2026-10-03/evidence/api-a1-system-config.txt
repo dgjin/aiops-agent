@@ -1,0 +1,24 @@
+$ curl -sS http://127.0.0.1:8600/api/system | jq '{policy_source:.policy.source, policy_summary:.policy.summary, locks:[.policy.locks[].key]}'
+{
+  "policy_source": "demo-policy.yaml",
+  "policy_summary": "confidence_threshold=0.8, max_fix_retries=2, approval_timeout=0:05:00, countdown=0:00:30, canary=5%/observe=0:00:10, auto_rollback=True",
+  "lock_keys": [
+    "approval.on_timeout",
+    "new_patch_during_window.strategy",
+    "new_patch_during_window.reset_timer",
+    "new_patch_during_window.merge_with_current",
+    "new_patch_during_window.queue_limit",
+    "feedback_circuit_breaker.enabled",
+    "concurrency.max_active_deployments",
+    "notify_window.deploy_on_expiry"
+  ],
+  "monitored_apps": [
+    {
+      "id": "app-d42214",
+      "name": "智能问数据分析系统",
+      "service": "nl2sql",
+      "log_path": "/Users/dgjin/dgjinapp/智能问数据分析系统/logs/app_server*.log",
+      "enabled": true
+    }
+  ]
+}

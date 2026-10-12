@@ -1,0 +1,10 @@
+# 证据 B1 根因：配置类写操作把「应用 id」写进了审计的 wf_id 字段
+# 文件：bff/app.py
+
+ 446|         action="monitored-app:create",
+ 447|         wf_id=app["id"],
+ 461|         action="monitored-app:update",
+ 462|         wf_id=app_id,
+ 477|         action="monitored-app:toggle",
+ 478|         wf_id=app_id,
+ 488|     audit.write_audit(actor="web-console", action="monitored-app:delete", wf_id=app_id)

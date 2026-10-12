@@ -1,0 +1,376 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "AIOps 自动运维智能体 · 功能流程图",
+    "locale": "zh-CN",
+    "output": "aiops-workflow.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "happy-path",
+        "label": "告警修复主链",
+        "focus": [
+          "alert",
+          "triage",
+          "fix",
+          "test",
+          "approve",
+          "release"
+        ],
+        "note": "从告警接入到发布收口（DONE）的自动修复主线，三道闸门全程把关"
+      },
+      {
+        "id": "requirement-path",
+        "label": "需求驱动链",
+        "focus": [
+          "req",
+          "ranalyze",
+          "rapprove",
+          "fix",
+          "test",
+          "approve",
+          "release"
+        ],
+        "note": "需求反馈经分析与批准进入修复链：跳过日志诊断，批准版方案即根因"
+      },
+      {
+        "id": "three-gates",
+        "label": "三道闸门",
+        "focus": [
+          "triage",
+          "test",
+          "approve",
+          "release",
+          "escalate"
+        ],
+        "note": "置信度、审批、发布三道闸门在不确定路径上默认走向转人工"
+      },
+      {
+        "id": "manual-loop",
+        "label": "回炉与待办处置",
+        "focus": [
+          "fix",
+          "test",
+          "shadowed",
+          "escalate",
+          "todo"
+        ],
+        "note": "沙箱回炉重生成、shadow 档仅建议不执行；转人工待办指派 / 关闭 / 重试按来源分流"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "agent",
+      "label": "接入与修复链路"
+    },
+    {
+      "id": "flow",
+      "label": "需求与发布通道"
+    },
+    {
+      "id": "exception",
+      "label": "转人工与处置",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "ph-intake",
+      "label": "接入与诊断",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "ph-fix",
+      "label": "修复与验证",
+      "fromCol": 2,
+      "toCol": 3
+    },
+    {
+      "id": "ph-approve",
+      "label": "审批与公告",
+      "fromCol": 4,
+      "toCol": 4
+    },
+    {
+      "id": "ph-release",
+      "label": "灰度发布",
+      "fromCol": 5,
+      "toCol": 5
+    }
+  ],
+  "mainPath": [
+    "alert",
+    "triage",
+    "fix",
+    "test",
+    "approve",
+    "release"
+  ],
+  "semanticChecks": {
+    "allowedRoots": [
+      "alert",
+      "req"
+    ],
+    "allowedTerminals": [
+      "escalate",
+      "todo",
+      "shadowed"
+    ],
+    "requiredEdges": [
+      {
+        "from": "test",
+        "to": "fix"
+      },
+      {
+        "from": "release",
+        "to": "escalate"
+      }
+    ],
+    "requiredPaths": [
+      {
+        "from": "alert",
+        "to": "release"
+      },
+      {
+        "from": "req",
+        "to": "release"
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "id": "alert",
+      "lane": "agent",
+      "col": 0,
+      "type": "backend",
+      "label": "告警接入",
+      "sublabel": "DETECTED · 幂等启动"
+    },
+    {
+      "id": "triage",
+      "lane": "agent",
+      "col": 1,
+      "type": "backend",
+      "label": "取证与定位",
+      "sublabel": "Loki · Drain3 · 变更关联",
+      "tag": "TRIAGING",
+      "width": 108
+    },
+    {
+      "id": "fix",
+      "lane": "agent",
+      "col": 2,
+      "type": "backend",
+      "label": "补丁生成",
+      "sublabel": "Code RAG · Qoder",
+      "tag": "FIXING"
+    },
+    {
+      "id": "test",
+      "lane": "agent",
+      "col": 3,
+      "type": "security",
+      "label": "沙箱验证",
+      "sublabel": "Docker · 契约校验",
+      "tag": "TESTING"
+    },
+    {
+      "id": "shadowed",
+      "lane": "agent",
+      "col": 4,
+      "type": "security",
+      "label": "SHADOWED",
+      "sublabel": "shadow 档 · 仅建议",
+      "tag": "渐进信任"
+    },
+    {
+      "id": "req",
+      "lane": "flow",
+      "col": 0,
+      "type": "backend",
+      "label": "需求反馈导入",
+      "sublabel": "标准导出接口 · 基线",
+      "tag": "新入口"
+    },
+    {
+      "id": "ranalyze",
+      "lane": "flow",
+      "col": 1,
+      "type": "backend",
+      "label": "需求智能分析",
+      "sublabel": "方案 · 验收 · 疑点",
+      "tag": "ANALYZING"
+    },
+    {
+      "id": "rapprove",
+      "lane": "flow",
+      "col": 2,
+      "type": "security",
+      "label": "管理员批准",
+      "sublabel": "版本冻结 · actor 留痕",
+      "tag": "人工确认"
+    },
+    {
+      "id": "approve",
+      "lane": "flow",
+      "col": 4,
+      "type": "backend",
+      "label": "审批与公告",
+      "sublabel": "15 分钟窗口 · FIFO",
+      "tag": "闸门 2"
+    },
+    {
+      "id": "release",
+      "lane": "flow",
+      "col": 5,
+      "type": "cloud",
+      "label": "灰度发布",
+      "sublabel": "金丝雀 / 直连发布",
+      "tag": "闸门 3",
+      "width": 84
+    },
+    {
+      "id": "escalate",
+      "lane": "exception",
+      "col": 4,
+      "type": "backend",
+      "label": "ESCALATED",
+      "sublabel": "转人工 · 全程留痕",
+      "width": 84
+    },
+    {
+      "id": "todo",
+      "lane": "exception",
+      "col": 5,
+      "type": "backend",
+      "label": "转人工待办",
+      "sublabel": "指派 · 关闭 · 重试修复",
+      "tag": "SLA 30 分钟"
+    }
+  ],
+  "edges": [
+    {
+      "from": "alert",
+      "to": "triage",
+      "label": "启动流程",
+      "role": "main"
+    },
+    {
+      "from": "triage",
+      "to": "fix",
+      "label": "闸门 1 通过",
+      "role": "main"
+    },
+    {
+      "from": "fix",
+      "to": "test",
+      "label": "提交沙箱",
+      "role": "main"
+    },
+    {
+      "from": "test",
+      "to": "approve",
+      "label": "测试通过",
+      "role": "main"
+    },
+    {
+      "from": "approve",
+      "to": "release",
+      "label": "放行",
+      "role": "main"
+    },
+    {
+      "from": "req",
+      "to": "ranalyze",
+      "label": "自动同步",
+      "role": "main"
+    },
+    {
+      "from": "ranalyze",
+      "to": "rapprove",
+      "label": "分析报告",
+      "role": "main"
+    },
+    {
+      "from": "rapprove",
+      "to": "fix",
+      "label": "批准进入修复链",
+      "role": "main"
+    },
+    {
+      "from": "test",
+      "to": "fix",
+      "label": "回炉重生成",
+      "role": "return"
+    },
+    {
+      "from": "test",
+      "to": "shadowed",
+      "label": "shadow 建议",
+      "role": "branch",
+      "variant": "dashed"
+    },
+    {
+      "from": "triage",
+      "to": "escalate",
+      "label": "闸门 1：置信度 < 0.8",
+      "role": "error"
+    },
+    {
+      "from": "test",
+      "to": "escalate",
+      "label": "重试超限",
+      "role": "error"
+    },
+    {
+      "from": "approve",
+      "to": "escalate",
+      "label": "闸门 2 未通过",
+      "role": "error"
+    },
+    {
+      "from": "release",
+      "to": "escalate",
+      "label": "劣化回滚",
+      "role": "error"
+    },
+    {
+      "from": "escalate",
+      "to": "todo",
+      "label": "登记待办",
+      "role": "main"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "三道闸门 + 需求人工确认",
+      "items": [
+        "闸门 1：置信度 < 0.8 转人工；需求流免检（人工已确认）",
+        "闸门 2：驳回或超时 → 转人工；受保护目录二级审批",
+        "闸门 3：公告 15 分钟 + 劣化回滚；shadow 档仅建议不发布"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "需求驱动闭环",
+      "items": [
+        "反馈导出 → 需求基线 → 智能分析 → 管理员批准",
+        "批准版方案即根因（confidence=1.0），直入修复链",
+        "需求页 30s 自动同步；沙箱失败重启需求流"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "异常回炉与待办闭环",
+      "items": [
+        "沙箱失败回炉重生成；重试超限 → ESCALATED",
+        "待办留痕（actor+时间戳）；SLA 30 分钟自动再升级一次",
+        "快照冻结不热改 · Temporal 事件历史即审计；kill switch 切回人工"
+      ]
+    }
+  ]
+}

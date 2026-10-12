@@ -1,0 +1,36 @@
+# 迭代一实现验证（WP1/WP2/WP3）—— 2026-10-03
+
+## 单元测试
+  $ .venv/bin/python -m unittest discover -s tests  →  256 passed（基线 227，新增 29）
+
+## WP3 鉴权：fail-closed
+  $ env -u AIOPS_CONSOLE_AUTH_TOKENS uvicorn bff.app:app ...   # 未配置注册表
+  GET /api/overview → HTTP 503  未配置 AIOPS_CONSOLE_AUTH_TOKENS，控制台处于 fail-closed 状态…
+  GET /            → HTTP 200  （静态资源不受鉴权影响）
+
+## WP3 鉴权：角色矩阵（已配置 viewer/operator/admin）
+  GET  /api/overview（无凭证）              → HTTP 401  缺少 Bearer 凭证
+  GET  /api/overview（tok-view）            → HTTP 200
+  POST /api/monitored-apps（tok-view）      → HTTP 403  角色 viewer 无权执行该操作（要求 admin）
+  POST /api/flows/nonexistent/approval（tok-ops）→ HTTP 404  workflow 不存在（通过鉴权，进入业务校验）
+  POST /api/monitored-apps（tok-ops）       → HTTP 403  角色 operator 无权执行该操作（要求 admin）
+  POST /api/monitored-apps（tok-adm）       → HTTP 200  {"ok":true,"app":{"id":"app-88bea9",…}}
+
+## WP1 审计：真实身份 + target（对比历史记录）
+  04:33:15 | actor= li          | monitored-app:create | wf_id= ''       | target= 'app-88bea9' | result= ok
+  03:40:33 | actor= web-console | monitored-app:delete | wf_id= 'nl2sql' | target= None         | result= signaled   ← 修复前
+
+## WP1 审计页 DOM：表头与链接行为
+  heads = ["时间","操作者","动作","对象","参数","结果"]
+  新记录   {actor: li,          action: monitored-app:delete, 对象: app-88bea9, link: false}
+  历史记录 {actor: web-console, action: monitored-app:delete, 对象: nl2sql,     link: false}  ← 历史同样不再坏链
+
+## WP2 失败终态分类
+  /api/overview counts  = {"running":0,…,"today_done":1,"today_escalated":4,"today_failed":1}
+  /api/overview dist_7d = {"DONE":1,"ESCALATED":4,"CANCELLED":0,"FAILED":1}
+  审计中失败流程         : aiops-fix-order-qoder-full-1 | exec= FAILED | stage= FAILED（修复前为 null → 未知）
+
+## 看板 DOM（令牌已设置）
+  KPI = 运行中0 / 待审批0 / 公告倒计时0 / 今日完成1 / 今日转人工4 / 今日失败1
+  分布 = 已完成1 / 已转人工4 / 执行失败1 / 已取消0 / 共 6 次
+  令牌控件 = "访问令牌 已设置 tok-••••dm"

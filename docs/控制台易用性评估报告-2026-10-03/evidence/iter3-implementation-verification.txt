@@ -1,0 +1,33 @@
+# 迭代三实现验证（WP7/WP8/WP9/WP11）—— 2026-10-03
+
+## 单元测试
+  .venv/bin/python -m unittest discover -s tests  →  292 passed（迭代二结束时 270，新增 22）
+  cd web && npm run build (tsc --noEmit + vite)   →  通过
+
+## WP9 降级横幅
+  正常态 GET /api/subsystems：
+    temporal ok=True 0.0ms | loki ok=True HTTP 200 | ollama ok=True HTTP 200 | docker ok=True 29.2.1
+    degraded_mode = False | degraded = []
+  降级态（另起 BFF:8601 且 AIOPS_LOKI_URL 指向死端口）：
+    degraded_mode = True | degraded = ['loki'] | loki detail = TimeoutError: timed out
+
+## WP7 导入/导出/批量/复制
+  GET  /api/monitored-apps/export → {version:1, items:2}
+  POST /api/monitored-apps/import (merge, 3 条含 1 条非法)
+       → added=1 updated=1 total=3 errors=[{name:坏条目, error:地址必须以 http:// 或 https:// 开头}]
+  POST /api/monitored-apps/{id}/duplicate → 复制为「智能问数据分析系统 副本」
+  POST /api/monitored-apps/batch {action:disable} → affected=2 missing=[]
+  POST /api/monitored-apps/batch {action:delete}  → affected=2
+  前端按钮（DOM）：导出 / 导入 / 新增 / 编辑 / 复制 / 停用 / 删除
+
+## WP8 表单实时校验（DOM 实测）
+  输入 名称=测试应用、地址=localhost:3000（缺 scheme）：
+    字段错误 = 「地址必须以 http:// 或 https:// 开头」
+    提交按钮 confirmDisabled = true（创建）
+
+## WP11 protected 演练分支（此前恒 5/6 → 转人工）
+  工作流 aiops-fix-order-iter3-protected-1：
+    stage=WAIT_APPROVAL  needs_second=True   （终于进入二级审批）
+    patch files = ['order_service.py', 'auth/token_service.py']   ← 真实两文件补丁
+    test_report = passed=True（沙箱 6/6 passed，attempt=0）
+  修复前：单测 5/6（order_service 缺陷未修）→ 三次重试耗尽 → ESCALATED

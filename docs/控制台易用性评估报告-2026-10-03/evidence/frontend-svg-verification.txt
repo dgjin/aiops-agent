@@ -1,0 +1,27 @@
+# 前端 SVG 可视化改造验证 —— 2026-10-03
+
+## 构建
+  cd web && npm run build (tsc --noEmit + vite)  →  通过
+  删除死代码 web/src/components/MetricBar.tsx（已被环图替换，无引用）
+
+## 新增组件（web/src/components/charts/ 与 EventTimeline 重写）
+  charts/FlowStateMachine.tsx  全链路状态机（9 阶段 + 2 异常出口 + 3 道闸门 + 回炉重试环）
+  charts/Donut.tsx             交互环图（悬停高亮 + 中心读数 + 点击跳转）
+  charts/ReleasePipeline.tsx   发布管道（5 段 chevron + 公告倒计时环 + 回滚分支）
+  EventTimeline.tsx            由 HTML 列表重写为交互式 SVG 时间线
+
+## DOM 实测（每类 SVG 的 aria-label 定位）
+  流程看板：aria-label='终态分布环图' → 3 段可见（已取消=0 自动剔除）
+    图例 = 已完成 1(11%) / 已转人工 7(78%) / 执行失败 1(11%) / 已取消 0(0%)；中心读数 = 9
+  流程详情 aiops-fix-order-qoder-full-2：
+    aria-label='流程状态机' → 11 个节点 rect + 1 个当前阶段脉冲圆点；悬停提示区已渲染
+    aria-label='发布管道'   → 5 段 chevron；文案含 审批通过/公告倒计时/金丝雀 5%/全量发布/观察期 + 目标版本 v1.0.678
+  审计回看（展开「事件流」行）：
+    aria-label='闸门事件时间线' → 6 个圆（3 事件 × 内外双圆）；标签 #1 通过 / #2 发布 / #3 异常拦截
+
+## 接口配套
+  GET /api/window 新增 countdown_seconds=30（来自策略快照）→ 供倒计时环计算进度
+
+## 未实测项（如实说明）
+  发布窗口页的「公告倒计时环」需要存在 NOTIFYING 流程才能实时观测；
+  该状态需先批准一条流程（属高风险动作，未执行）。同一 ReleasePipeline 组件已在流程详情页验证渲染。

@@ -1,0 +1,781 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "AIOps 自动运维智能体 · 系统架构图",
+    "locale": "zh-CN",
+    "output": "aiops-architecture.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://gitee.com/dgjin/aiops-agent",
+      "provider": "gitee",
+      "revision": "a0a82b08e61bb08f8c6fa8431c7f24f0ed869276"
+    },
+    "views": [
+      {
+        "id": "trigger-path",
+        "label": "从告警到流程",
+        "focus": [
+          "app",
+          "prometheus",
+          "alertmanager",
+          "webhook",
+          "temporal"
+        ],
+        "note": "指标与日志两条发现链汇入 :8099 接入服务，Token 鉴权 + 幂等校验后启动 Workflow"
+      },
+      {
+        "id": "fix-pipeline",
+        "label": "修复流水线",
+        "focus": [
+          "worker",
+          "qoder",
+          "llm",
+          "rag",
+          "sandbox",
+          "release"
+        ],
+        "note": "取证归因 → Code RAG / Qoder 生成候选补丁 → 沙箱验证 → 金丝雀发布，全程自动留痕"
+      },
+      {
+        "id": "requirement-path",
+        "label": "需求智能分析",
+        "focus": [
+          "app",
+          "bff",
+          "web",
+          "llm",
+          "temporal",
+          "worker"
+        ],
+        "note": "被监控应用导出需求反馈，BFF 后台线程分析（RAG + LLM），管理员批准后启动需求 Workflow"
+      },
+      {
+        "id": "console-audit",
+        "label": "控制台与留痕",
+        "focus": [
+          "web",
+          "bff",
+          "store",
+          "im"
+        ],
+        "note": "看板 / 审批 / 发布窗口经 BFF（RBAC）聚合，浏览器不直连 Temporal"
+      },
+      {
+        "id": "guard-rails",
+        "label": "安全与守护",
+        "focus": [
+          "webhook",
+          "watchdog",
+          "worker",
+          "bff"
+        ],
+        "note": "P0 安全底座：webhook 鉴权 fail-closed；watchdog 30s 巡检，判活失败自动拉起"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "app",
+      "type": "backend",
+      "label": "被监控应用",
+      "sublabel": "nl2sql · 需求反馈",
+      "pos": [
+        20,
+        150
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "prometheus",
+      "type": "backend",
+      "label": "Prometheus",
+      "sublabel": "抓取 + 规则",
+      "tag": "指标发现",
+      "brand": "prometheus",
+      "pos": [
+        210,
+        150
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "alertmanager",
+      "type": "backend",
+      "label": "Alertmanager",
+      "sublabel": "aiops_demo 子路由",
+      "pos": [
+        400,
+        150
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "webhook",
+      "type": "security",
+      "label": "告警接入",
+      "sublabel": ":8099 · Token 鉴权",
+      "tag": "唯一入口",
+      "sources": [
+        {
+          "path": "alert_webhook.py"
+        }
+      ],
+      "pos": [
+        590,
+        150
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "temporal",
+      "type": "messagebus",
+      "label": "Temporal 编排",
+      "sublabel": ":7233 · aiops-tasks",
+      "pos": [
+        780,
+        150
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "worker",
+      "type": "backend",
+      "label": "修复 Worker",
+      "sublabel": "告警 / 需求双流程",
+      "sources": [
+        {
+          "path": "aiops_agent/worker.py"
+        }
+      ],
+      "pos": [
+        970,
+        150
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "release",
+      "type": "cloud",
+      "label": "金丝雀发布",
+      "sublabel": "金丝雀 / 直连发布",
+      "pos": [
+        1160,
+        150
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "ship",
+      "type": "backend",
+      "label": "日志采集",
+      "sublabel": "ship_app_logs",
+      "sources": [
+        {
+          "path": "ship_app_logs.py"
+        }
+      ],
+      "pos": [
+        20,
+        360
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "loki",
+      "type": "database",
+      "label": "Loki 日志库",
+      "sublabel": "trace_id 关联",
+      "pos": [
+        210,
+        360
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "surge",
+      "type": "backend",
+      "label": "突增检测器",
+      "sublabel": "LogErrorSurge",
+      "sources": [
+        {
+          "path": "log_surge_detector.py"
+        }
+      ],
+      "pos": [
+        400,
+        360
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "qoder",
+      "type": "external",
+      "label": "Qoder 修复引擎",
+      "sublabel": "无头 CLI · 隔离工作区",
+      "sources": [
+        {
+          "path": "aiops_agent/qoder_fix.py"
+        }
+      ],
+      "pos": [
+        590,
+        360
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "llm",
+      "type": "external",
+      "label": "Ollama",
+      "sublabel": "qwen3.8:27b · 归因",
+      "brand": "ollama",
+      "pos": [
+        780,
+        360
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "rag",
+      "type": "database",
+      "label": "Code RAG",
+      "sublabel": "FAISS 代码索引",
+      "pos": [
+        970,
+        360
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "sandbox",
+      "type": "security",
+      "label": "测试沙箱",
+      "sublabel": "Docker · Bandit",
+      "brand": "docker",
+      "sources": [
+        {
+          "path": "aiops_agent/sandbox.py"
+        }
+      ],
+      "pos": [
+        1160,
+        360
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "web",
+      "type": "frontend",
+      "label": "Web 控制台",
+      "sublabel": "React SPA",
+      "brand": "react",
+      "pos": [
+        400,
+        570
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "bff",
+      "type": "backend",
+      "label": "运维 BFF",
+      "sublabel": "FastAPI · :8600",
+      "tag": "RBAC · 度量",
+      "brand": "fastapi",
+      "sources": [
+        {
+          "path": "bff/app.py"
+        }
+      ],
+      "pos": [
+        590,
+        570
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "store",
+      "type": "database",
+      "label": "数据留痕",
+      "sublabel": "MySQL 8 / JSONL",
+      "brand": "mysql",
+      "pos": [
+        780,
+        570
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "im",
+      "type": "external",
+      "label": "IM 通知",
+      "sublabel": "飞书 / 钉钉卡片",
+      "pos": [
+        970,
+        570
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "watchdog",
+      "type": "backend",
+      "label": "组件守护",
+      "sublabel": "6 组件 · 判活拉起",
+      "sources": [
+        {
+          "path": "scripts/aiops-watchdog.py"
+        }
+      ],
+      "pos": [
+        1160,
+        570
+      ],
+      "size": [
+        124,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "被监控应用",
+      "wraps": [
+        "app"
+      ],
+      "pad": 20
+    },
+    {
+      "kind": "region",
+      "label": "指标与告警管线",
+      "wraps": [
+        "prometheus",
+        "alertmanager",
+        "webhook"
+      ],
+      "pad": 20
+    },
+    {
+      "kind": "region",
+      "label": "日志发现链",
+      "wraps": [
+        "ship",
+        "loki",
+        "surge"
+      ],
+      "pad": 20
+    },
+    {
+      "kind": "region",
+      "label": "AIOps 编排与执行面",
+      "wraps": [
+        "temporal",
+        "worker",
+        "qoder",
+        "llm",
+        "rag",
+        "sandbox",
+        "release"
+      ],
+      "pad": 20
+    },
+    {
+      "kind": "region",
+      "label": "运维控制台与留痕",
+      "wraps": [
+        "web",
+        "bff",
+        "store"
+      ],
+      "pad": 20
+    }
+  ],
+  "connections": [
+    {
+      "from": "app",
+      "to": "prometheus",
+      "label": "指标抓取",
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "straight"
+    },
+    {
+      "from": "app",
+      "to": "ship",
+      "label": "应用日志",
+      "labelDy": 24,
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight"
+    },
+    {
+      "from": "ship",
+      "to": "loki",
+      "label": "日志入库",
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "straight"
+    },
+    {
+      "from": "loki",
+      "to": "surge",
+      "label": "环比基线",
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "straight"
+    },
+    {
+      "from": "surge",
+      "to": "alertmanager",
+      "label": "LogErrorSurge 告警",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "route": "straight"
+    },
+    {
+      "from": "prometheus",
+      "to": "alertmanager",
+      "label": "规则触发",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "straight"
+    },
+    {
+      "from": "alertmanager",
+      "to": "webhook",
+      "label": "标签路由",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "straight"
+    },
+    {
+      "from": "webhook",
+      "to": "temporal",
+      "label": "启动流程",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "straight"
+    },
+    {
+      "from": "temporal",
+      "to": "worker",
+      "label": "任务派发",
+      "labelDy": -8,
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "straight"
+    },
+    {
+      "from": "worker",
+      "to": "release",
+      "label": "触发发布",
+      "labelDy": -8,
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "straight"
+    },
+    {
+      "from": "worker",
+      "to": "llm",
+      "label": "根因判定",
+      "labelDx": -32
+    },
+    {
+      "from": "worker",
+      "to": "rag",
+      "label": "相似修复",
+      "labelDy": 24
+    },
+    {
+      "from": "worker",
+      "to": "sandbox",
+      "label": "补丁测试",
+      "labelDx": -42
+    },
+    {
+      "from": "worker",
+      "to": "im",
+      "label": "审批 · 公告",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "right",
+      "labelAt": [
+        1090,
+        435
+      ]
+    },
+    {
+      "from": "worker",
+      "to": "store",
+      "label": "审计留痕",
+      "variant": "dashed",
+      "labelDx": -32,
+      "labelDy": -96
+    },
+    {
+      "from": "web",
+      "to": "bff",
+      "label": "接口轮询",
+      "labelAt": [
+        557,
+        626
+      ],
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "straight"
+    },
+    {
+      "from": "bff",
+      "to": "temporal",
+      "label": "查询 · 信号",
+      "fromSide": "left",
+      "toSide": "bottom",
+      "via": [
+        [
+          557,
+          602
+        ],
+        [
+          557,
+          242
+        ],
+        [
+          842,
+          242
+        ]
+      ],
+      "labelAt": [
+        700,
+        230
+      ]
+    },
+    {
+      "from": "bff",
+      "to": "store",
+      "label": "读写留痕",
+      "labelDy": 28,
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "straight"
+    },
+    {
+      "from": "worker",
+      "to": "qoder",
+      "label": "候选补丁",
+      "variant": "emphasis",
+      "fromSide": "left",
+      "toSide": "top",
+      "via": [
+        [
+          937,
+          182
+        ],
+        [
+          937,
+          258
+        ],
+        [
+          652,
+          258
+        ],
+        [
+          652,
+          360
+        ]
+      ],
+      "labelAt": [
+        840,
+        263
+      ]
+    },
+    {
+      "from": "bff",
+      "to": "temporal",
+      "label": "批准启动需求流",
+      "variant": "emphasis",
+      "fromSide": "left",
+      "toSide": "bottom",
+      "via": [
+        [
+          557,
+          602
+        ],
+        [
+          557,
+          242
+        ],
+        [
+          842,
+          242
+        ]
+      ],
+      "labelAt": [
+        612,
+        519
+      ]
+    },
+    {
+      "from": "bff",
+      "to": "llm",
+      "label": "需求分析",
+      "fromSide": "right",
+      "toSide": "bottom",
+      "via": [
+        [
+          747,
+          602
+        ],
+        [
+          747,
+          492
+        ],
+        [
+          842,
+          492
+        ]
+      ],
+      "labelAt": [
+        794,
+        477
+      ]
+    },
+    {
+      "from": "watchdog",
+      "to": "worker",
+      "label": "判活 · 自动拉起",
+      "variant": "dashed",
+      "fromSide": "left",
+      "toSide": "right",
+      "via": [
+        [
+          1127,
+          602
+        ],
+        [
+          1127,
+          182
+        ]
+      ],
+      "labelAt": [
+        1173,
+        305
+      ]
+    },
+    {
+      "from": "app",
+      "to": "bff",
+      "label": "需求导出 API",
+      "variant": "emphasis",
+      "fromSide": "left",
+      "toSide": "bottom",
+      "via": [
+        [
+          12,
+          182
+        ],
+        [
+          12,
+          670
+        ],
+        [
+          652,
+          670
+        ]
+      ],
+      "labelAt": [
+        330,
+        670
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "发现侧（插拔式接入）",
+      "items": [
+        "指标与日志两条发现链独立接入",
+        "aiops_demo 标签子路由 → :8099（Token 鉴权 fail-closed）",
+        "fingerprint+startsAt 幂等去重"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "三道闸门 + 需求分析闭环",
+      "items": [
+        "闸门 1：置信度 < 0.8 → 转人工；闸门 2：驳回 / 超时 + 保护目录二级审批",
+        "闸门 3：金丝雀 / 直连发布 + 公告窗口 + 劣化回滚；需求流人工已确认免检",
+        "需求闭环：导出 API → BFF（Code RAG + LLM）方案 / 验收 → 管理员批准启动"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "修复引擎 · 守护与留痕",
+      "items": [
+        "Qoder 无头 CLI · 隔离工作区（Read/Edit/Write/Grep，禁 Bash）；失败退兜底补丁",
+        "watchdog 30s 判活 6 组件自动拉起；demo / MySQL 8 双模存储",
+        "kill switch 失败关闭；流程速查与审计全量留痕"
+      ]
+    }
+  ]
+}

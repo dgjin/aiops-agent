@@ -1,0 +1,453 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "AIOps 自动运维智能体 · 数据流图",
+    "locale": "zh-CN",
+    "output": "aiops-dataflow.html",
+    "viewBox": [
+      1080,
+      602
+    ],
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "signals",
+        "label": "信号汇入",
+        "focus": [
+          "app",
+          "loki",
+          "prom",
+          "hook",
+          "evidence"
+        ],
+        "note": "告警与日志两条信号链在证据包汇合，形成根因上下文"
+      },
+      {
+        "id": "repair",
+        "label": "修复主链",
+        "focus": [
+          "evidence",
+          "triage",
+          "patch",
+          "sandbox",
+          "approval",
+          "release"
+        ],
+        "note": "从根因判定到灰度发布：闸门 1/2/3 全程把关"
+      },
+      {
+        "id": "requirement",
+        "label": "需求数据链",
+        "focus": [
+          "app",
+          "reqin",
+          "reqanalyze",
+          "reqapprove",
+          "patch"
+        ],
+        "note": "需求反馈经 BFF 后台分析（RAG + LLM）输出方案 / 验收 / 疑点，管理员批准（版本冻结）后批准版方案直入修复链"
+      },
+      {
+        "id": "guard",
+        "label": "守护数据流",
+        "focus": [
+          "watchdog",
+          "audit"
+        ],
+        "note": "watchdog 30s 判活 6 组件，判活与拉起记录汇入审计留痕"
+      },
+      {
+        "id": "trace",
+        "label": "留痕与消费",
+        "focus": [
+          "release",
+          "audit",
+          "console"
+        ],
+        "note": "发布结果落入审计留痕，控制台消费审批、追踪与评估"
+      }
+    ]
+  },
+  "stages": [
+    {
+      "label": "信号产生"
+    },
+    {
+      "label": "采集接入"
+    },
+    {
+      "label": "诊断分析"
+    },
+    {
+      "label": "验证与放行"
+    },
+    {
+      "label": "留痕与消费"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "prom",
+      "type": "cloud",
+      "label": "Prometheus",
+      "sublabel": "指标规则评估",
+      "tag": "告警源",
+      "stage": 0,
+      "row": 0
+    },
+    {
+      "id": "app",
+      "type": "backend",
+      "label": "业务应用",
+      "sublabel": "结构化日志输出",
+      "tag": "日志源",
+      "stage": 0,
+      "row": 2
+    },
+    {
+      "id": "hook",
+      "type": "backend",
+      "label": "告警接入",
+      "sublabel": "Webhook :8099",
+      "tag": "鉴权 · 幂等",
+      "stage": 1,
+      "row": 0
+    },
+    {
+      "id": "loki",
+      "type": "database",
+      "label": "Loki 日志平台",
+      "sublabel": "LogQL · 增量采集",
+      "tag": "日志存储",
+      "stage": 1,
+      "row": 2
+    },
+    {
+      "id": "evidence",
+      "type": "database",
+      "label": "证据包",
+      "sublabel": "Drain3 · trace_id",
+      "tag": "根因上下文",
+      "stage": 2,
+      "row": 1
+    },
+    {
+      "id": "triage",
+      "type": "backend",
+      "label": "根因判定",
+      "sublabel": "Ollama · 置信度",
+      "tag": "闸门 1",
+      "stage": 2,
+      "row": 2
+    },
+    {
+      "id": "patch",
+      "type": "backend",
+      "label": "补丁 diff",
+      "sublabel": "RAG + Qoder",
+      "tag": "ai-fix",
+      "stage": 3,
+      "row": 0
+    },
+    {
+      "id": "sandbox",
+      "type": "security",
+      "label": "沙箱验证",
+      "sublabel": "Bandit · 契约",
+      "tag": "隔离执行",
+      "stage": 3,
+      "row": 1
+    },
+    {
+      "id": "approval",
+      "type": "backend",
+      "label": "审批窗口",
+      "sublabel": "FIFO · 超时驳回",
+      "tag": "闸门 2",
+      "stage": 3,
+      "row": 2
+    },
+    {
+      "id": "release",
+      "type": "cloud",
+      "label": "灰度发布",
+      "sublabel": "公告窗口 · 回滚",
+      "tag": "闸门 3",
+      "stage": 4,
+      "row": 0
+    },
+    {
+      "id": "audit",
+      "type": "database",
+      "label": "审计留痕",
+      "sublabel": "JSONL · 评估样本",
+      "tag": "全链路",
+      "stage": 4,
+      "row": 1
+    },
+    {
+      "id": "console",
+      "type": "frontend",
+      "label": "控制台",
+      "sublabel": "BFF · 聚合视图",
+      "tag": "RBAC · 消费",
+      "stage": 4,
+      "row": 2
+    },
+    {
+      "id": "reqin",
+      "type": "backend",
+      "label": "需求对接",
+      "sublabel": "导出 API 拉取",
+      "tag": "30s 同步",
+      "stage": 1,
+      "row": 3
+    },
+    {
+      "id": "reqanalyze",
+      "type": "backend",
+      "label": "需求分析",
+      "sublabel": "RAG + LLM",
+      "tag": "方案 · 疑点",
+      "stage": 2,
+      "row": 3
+    },
+    {
+      "id": "reqapprove",
+      "type": "security",
+      "label": "管理员批准",
+      "sublabel": "版本冻结",
+      "tag": "actor 留痕",
+      "stage": 3,
+      "row": 3
+    },
+    {
+      "id": "watchdog",
+      "type": "backend",
+      "label": "组件守护",
+      "sublabel": "6 组件 · 判活",
+      "tag": "自动拉起",
+      "stage": 4,
+      "row": 3
+    }
+  ],
+  "flows": [
+    {
+      "id": "alert-events",
+      "from": "prom",
+      "to": "hook",
+      "label": "指标告警",
+      "classification": "aiops_demo 标签",
+      "variant": "emphasis"
+    },
+    {
+      "id": "app-logs",
+      "from": "app",
+      "to": "loki",
+      "label": "应用日志",
+      "classification": "增量推送",
+      "variant": "dashed"
+    },
+    {
+      "id": "alert-context",
+      "from": "hook",
+      "to": "evidence",
+      "label": "告警上下文",
+      "classification": "幂等启动",
+      "variant": "emphasis"
+    },
+    {
+      "id": "log-window",
+      "from": "loki",
+      "to": "evidence",
+      "label": "日志窗口",
+      "classification": "近 10 分钟",
+      "variant": "emphasis"
+    },
+    {
+      "id": "clustered-evidence",
+      "from": "evidence",
+      "to": "triage",
+      "label": "聚类证据",
+      "classification": "Drain3 模板",
+      "variant": "emphasis",
+      "labelDy": 24
+    },
+    {
+      "id": "root-cause",
+      "from": "triage",
+      "to": "patch",
+      "label": "根因报告",
+      "classification": "置信度 ≥ 0.8",
+      "variant": "emphasis"
+    },
+    {
+      "id": "candidate-patch",
+      "from": "patch",
+      "to": "sandbox",
+      "label": "候选补丁",
+      "classification": "最小 diff",
+      "variant": "emphasis",
+      "labelDy": 24
+    },
+    {
+      "id": "test-report",
+      "from": "sandbox",
+      "to": "approval",
+      "label": "测试报告",
+      "classification": "Bandit · 单测",
+      "variant": "security",
+      "labelDy": 24
+    },
+    {
+      "id": "approved-release",
+      "from": "approval",
+      "to": "release",
+      "label": "批准放行",
+      "classification": "闸门 2 → 3",
+      "variant": "emphasis"
+    },
+    {
+      "id": "release-record",
+      "from": "release",
+      "to": "audit",
+      "label": "发布记录",
+      "classification": "CANARY · 回滚",
+      "variant": "dashed",
+      "labelDy": 24
+    },
+    {
+      "id": "audit-stream",
+      "from": "audit",
+      "to": "console",
+      "label": "审计事件流",
+      "classification": "JSONL 留痕",
+      "variant": "dashed",
+      "labelDy": 24
+    },
+    {
+      "id": "requirement-export",
+      "from": "app",
+      "to": "reqin",
+      "label": "需求反馈",
+      "classification": "导出 API",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [
+        [
+          100,
+          499
+        ]
+      ],
+      "labelAt": [
+        207.5,
+        489
+      ]
+    },
+    {
+      "id": "requirement-intake",
+      "from": "reqin",
+      "to": "reqanalyze",
+      "label": "需求基线",
+      "classification": "结构化条目",
+      "variant": "emphasis",
+      "route": "straight",
+      "labelAt": [
+        422.5,
+        489
+      ]
+    },
+    {
+      "id": "analysis-report",
+      "from": "reqanalyze",
+      "to": "reqapprove",
+      "label": "分析报告",
+      "classification": "方案 · 验收",
+      "variant": "emphasis",
+      "route": "straight",
+      "labelAt": [
+        633,
+        489
+      ]
+    },
+    {
+      "id": "approved-plan",
+      "from": "reqapprove",
+      "to": "patch",
+      "label": "批准版方案",
+      "classification": "跳过诊断",
+      "variant": "emphasis",
+      "fromSide": "left",
+      "toSide": "left",
+      "via": [
+        [
+          680,
+          499
+        ],
+        [
+          680,
+          157
+        ]
+      ],
+      "labelAt": [
+        680,
+        434
+      ]
+    },
+    {
+      "id": "watchdog-heartbeat",
+      "from": "watchdog",
+      "to": "audit",
+      "label": "判活记录",
+      "classification": "30s 巡检",
+      "variant": "dashed",
+      "fromSide": "left",
+      "toSide": "left",
+      "via": [
+        [
+          892,
+          499
+        ],
+        [
+          892,
+          271
+        ]
+      ],
+      "labelAt": [
+        870,
+        402
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "主数据路径",
+      "items": [
+        "告警与日志链在证据包汇合 → 根因判定 → 补丁生成 → 沙箱验证 → 审批放行",
+        "流标签命名数据资产（证据包 / 根因报告 / 候选补丁），而非传输原语",
+        "旁路检测器与 Prometheus 规则共用告警入口，Token 鉴权 fail-closed"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "三道闸门",
+      "items": [
+        "闸门 1：置信度 < 0.8 → ESCALATED，不进入修复链",
+        "闸门 2：审批 FIFO + 超时驳回；受保护目录二级审批",
+        "闸门 3：公告窗口 + 金丝雀劣化回滚；kill switch 一键停自动"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "需求链与留痕",
+      "items": [
+        "需求：导出 API 30s 同步；BFF（RAG + LLM）输出方案 / 验收 / 疑点",
+        "管理员批准（版本冻结）→ 批准版方案即根因，跳过诊断直入修复链",
+        "JSONL 全量留痕（actor + 时间戳）；watchdog 判活 6 组件；控制台 RBAC 消费"
+      ]
+    }
+  ]
+}

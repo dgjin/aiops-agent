@@ -1,0 +1,23 @@
+# 证据 A1：BFF 全部写接口 —— 仅流程操作与「被监控应用」可写，其余配置域无写入口
+# 文件：bff/app.py
+
+  75| @app.exception_handler(ApiError)
+  85| @app.get("/api/health")
+ 103| @app.get("/api/overview")
+ 136| @app.get("/api/flows")
+ 167| @app.get("/api/flows/{wf_id}")
+ 177| @app.get("/api/flows/{wf_id}/result")
+ 188| @app.get("/api/approvals")
+ 203| @app.get("/api/window")
+ 216| @app.get("/api/audit")
+ 273| @app.get("/api/system")
+ 355| @app.post("/api/flows/{wf_id}/approval")
+ 369| @app.post("/api/flows/{wf_id}/second-approval")
+ 387| @app.post("/api/flows/{wf_id}/deploy-command")
+ 396| @app.post("/api/flows/{wf_id}/queue-patch")
+ 432| @app.get("/api/monitored-apps")
+ 438| @app.post("/api/monitored-apps")
+ 453| @app.put("/api/monitored-apps/{app_id}")
+ 468| @app.post("/api/monitored-apps/{app_id}/toggle")
+ 484| @app.delete("/api/monitored-apps/{app_id}")
+ 500| @app.get("/{full_path:path}", include_in_schema=False)

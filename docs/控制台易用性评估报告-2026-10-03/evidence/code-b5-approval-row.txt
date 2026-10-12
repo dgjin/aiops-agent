@@ -1,0 +1,25 @@
+# 证据 B5：审批列表行字段（服务/阶段/级别/告警/工作流/补丁/剩余时间 → 无置信度、无测试结论）
+# 文件：web/src/pages/Approvals.tsx
+
+  71|                     <div className="min-w-0">
+  72|                       <div className="flex flex-wrap items-center gap-3">
+  73|                         <span className="text-sm font-medium">{item.alert?.service ?? '未知服务'}</span>
+  74|                         <StageBadge stage={item.stage} />
+  75|                         <span
+  76|                           className={cn(
+  77|                             'rounded border px-1.5 py-0.5 text-[10px]',
+  78|                             second ? 'border-danger/40 text-danger' : 'border-warn/40 text-warn',
+  79|                           )}
+  80|                         >
+  81|                           {second ? '二级审批' : '一级审批'}
+  82|                         </span>
+  83|                       </div>
+  84|                       <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-muted">
+  85|                         <span>
+  86|                           告警 <CopyableId value={item.alert?.alert_id ?? '—'} />
+  87|                         </span>
+  88|                         <span>
+  89|                           工作流 <CopyableId value={item.wf_id} />
+  90|                         </span>
+  91|                         {item.patch_id && (
+  92|                           <span>

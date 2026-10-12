@@ -1,0 +1,30 @@
+# 迭代二实现验证（WP4/WP5/WP6）—— 2026-10-03
+
+## 单元测试
+  .venv/bin/python -m unittest discover -s tests  →  270 passed（迭代一结束时 256，新增 14）
+  前端 tsc --noEmit && vite build  →  通过
+
+## WP5 审批期证据（待审批时 result 不可读，改由 status 查询透出）
+  GET /api/flows → aiops-fix-order-iter2-demo-2
+    stage       = WAIT_APPROVAL
+    confidence  = 0.92
+    root_cause  = NullPointerException | order 服务在提交链路抛出空指针…
+    patch       = p-iter2-demo-2-r1 | files= ['order_service.py']
+    test_report = passed=True | unit= 6/6 passed
+  前端审批列表行（DOM）：
+    告警 iter2-demo-2 / 工作流 aiops-fix-order-iter2-demo-2 / 补丁 p-iter2-demo-2-r1
+    置信度 0.92 / 改动 +1 -1 / 测试 通过 · 6/6 passed
+
+## WP4 配置项元数据（GET /api/system.config_items，13 项）
+  闸门策略            | snapshot | 运行中=不生效 | 来源=YAML · demo-policy.yaml
+  被监控应用清单       | hot      | 运行中=生效   | 来源=控制台 · 被监控应用页
+  控制台访问令牌       | hot      | 运行中=生效   | 来源=环境变量 · .env
+  修复提供者/Qoder 模型/CLI 路径/超时/沙箱镜像/索引路径/端口/通知/依赖地址 → restart | 运行中=不生效
+  脱敏：AIOPS_CONSOLE_AUTH_TOKENS value = 「已配置（3 个令牌，值不展示）」
+
+## WP6 变更 diff 与回滚
+  PUT 修改 → 响应 changed =
+    {"enabled":{"from":true,"to":false},"note":{"from":"","to":"改了这两处"},"url":{"from":"http://v1.test/","to":"http://v2-changed.test/"}}
+  审计留痕：monitored-app:update | target=app-9b0c62 | params.changed=同上
+  POST /rollback → restored = {"enabled": true, "note": "", "url": "http://v1.test/"}
+  回滚后 app = {"url":"http://v1.test/","enabled":true,"note":""}

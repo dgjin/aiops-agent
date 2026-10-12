@@ -1,0 +1,7 @@
+$ curl -sS http://127.0.0.1:8600/api/audit | jq '.ops[:6]'   # 精简展示
+{"ts": "2026-10-03T03:40:33.457242+00:00", "actor": "web-console", "action": "monitored-app:delete", "wf_id": "nl2sql", "params": {}, "result": "signaled"}
+{"ts": "2026-10-03T03:40:19.305146+00:00", "actor": "web-console", "action": "monitored-app:toggle", "wf_id": "nl2sql", "params": {"enabled": false}, "result": "signaled"}
+{"ts": "2026-10-03T03:40:19.222192+00:00", "actor": "web-console", "action": "monitored-app:create", "wf_id": "nl2sql", "params": {"name": "nl2sql 重启日志", "url": "http://localhost:3000/", "service": "nl2sql-restart"}, "result": "signaled"}
+{"ts": "2026-10-03T03:39:41.222532+00:00", "actor": "web-console", "action": "monitored-app:update", "wf_id": "app-d42214", "params": {"name": "智能问数据分析系统", "url": "http://localhost:3000/", "enabled": true}, "result": "signaled"}
+{"ts": "2026-10-03T01:51:37.965784+00:00", "actor": "web-console", "action": "monitored-app:delete", "wf_id": "default", "params": {}, "result": "signaled"}
+{"ts": "2026-10-03T01:51:37.944653+00:00", "actor": "web-console", "action": "monitored-app:create", "wf_id": "app-d42214", "params": {"name": "智能问数据分析系统", "url": "http://localhost:3000/", "service": "nl2sql"}, "result": "signaled"}

@@ -1,0 +1,12 @@
+$ grep -nE '@app\.(post|put|delete)' bff/app.py
+355:@app.post("/api/flows/{wf_id}/approval")
+369:@app.post("/api/flows/{wf_id}/second-approval")
+387:@app.post("/api/flows/{wf_id}/deploy-command")
+396:@app.post("/api/flows/{wf_id}/queue-patch")
+438:@app.post("/api/monitored-apps")
+453:@app.put("/api/monitored-apps/{app_id}")
+468:@app.post("/api/monitored-apps/{app_id}/toggle")
+484:@app.delete("/api/monitored-apps/{app_id}")
+
+$ grep -nE 'Depends|middleware|Authorization|APIKey' bff/app.py   # 鉴权/中间件
+  （无匹配：无任何鉴权装饰器或中间件）

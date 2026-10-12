@@ -1,0 +1,3 @@
+$ curl -sS -X POST http://127.0.0.1:8600/api/flows/nonexistent-wf/approval -d '{"decision":"approve"}'  （未带任何 Authorization）
+{"server_time":"2026-10-03T04:00:07.629045+00:00","error":"workflow 不存在: nonexistent-wf"}
+HTTP 404

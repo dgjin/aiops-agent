@@ -1,0 +1,870 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "AIOps 自动运维智能体 · 技术架构图",
+    "locale": "zh-CN",
+    "output": "aiops-tech-architecture.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://gitee.com/dgjin/aiops-agent",
+      "provider": "gitee",
+      "revision": "a0a82b08e61bb08f8c6fa8431c7f24f0ed869276"
+    },
+    "views": [
+      {
+        "id": "console-path",
+        "label": "控制台链路",
+        "focus": [
+          "web",
+          "bff",
+          "worker",
+          "temporal"
+        ],
+        "note": "React SPA 经 BFF(:8600) 聚合与鉴权；浏览器不直连 Temporal"
+      },
+      {
+        "id": "orchestration",
+        "label": "编排与智能引擎",
+        "focus": [
+          "temporal",
+          "worker",
+          "ollama",
+          "rag",
+          "qoder"
+        ],
+        "note": "Temporal 派发 aiops-tasks；worker 调用 Ollama 归因、FAISS 检索、Qoder CLI 生成候选补丁"
+      },
+      {
+        "id": "verify-release",
+        "label": "验证与发布",
+        "focus": [
+          "worker",
+          "sandbox",
+          "release",
+          "mysql"
+        ],
+        "note": "Docker + Bandit 沙箱验证；金丝雀 / 直连发布；SQLAlchemy 落 MySQL 留痕"
+      },
+      {
+        "id": "discovery-guard",
+        "label": "发现与守护",
+        "focus": [
+          "webhook",
+          "daemons",
+          "watchdog",
+          "temporal",
+          "loki"
+        ],
+        "note": "常驻巡检三件套采集日志与探活；watchdog 每 30s 判活、失败自动拉起"
+      },
+      {
+        "id": "observe-deliver",
+        "label": "可观测与交付",
+        "focus": [
+          "prometheus",
+          "alertmanager",
+          "grafana",
+          "compose",
+          "k8s"
+        ],
+        "note": "指标 :8600/:9090 被抓取；Grafana 概览面板；Compose 3 profiles 与 K8s 同镜像交付"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "web",
+      "type": "frontend",
+      "label": "Web 控制台",
+      "sublabel": "React 19 · Vite 8",
+      "tag": "TS 7 · Tailwind 4",
+      "brand": "react",
+      "sources": [
+        {
+          "path": "web/package.json"
+        }
+      ],
+      "pos": [
+        40,
+        150
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "bff",
+      "type": "backend",
+      "label": "FastAPI BFF",
+      "sublabel": ":8600 · uvicorn",
+      "tag": "RBAC · 限流",
+      "brand": "fastapi",
+      "sources": [
+        {
+          "path": "bff/app.py"
+        }
+      ],
+      "pos": [
+        290,
+        150
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "webhook",
+      "type": "security",
+      "label": "告警接入",
+      "sublabel": ":8099 · 标准库",
+      "tag": "Token · 幂等",
+      "sources": [
+        {
+          "path": "alert_webhook.py"
+        }
+      ],
+      "pos": [
+        540,
+        150
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "daemons",
+      "type": "backend",
+      "label": "常驻巡检",
+      "sublabel": "prober · ship · surge",
+      "tag": "宿主机进程",
+      "sources": [
+        {
+          "path": "app_prober.py"
+        },
+        {
+          "path": "ship_app_logs.py"
+        },
+        {
+          "path": "log_surge_detector.py"
+        }
+      ],
+      "pos": [
+        790,
+        150
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "watchdog",
+      "type": "backend",
+      "label": "组件守护",
+      "sublabel": "30s 判活 · 拉起",
+      "tag": "6 组件",
+      "sources": [
+        {
+          "path": "scripts/aiops-watchdog.py"
+        }
+      ],
+      "pos": [
+        1040,
+        150
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "temporal",
+      "type": "messagebus",
+      "label": "Temporal 服务端",
+      "sublabel": ":7233 gRPC · SQLite",
+      "tag": "aiops-tasks",
+      "sources": [
+        {
+          "path": "docker-compose.yml"
+        }
+      ],
+      "pos": [
+        40,
+        275
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "worker",
+      "type": "backend",
+      "label": "Python Worker",
+      "sublabel": "temporalio SDK",
+      "tag": "双工作流",
+      "brand": "python",
+      "sources": [
+        {
+          "path": "aiops_agent/worker.py"
+        }
+      ],
+      "pos": [
+        290,
+        275
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "ollama",
+      "type": "external",
+      "label": "Ollama LLM",
+      "sublabel": "qwen3.8:27b · :11434",
+      "tag": "归因 · 方案",
+      "brand": "ollama",
+      "sources": [
+        {
+          "path": ".env.example"
+        }
+      ],
+      "pos": [
+        540,
+        275
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "rag",
+      "type": "database",
+      "label": "Code RAG",
+      "sublabel": "FAISS 向量索引",
+      "tag": "相似修复",
+      "sources": [
+        {
+          "path": "aiops_agent/code_rag.py"
+        }
+      ],
+      "pos": [
+        790,
+        275
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "qoder",
+      "type": "external",
+      "label": "Qoder CLI",
+      "sublabel": "无头 · 隔离工作区",
+      "tag": "候选补丁",
+      "sources": [
+        {
+          "path": "aiops_agent/qoder_fix.py"
+        }
+      ],
+      "pos": [
+        1040,
+        275
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "sandbox",
+      "type": "security",
+      "label": "测试沙箱",
+      "sublabel": "Docker · Bandit",
+      "tag": "契约校验",
+      "brand": "docker",
+      "sources": [
+        {
+          "path": "aiops_agent/sandbox.py"
+        }
+      ],
+      "pos": [
+        40,
+        400
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "release",
+      "type": "cloud",
+      "label": "发布引擎",
+      "sublabel": "金丝雀 / 直连",
+      "tag": "自动回滚",
+      "sources": [
+        {
+          "path": "aiops_agent/release.py"
+        }
+      ],
+      "pos": [
+        290,
+        400
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "mysql",
+      "type": "database",
+      "label": "MySQL 8.0",
+      "sublabel": ":3316 · 生产存储",
+      "tag": "SQLAlchemy",
+      "brand": "mysql",
+      "sources": [
+        {
+          "path": "aiops_agent/db.py"
+        }
+      ],
+      "pos": [
+        540,
+        400
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "redis",
+      "type": "database",
+      "label": "Redis 7",
+      "sublabel": ":6380 · 限流后端",
+      "tag": "多副本",
+      "brand": "redis",
+      "sources": [
+        {
+          "path": ".env.example"
+        }
+      ],
+      "pos": [
+        790,
+        400
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "loki",
+      "type": "database",
+      "label": "Loki 日志库",
+      "sublabel": ":3101 · 日志存储",
+      "tag": "证据源",
+      "sources": [
+        {
+          "path": "docker-compose.yml"
+        }
+      ],
+      "pos": [
+        1040,
+        400
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "prometheus",
+      "type": "external",
+      "label": "Prometheus",
+      "sublabel": ":9095 · 指标抓取",
+      "tag": "抓取 :8600 / :9090",
+      "brand": "prometheus",
+      "sources": [
+        {
+          "path": "deploy/prometheus/prometheus.yml"
+        }
+      ],
+      "pos": [
+        40,
+        525
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "alertmanager",
+      "type": "external",
+      "label": "Alertmanager",
+      "sublabel": "规则告警 · 路由",
+      "tag": "aiops_demo",
+      "sources": [
+        {
+          "path": "deploy/prometheus/aiops-alerts.yml"
+        }
+      ],
+      "pos": [
+        290,
+        525
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "grafana",
+      "type": "external",
+      "label": "Grafana",
+      "sublabel": ":3200 · 概览面板",
+      "tag": "自动加载",
+      "brand": "grafana",
+      "sources": [
+        {
+          "path": "deploy/grafana/aiops-overview.json"
+        }
+      ],
+      "pos": [
+        540,
+        525
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "compose",
+      "type": "cloud",
+      "label": "Docker Compose",
+      "sublabel": "3 profiles 编排",
+      "tag": "本地一键起停",
+      "brand": "docker",
+      "sources": [
+        {
+          "path": "docker-compose.yml"
+        }
+      ],
+      "pos": [
+        790,
+        525
+      ],
+      "size": [
+        124,
+        64
+      ]
+    },
+    {
+      "id": "k8s",
+      "type": "cloud",
+      "label": "Kubernetes",
+      "sublabel": "aiops-system 命名空间",
+      "tag": "2 副本 HPA",
+      "brand": "kubernetes",
+      "sources": [
+        {
+          "path": "deploy/k8s/worker.yaml"
+        }
+      ],
+      "pos": [
+        1040,
+        525
+      ],
+      "size": [
+        124,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "交互 · 接入 · 守护",
+      "wraps": [
+        "web",
+        "bff",
+        "webhook",
+        "daemons",
+        "watchdog"
+      ],
+      "pad": 20
+    },
+    {
+      "kind": "region",
+      "label": "智能编排层",
+      "wraps": [
+        "temporal",
+        "worker",
+        "ollama",
+        "rag",
+        "qoder"
+      ],
+      "pad": 20
+    },
+    {
+      "kind": "region",
+      "label": "验证 · 发布 · 数据",
+      "wraps": [
+        "sandbox",
+        "release",
+        "mysql",
+        "redis",
+        "loki"
+      ],
+      "pad": 20
+    },
+    {
+      "kind": "region",
+      "label": "可观测与交付",
+      "wraps": [
+        "prometheus",
+        "alertmanager",
+        "grafana",
+        "compose",
+        "k8s"
+      ],
+      "pad": 20
+    }
+  ],
+  "connections": [
+    {
+      "from": "web",
+      "to": "bff",
+      "label": "HTTP · JSON",
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "straight",
+      "labelAt": [
+        227,
+        206
+      ]
+    },
+    {
+      "from": "bff",
+      "to": "temporal",
+      "label": "gRPC · 查询",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [
+        [
+          352,
+          242
+        ],
+        [
+          12,
+          242
+        ],
+        [
+          12,
+          307
+        ]
+      ],
+      "labelAt": [
+        172,
+        236
+      ]
+    },
+    {
+      "from": "webhook",
+      "to": "temporal",
+      "label": "gRPC · 启动",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "top",
+      "via": [
+        [
+          602,
+          90
+        ],
+        [
+          12,
+          90
+        ],
+        [
+          12,
+          255
+        ],
+        [
+          102,
+          255
+        ]
+      ],
+      "labelAt": [
+        450,
+        230
+      ]
+    },
+    {
+      "from": "daemons",
+      "to": "loki",
+      "label": "日志上报 · HTTP",
+      "fromSide": "bottom",
+      "toSide": "right",
+      "via": [
+        [
+          852,
+          229
+        ],
+        [
+          1178,
+          229
+        ],
+        [
+          1178,
+          432
+        ]
+      ],
+      "labelAt": [
+        930,
+        235
+      ]
+    },
+    {
+      "from": "watchdog",
+      "to": "worker",
+      "label": "判活 · 拉起",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "top",
+      "via": [
+        [
+          1102,
+          90
+        ],
+        [
+          700,
+          90
+        ],
+        [
+          700,
+          252
+        ],
+        [
+          352,
+          252
+        ]
+      ],
+      "labelAt": [
+        516,
+        242
+      ]
+    },
+    {
+      "from": "worker",
+      "to": "ollama",
+      "label": "LLM 归因",
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "straight",
+      "labelAt": [
+        445,
+        333
+      ]
+    },
+    {
+      "from": "worker",
+      "to": "rag",
+      "label": "FAISS 检索",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [
+        [
+          352,
+          369
+        ],
+        [
+          852,
+          369
+        ]
+      ],
+      "labelAt": [
+        592,
+        385
+      ]
+    },
+    {
+      "from": "worker",
+      "to": "qoder",
+      "label": "CLI · 补丁",
+      "fromSide": "right",
+      "toSide": "top",
+      "via": [
+        [
+          477,
+          307
+        ],
+        [
+          477,
+          262
+        ],
+        [
+          1102,
+          262
+        ]
+      ],
+      "labelAt": [
+        750,
+        256
+      ]
+    },
+    {
+      "from": "worker",
+      "to": "sandbox",
+      "label": "Docker · 沙箱",
+      "fromSide": "left",
+      "toSide": "right",
+      "via": [
+        [
+          227,
+          307
+        ],
+        [
+          227,
+          432
+        ]
+      ],
+      "labelAt": [
+        227,
+        374
+      ]
+    },
+    {
+      "from": "worker",
+      "to": "release",
+      "label": "发布执行",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight",
+      "labelAt": [
+        384,
+        387
+      ]
+    },
+    {
+      "from": "worker",
+      "to": "mysql",
+      "label": "审计留痕",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [
+        [
+          477,
+          307
+        ],
+        [
+          477,
+          432
+        ]
+      ],
+      "labelAt": [
+        477,
+        387
+      ]
+    },
+    {
+      "from": "worker",
+      "to": "loki",
+      "label": "Loki API · 取证",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [
+        [
+          352,
+          355
+        ],
+        [
+          977,
+          355
+        ],
+        [
+          977,
+          432
+        ]
+      ],
+      "labelAt": [
+        660,
+        349
+      ]
+    },
+    {
+      "from": "prometheus",
+      "to": "grafana",
+      "label": "PromQL 查询",
+      "fromSide": "top",
+      "toSide": "top",
+      "via": [
+        [
+          102,
+          485
+        ],
+        [
+          602,
+          485
+        ]
+      ],
+      "labelAt": [
+        352,
+        479
+      ]
+    },
+    {
+      "from": "prometheus",
+      "to": "alertmanager",
+      "label": "规则触发",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "straight",
+      "labelAt": [
+        227,
+        575
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "前端与接入",
+      "items": [
+        "React 19 + TS 7 + Vite 8 + Tailwind 4，构建产物由 BFF 静态托管",
+        "FastAPI + uvicorn :8600：RBAC、限流与 prometheus-client /metrics",
+        "告警接入 :8099 纯标准库：Token 鉴权 fail-closed + 幂等去重"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "编排与智能引擎",
+      "items": [
+        "Temporal :7233（SQLite）+ Python worker（temporalio SDK）",
+        "Ollama qwen3.8:27b（:11434）本地推理；drain3 日志模板聚类",
+        "Code RAG（FAISS）+ Qoder 无头 CLI（隔离工作区 · 禁 Bash）"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "数据 · 可观测与交付",
+      "items": [
+        "MySQL 8.0 + SQLAlchemy（prod）/ JSONL（demo）双模；Loki :3101 证据源",
+        "Prometheus :9095 抓取 + Grafana :3200 面板；OTLP 可选链路追踪",
+        "同镜像多角色：Compose 3 profiles 与 K8s aiops-system（2 副本 HPA）"
+      ]
+    }
+  ]
+}

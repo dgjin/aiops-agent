@@ -1,0 +1,3 @@
+$ curl -sS -o /dev/null -w 'HTTP %{http_code}' http://127.0.0.1:8600/api/flows/app-d42214
+HTTP 404
+{"server_time":"2026-10-03T04:00:07.578590+00:00","error":"workflow 不存在: app-d42214"}
