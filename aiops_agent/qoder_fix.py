@@ -15,7 +15,11 @@
 
 隔离与安全：
     - 只在 data/qoder/<patch_id>/ 副本内改动，绝不触碰真实代码目录；
-    - --permission-mode accept_edits（非 bypass_permissions），配合工具白/黑名单；
+    - --permission-mode accept_edits（非 bypass_permissions），配合工具白/黑名单；默认自检
+      模式下经 --settings 注入 PreToolUse hook（qoder_guard.py）做命令级封闭——仅放行
+      unittest/pytest 测试命令，Bash/Monitor 其余命令一律拒绝（P2⑥ 实测：--allowed-tools
+      的 Bash(...) 模式并非封闭白名单）；AIOPS_QODER_SELF_CHECK=0 回退「Bash 全禁」旧行为
+      ——自检只为提早拦截无效候选，不参与任何闸门判定（门禁仍由独立沙箱裁决）；
     - --max-turns + 子进程超时双限；--no-session-persistence 保证无状态可复现；
     - 服务端瞬时故障快速重试：仅限「会话初始化被拒」签名（error_during_execution/500/
       num_turns=0）且快速失败（wall<60s）的调用，退避 15s/45s；慢失败与任务类失败不重试
@@ -32,6 +36,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -48,6 +53,20 @@ DEFAULT_QODER_MODEL = "DeepSeek-Flash"
 DEFAULT_PERMISSION_MODE = "accept_edits"
 DEFAULT_ALLOWED_TOOLS = "Read,Edit,Write,Grep,Glob"
 DEFAULT_DISALLOWED_TOOLS = "Bash"
+# 自检提速（P2⑤/Option A，2026-10-12，见《评估建议》§2.3）：默认放行**受限测试命令**，
+# 让 Qoder 改动后先自检一遍，提前拦住明显错误候选（省一轮沙箱回炉与 credits）。
+# 安全约束：① 自检结果不参与任何闸门判定——正确性仍由独立 Docker 沙箱裁决（自报不可信）；
+# ② 命令级封闭由 PreToolUse hook（qoder_guard.py，经 --settings 注入）承担——P2⑥ 实测
+#    （2026-10-12）证明 --allowed-tools 的 Bash(...) 模式并非封闭白名单（白名单外的 echo
+#    照常执行、Monitor 通道不受其约束），白/黑名单参数仅作免询问预授权优化；
+# ③ 可经 AIOPS_QODER_SELF_CHECK=0 整体回退「纯编辑、Bash 全禁」旧行为。
+# 前缀与 qoder_guard.DEFAULT_ALLOWED_PREFIXES 保持一致（有一致性回归用例锁定）。
+SELF_CHECK_COMMAND_PREFIXES = (
+    "python -m unittest",
+    "python3 -m unittest",
+    "python -m pytest",
+    "python3 -m pytest",
+)
 # 2026-10-10 实测：DeepSeek-Flash 在真实前端仓库（约 2.2k 文件）中探索占比高——
 # 首测 20 轮全部耗于只读探索即被 error_max_turns 掐断（changed=False）；60 轮下需求类
 # 大改动（跨前后端多文件，实测 73 次只读探索 + 6 次编辑）仍在编辑中途被掐断，产出
@@ -152,6 +171,95 @@ def _env(name: str, default: str) -> str:
     return value if value else default
 
 
+def _self_check_enabled() -> bool:
+    """自检提速开关（AIOPS_QODER_SELF_CHECK，默认开）：0/false/no/off 关闭。"""
+    return os.environ.get("AIOPS_QODER_SELF_CHECK", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _resolve_self_check(self_check: bool | None) -> bool:
+    """解析自检开关：显式参数 > 环境变量默认。"""
+    return _self_check_enabled() if self_check is None else self_check
+
+
+def _self_check_allowed_tools() -> str:
+    """自检模式的工具白名单（免询问预授权）：基础编辑工具 + 受限测试命令。
+
+    说明（P2⑥ 实测，2026-10-12）：`--allowed-tools` 是「免询问预授权」而非封闭白名单——
+    白名单外的 Bash 命令（如 echo）仍会被执行；命令级封闭由 PreToolUse hook
+    （qoder_guard.py）承担。此处同时给出 `Bash(prefix)`（精确）与 `Bash(prefix:*)`
+    （前缀）两种形式仅为兼容 CLI 匹配规则差异，宁多勿漏。
+    """
+    patterns: list[str] = []
+    for prefix in SELF_CHECK_COMMAND_PREFIXES:
+        patterns.append(f"Bash({prefix})")
+        patterns.append(f"Bash({prefix}:*)")
+    return ",".join([DEFAULT_ALLOWED_TOOLS, *patterns])
+
+
+def resolve_tool_grants(
+    allowed_tools: str | None = None,
+    disallowed_tools: str | None = None,
+    self_check: bool | None = None,
+) -> tuple[str, str]:
+    """解析生效的工具白/黑名单。返回 (allowed, disallowed)，空串表示不传对应 CLI 参数。
+
+    优先级：显式参数 > AIOPS_QODER_* 环境变量 > 自检默认。自检开启时 Bash 不进黑名单
+    （由受限白名单替代粗粒度全禁）；关闭时回退「Bash 全禁」旧行为。
+    """
+    enabled = _resolve_self_check(self_check)
+    allowed_default = _self_check_allowed_tools() if enabled else DEFAULT_ALLOWED_TOOLS
+    disallowed_default = "" if enabled else DEFAULT_DISALLOWED_TOOLS
+    allowed = (
+        allowed_tools
+        if allowed_tools is not None
+        else _env("AIOPS_QODER_ALLOWED_TOOLS", allowed_default)
+    )
+    disallowed = (
+        disallowed_tools
+        if disallowed_tools is not None
+        else _env("AIOPS_QODER_DISALLOWED_TOOLS", disallowed_default)
+    )
+    return allowed, disallowed
+
+
+def build_self_check_settings() -> str:
+    """构造自检模式经 `--settings` 注入的 PreToolUse hook 配置（内联 JSON）。
+
+    P2⑥ 实测（2026-10-12）要点：
+    1. `--settings` 的 hooks 属于 CLI 内部 "flag" 源，仅当**未传 --setting-sources**
+       时加载（二者互斥：flag 不在 --setting-sources 的合法取值 user/project/local 内，
+       显式传入即被过滤）——故 run_qoder_cli 不再传 --setting-sources；
+    2. hook 以 exec 形式运行（command=当前解释器，args=[guard 脚本]），不经过 shell；
+    3. 封闭性由 qoder_guard.py 承担（仅放行测试命令前缀，其余 Bash/Monitor 命令
+       exit 2 拒绝，fail-closed）；matcher 覆盖 Bash 与 Monitor 两个已实测的命令通道。
+    """
+    guard = Path(__file__).resolve().parent / "qoder_guard.py"
+    payload = {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Bash|Monitor",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": sys.executable or "python3",
+                            "args": [str(guard)],
+                            "timeout": 10,
+                            "name": "qoder-self-check-guard",
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def _resolve_executable(exe: str) -> str | None:
     """解析可执行文件：优先当作路径，其次走 PATH 查找。"""
     path = Path(exe)
@@ -205,11 +313,13 @@ def build_qoder_prompt(
     references: list[dict] | None,
     target_rel: str,
     retry_hint: str = "",
+    self_check: bool | None = None,
 ) -> str:
     """构造交给 Qoder 的修复任务说明。
 
     与 fix_agent.build_fix_prompt 语义一致，但弱化「内联文件全文」——Qoder 能自主读文件；
     强化「单点、单文件、禁重构」约束，并保留最小化修复与重试强化提示。
+    self_check（P2⑤）：开启时要求改动后跑受限测试命令自检（自检结论不参与裁决）。
     """
     refs: list[str] = []
     for ref in references or []:
@@ -226,6 +336,15 @@ def build_qoder_prompt(
     refs_text = "\n".join(refs) or "- （无）"
     retry_section = (
         f"\n## 重试强化提示（上一轮候选修复未通过沙箱测试）\n{retry_hint}\n" if retry_hint else ""
+    )
+    if self_check is None:
+        self_check = _self_check_enabled()
+    self_check_line = (
+        "- 改动完成后，用受限白名单内的测试命令自检一次（测试目录通常为 tests/，参考"
+        " `python -m unittest discover -s tests -v`）；无法运行时跳过即可，禁止尝试安装依赖或绕过命令限制；\n"
+        "- 自检只为提早发现疏漏，其结论不参与裁决；最终正确性由系统在独立沙箱中统一验证；"
+        if self_check
+        else "- 当前执行环境不提供命令行/测试运行能力，不要尝试运行命令或测试，改动完成即结束（由系统在隔离沙箱中统一验证）；"
     )
     if target_rel:
         target_block = (
@@ -273,7 +392,7 @@ def build_qoder_prompt(
 {scope_rule}
 - 做最小化单点修复，保持既有代码风格与类型标注；
 - 空指针类缺陷（对象可能为 None，随后被下标/属性访问）：空值校验必须插入到该访问语句**之前**，或直接把访问行改为带条件的安全写法；
-- 当前执行环境不提供命令行/测试运行能力，不要尝试运行命令或测试，改动完成即结束（由系统在隔离沙箱中统一验证）；
+{self_check_line}
 - 完成后直接结束，**不要输出 diff 文本**（改动由系统通过 git 自动采集）。
 {retry_section}"""
 
@@ -321,10 +440,13 @@ def run_qoder_cli(
     permission_mode: str | None = None,
     allowed_tools: str | None = None,
     disallowed_tools: str | None = None,
+    self_check: bool | None = None,
 ) -> dict:
     """以无头模式调用 Qoder CLI（工作目录 = 隔离工作区）。返回运行元数据。
 
     不使用 --yolo / bypass_permissions：保持最小权限，仅自动接受工作区内的安全编辑。
+    self_check（P2⑤）：默认开启——白名单预授权测试命令 + PreToolUse hook 命令级封闭
+    （见 resolve_tool_grants 与 build_self_check_settings）。
     """
     exe = exe or _env("AIOPS_QODER_BIN", DEFAULT_QODER_BIN)
     resolved = _resolve_executable(exe)
@@ -333,12 +455,7 @@ def run_qoder_cli(
     timeout = int(timeout if timeout is not None else _env("AIOPS_QODER_TIMEOUT", str(DEFAULT_TIMEOUT)))
     max_turns = int(max_turns if max_turns is not None else _env("AIOPS_QODER_MAX_TURNS", str(DEFAULT_MAX_TURNS)))
     permission_mode = permission_mode or _env("AIOPS_QODER_PERMISSION_MODE", DEFAULT_PERMISSION_MODE)
-    allowed = allowed_tools if allowed_tools is not None else _env("AIOPS_QODER_ALLOWED_TOOLS", DEFAULT_ALLOWED_TOOLS)
-    disallowed = (
-        disallowed_tools
-        if disallowed_tools is not None
-        else _env("AIOPS_QODER_DISALLOWED_TOOLS", DEFAULT_DISALLOWED_TOOLS)
-    )
+    allowed, disallowed = resolve_tool_grants(allowed_tools, disallowed_tools, self_check)
     model = resolve_model(model)
 
     argv = [
@@ -354,10 +471,14 @@ def run_qoder_cli(
         "--max-turns",
         str(max_turns),
         "--no-session-persistence",
-        # 仅加载用户级设置源：项目级 skill 源不参与加载，从加载层消除同名 skill 冲突（与工作区复制过滤双保险）
-        "--setting-sources",
-        "user",
     ]
+    # 注意：不传 --setting-sources。P2⑥ 实测（2026-10-12）：--settings 注入的 hooks 属于
+    # CLI 内部 "flag" 源，而 --setting-sources 合法取值仅 user/project/local——显式传入
+    # 任一值都会过滤掉 flag 源（"Flag hooks skipped: not in --setting-sources"），与 hook
+    # 注入互斥（不传时 flag hooks 正常加载）。同名 skill 冲突仍由工作区复制过滤
+    # （排除 .qoder/.agents/.claude）单一防线承担。
+    if _resolve_self_check(self_check):
+        argv += ["--settings", build_self_check_settings()]
     if allowed:
         argv += ["--allowed-tools", allowed]
     if disallowed:
@@ -487,6 +608,7 @@ def propose_patch(
     permission_mode: str | None = None,
     allowed_tools: str | None = None,
     disallowed_tools: str | None = None,
+    self_check: bool | None = None,
     workspace_root: Path | None = None,
     qoder_bin: str | None = None,
 ) -> tuple[str, str, str, dict]:
@@ -531,6 +653,7 @@ def propose_patch(
         references,
         target_rel,
         retry_hint=_retry_hint(attempt),
+        self_check=self_check,
     )
     run: dict = {}
     server_retries = 0
@@ -545,6 +668,7 @@ def propose_patch(
             permission_mode=permission_mode,
             allowed_tools=allowed_tools,
             disallowed_tools=disallowed_tools,
+            self_check=self_check,
         )
         meta["exit_code"] = run["exit_code"]
         meta["timed_out"] = run["timed_out"]

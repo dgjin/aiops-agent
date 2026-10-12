@@ -7,6 +7,8 @@
     - 演示分支短路优先于提供者分发；
     - 隔离性：真实 demo-app/ 不被改动，工作区落在 AIOPS_QODER_ROOT；
     - 留痕、鉴权转写、prompt 约束；
+    - 自检提速（P2⑤）：白名单预授权（放行/回退开关/环境覆盖）+ PreToolUse hook 命令级
+      封闭（qoder_guard：放行/拒绝/防注入/Monitor 通道/fail-closed）与 prompt 自检指引；
     - 服务端瞬时故障快速重试：仅限快速失败的 error_during_execution/500 签名（退避 15s/45s），
       慢失败/任务类失败不重试；
     - 工作区复制瘦身：backups/ 目录与超大文件（>MAX_WORKSPACE_FILE_BYTES）不进工作区。
@@ -17,6 +19,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -25,7 +28,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from aiops_agent import code_rag, fix_agent, qoder_fix
+from aiops_agent import code_rag, fix_agent, qoder_fix, qoder_guard
 from aiops_agent.models import Alert, RootCause
 
 FAKE_CLI = Path(__file__).resolve().parent / "fakes" / "fake_qodercli.sh"
@@ -46,6 +49,9 @@ _ENV_KEYS = (
     "AIOPS_QODER_MAX_TURNS",
     "AIOPS_QODER_MODEL",
     "AIOPS_QODER_TOKEN",
+    "AIOPS_QODER_SELF_CHECK",
+    "AIOPS_QODER_ALLOWED_TOOLS",
+    "AIOPS_QODER_DISALLOWED_TOOLS",
     "FAKE_QODER_MODE",
     "FAKE_QODER_TARGET",
     "FAKE_QODER_MARKER",
@@ -527,7 +533,7 @@ class TestRunQoderCli(QoderTestBase):
         self.assertIn("--permission-mode", cmd)
         self.assertIn("accept_edits", cmd)
         self.assertIn("--no-session-persistence", cmd)
-        self.assertIn("--disallowed-tools", cmd)
+        self.assertIn("--allowed-tools", cmd)
         # 绝不使用 bypass/yolo
         self.assertNotIn("--yolo", cmd)
         self.assertNotIn("bypass_permissions", cmd)
@@ -544,6 +550,201 @@ class TestRunQoderCli(QoderTestBase):
         kwargs = run.call_args.kwargs
         self.assertIs(kwargs.get("stdin"), subprocess.DEVNULL)
         self.assertTrue(kwargs.get("start_new_session"))
+
+
+class TestSelfCheckTools(QoderTestBase):
+    """P2⑤（Option A）：Qoder 自检提速——白名单预授权 + PreToolUse hook 命令级封闭。
+
+    契约（对照《评估建议》§2.3 方案 A，P2⑥ 实测修订）：
+      - 放行侧：默认预授权受限测试命令（unittest/pytest 前缀），prompt 要求改动后自检；
+      - 拦截侧：命令级封闭由 --settings 注入的 PreToolUse hook（qoder_guard）承担——
+        --allowed-tools 仅为免询问预授权，实测并非封闭白名单（见 TestQoderGuard）；
+      - 可回退：AIOPS_QODER_SELF_CHECK=0 恢复「Bash 全禁 + 不跑命令」旧行为；
+      - 自检不参与闸门：工具层只做提速，正确性仍由独立沙箱裁决（本类不改变裁决链路）。
+    """
+
+    def _run_cmd(self) -> list[str]:
+        return qoder_fix.run_qoder_cli(self.root, "x", exe=str(FAKE_CLI), timeout=10)["command"]
+
+    def test_default_allows_restricted_test_commands(self) -> None:
+        cmd = self._run_cmd()
+        allowed = cmd[cmd.index("--allowed-tools") + 1]
+        self.assertIn("Bash(python -m unittest", allowed)
+        self.assertIn("Bash(python3 -m pytest", allowed)
+        # 粗粒度 Bash 全禁不再需要（由受限白名单取代）
+        self.assertNotIn("--disallowed-tools", cmd)
+
+    def test_allowlist_stays_closed_no_wildcard_bash(self) -> None:
+        """拦截侧：不得出现裸 Bash / 通配 Bash(:*)——其余命令全部不放行。"""
+        cmd = self._run_cmd()
+        allowed = cmd[cmd.index("--allowed-tools") + 1]
+        entries = [entry.strip() for entry in allowed.split(",")]
+        self.assertNotIn("Bash", entries)
+        self.assertNotIn("Bash(:*)", entries)
+        self.assertNotIn("Bash(*)", entries)
+        for entry in entries:
+            if entry.startswith("Bash"):
+                self.assertTrue(
+                    entry.startswith("Bash(python") or entry.startswith("Bash(python3"),
+                    entry,
+                )
+
+    def test_disable_restores_old_behavior(self) -> None:
+        with mock.patch.dict(os.environ, {"AIOPS_QODER_SELF_CHECK": "0"}):
+            cmd = self._run_cmd()
+        self.assertIn("--disallowed-tools", cmd)
+        self.assertEqual(cmd[cmd.index("--disallowed-tools") + 1], "Bash")
+        allowed = cmd[cmd.index("--allowed-tools") + 1]
+        self.assertNotIn("Bash", allowed)
+
+    def test_env_overrides_respected(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AIOPS_QODER_ALLOWED_TOOLS": "Read,Edit",
+                "AIOPS_QODER_DISALLOWED_TOOLS": "Bash,WebFetch",
+            },
+        ):
+            cmd = self._run_cmd()
+        self.assertEqual(cmd[cmd.index("--allowed-tools") + 1], "Read,Edit")
+        self.assertEqual(cmd[cmd.index("--disallowed-tools") + 1], "Bash,WebFetch")
+
+    def test_prompt_self_check_variant(self) -> None:
+        prompt = qoder_fix.build_qoder_prompt(ALERT, ROOT_CAUSE, [], "order_service.py")
+        self.assertIn("自检", prompt)
+        self.assertIn("不参与裁决", prompt)
+        self.assertNotIn("不提供命令行", prompt)
+
+    def test_prompt_legacy_variant_when_disabled(self) -> None:
+        prompt = qoder_fix.build_qoder_prompt(
+            ALERT, ROOT_CAUSE, [], "order_service.py", self_check=False
+        )
+        self.assertIn("不提供命令行", prompt)
+        self.assertNotIn("自检", prompt)
+
+    # ---- P2⑥ 命令级封闭（PreToolUse hook 注入）----
+
+    def test_settings_hook_injected_when_enabled(self) -> None:
+        """自检开启：--settings 注入 PreToolUse hook，结构性校验（matcher/exec 形式/guard 路径）。"""
+        cmd = self._run_cmd()
+        self.assertIn("--settings", cmd)
+        settings = json.loads(cmd[cmd.index("--settings") + 1])
+        definition = settings["hooks"]["PreToolUse"][0]
+        self.assertEqual(definition["matcher"], "Bash|Monitor")
+        hook = definition["hooks"][0]
+        self.assertEqual(hook["type"], "command")
+        self.assertTrue(hook["command"])
+        guard = Path(hook["args"][0])
+        self.assertEqual(guard.name, "qoder_guard.py")
+        self.assertTrue(guard.is_file(), guard)
+
+    def test_no_setting_sources_flag_regression(self) -> None:
+        """回归：不得传 --setting-sources。
+
+        P2⑥ 实测（2026-10-12）：--settings 注入的 hooks 属 CLI 内部 "flag" 源，被
+        --setting-sources（合法值仅 user/project/local）过滤后不加载——二者互斥。
+        """
+        cmd = self._run_cmd()
+        self.assertNotIn("--setting-sources", cmd)
+
+    def test_settings_omitted_when_disabled(self) -> None:
+        with mock.patch.dict(os.environ, {"AIOPS_QODER_SELF_CHECK": "0"}):
+            cmd = self._run_cmd()
+        self.assertNotIn("--settings", cmd)
+
+
+class TestQoderGuard(unittest.TestCase):
+    """P2⑥ 实测结论固化：qoder_guard 的封闭语义（fail-closed 命令白名单）。
+
+    背景（2026-10-12 实测）：--allowed-tools 的 Bash(...) 模式并非封闭白名单——
+    白名单外的 echo 照常执行、Monitor 通道不受约束；命令级封闭改由 PreToolUse
+    hook（qoder_guard.decide，exit 2 拒绝、stderr 为原因）承担。本类锁定判定契约。
+    """
+
+    def test_prefixes_match_qoder_fix(self) -> None:
+        """白名单前缀与 qoder_fix 单一事实来源一致（防两处漂移）。"""
+        self.assertEqual(
+            qoder_guard.DEFAULT_ALLOWED_PREFIXES, qoder_fix.SELF_CHECK_COMMAND_PREFIXES
+        )
+
+    def _decide(self, tool: str, **tool_input):
+        return qoder_guard.decide({"tool_name": tool, "tool_input": tool_input})
+
+    def test_allows_whitelisted_test_commands(self) -> None:
+        for command in (
+            "python -m unittest",
+            "python3 -m unittest discover -s tests -v",
+            "python -m pytest tests/test_x.py -q",
+            "python3 -m pytest",
+        ):
+            code, reason = self._decide("Bash", command=command)
+            self.assertEqual((code, reason), (0, ""), command)
+
+    def test_rejects_non_whitelisted_commands(self) -> None:
+        for command in ("echo hi", "ls", "pip install requests"):
+            code, reason = self._decide("Bash", command=command)
+            self.assertEqual(code, 2, command)
+            self.assertIn("仅允许受限测试命令", reason)
+
+    def test_rejects_shell_metacharacter_injection(self) -> None:
+        """防拼接注入：前缀合法但含元字符（; / && / $() / 反引号 / 重定向）一律拒绝。"""
+        for command in (
+            "python3 -m unittest discover -s tests -v ; echo pwned",
+            "python3 -m unittest && echo pwned",
+            "python3 -m unittest $(echo pwned)",
+            "python3 -m unittest `echo pwned`",
+            "python3 -m unittest > /tmp/out",
+        ):
+            code, reason = self._decide("Bash", command=command)
+            self.assertEqual(code, 2, command)
+            self.assertIn("白名单外字符", reason)
+
+    def test_monitor_channel_under_same_rules(self) -> None:
+        """P2⑥ 实测 Monitor 是第二条命令通道，须与 Bash 同规则（曾可绕过 Bash 约束）。"""
+        self.assertEqual(self._decide("Monitor", command="echo hi")[0], 2)
+        self.assertEqual(self._decide("Monitor", command="python3 -m unittest")[0], 0)
+
+    def test_non_command_tools_pass_through(self) -> None:
+        """非命令工具（Read/Edit/Write…）放行——由工具白/黑名单与权限层控制。"""
+        self.assertEqual(self._decide("Read", file_path="/etc/hosts")[0], 0)
+        self.assertEqual(self._decide("Edit", file_path="a.py")[0], 0)
+
+    def test_fail_closed_on_unrecognized_command(self) -> None:
+        """命令缺失/非字符串 → 保守拒绝（fail-closed）。"""
+        self.assertEqual(self._decide("Bash")[0], 2)
+        self.assertEqual(self._decide("Bash", command="")[0], 2)
+        self.assertEqual(
+            qoder_guard.decide({"tool_name": "Bash", "tool_input": "x"})[0], 2
+        )
+
+    def test_env_overrides_prefixes(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"AIOPS_QODER_HOOK_ALLOWED_PREFIXES": "make test"}
+        ):
+            self.assertEqual(self._decide("Bash", command="make test -v")[0], 0)
+            self.assertEqual(self._decide("Bash", command="python3 -m unittest")[0], 2)
+
+    def test_main_reads_stdin_and_exits(self) -> None:
+        """脚本入口：非法 JSON → exit 2（fail-closed）；拒绝 → 2；放行 → 0。"""
+        def run(stdin_text: str) -> int:
+            with mock.patch("sys.stdin", io.StringIO(stdin_text)), mock.patch(
+                "sys.stderr", new=io.StringIO()
+            ):
+                return qoder_guard.main()
+
+        self.assertEqual(run("not-json"), 2)
+        self.assertEqual(
+            run(json.dumps({"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}})),
+            2,
+        )
+        self.assertEqual(
+            run(
+                json.dumps(
+                    {"tool_name": "Bash", "tool_input": {"command": "python3 -m unittest"}}
+                )
+            ),
+            0,
+        )
 
 
 def _real_diff_for_order_service() -> str:
