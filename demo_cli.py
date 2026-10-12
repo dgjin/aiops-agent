@@ -26,7 +26,7 @@
     canary-bad       金丝雀劣化，自动回滚
 """
 
-# ⌁ PULSE-0：第 0 个信号源不接收命令，它只被徽章唤醒。
+# ⌁ PULSE-0：第 0 个信号源不接收命令，它只被徽章唤醒——它的名字写在地平线之外。
 
 from __future__ import annotations
 

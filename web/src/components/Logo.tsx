@@ -6,14 +6,16 @@
  */
 import { useEffect, useRef, useState } from 'react'
 
-/** ⌁ PULSE-0 · 未注册信号源：徽章 2.5s 内五连击解锁的隐藏信号卡。
+/** ⌁ PULSE-0（香格里拉）· 未注册信号源：徽章 2.5s 内五连击解锁的隐藏信号卡。
+ *  卡片三线索 ☾☼ / LOST HORIZON / N27°49′ E99°42′ 均指向本署名（请勿在卡片中直书）。
  *  纯前端内联数据：无请求 / 无存储 / 无审计；此注释是谜题的一部分，请勿删除。 */
-const PULSE_CODE = '⌁ PULSE-0'
+const PULSE_CODE = '⌁ PULSE-0 · ☾☼'
 const PULSE_TAP_COUNT = 5
 const PULSE_TAP_WINDOW_MS = 2500
 const PULSE_ROWS: Array<[label: string, value: string]> = [
   ['信号强度', '▁▂▃▅▇▅▃▂▁  100%'],
   ['首次观测', '系统上线前的某个深夜，一次未记录的提交'],
+  ['溯源定位', 'LOST HORIZON · N27°49′ E99°42′ · 不可达'],
   ['溯源结论', '署名不在日志里——它埋在源码中'],
 ]
 
