@@ -44,4 +44,4 @@
 
 - 全量测试：`.venv/bin/python -m unittest discover -s tests -t .`（必须带 `-t .`，防误收集 data/ 下演示样例）
 - 策略一致性：worker / BFF / CLI 必须共用同一 `AIOPS_POLICY_PATH`（演示档用 `demo-policy.yaml`）
-- 一键起停：`bash scripts/demo-up.sh {up|down|status}`（强制 demo 档）
+- 一键起停：`./start.sh`（推荐入口，自动打开控制台；`./start.sh web` 加前端热更）；底层 `bash scripts/demo-up.sh {up|down|status}`（强制 demo 档）

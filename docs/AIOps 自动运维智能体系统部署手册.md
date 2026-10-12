@@ -264,7 +264,9 @@ export AIOPS_POLICY_PATH=./demo-policy.yaml
 演示环境推荐用一键脚本编排全部常驻组件（替代逐一手工启动 3.2-3.5 各组件）：
 
 ```bash
-bash scripts/demo-up.sh            # 一键启动（幂等：已运行组件自动跳过）
+./start.sh                         # 一键启动（推荐入口）：等价 demo-up.sh up + 就绪等待 + 自动打开控制台
+./start.sh web                     # 开发档：额外在前台启动前端 vite dev（热更，5273）
+bash scripts/demo-up.sh            # 一键启动（幂等：已运行组件自动跳过；start.sh 的底层脚本）
 bash scripts/demo-up.sh status     # 查看 6 组件 + Temporal/Loki 状态（含局域网控制台地址）
 bash scripts/demo-up.sh down       # 停止全部常驻组件（含组件守护）
 bash scripts/demo-up.sh down-all   # 停止应用 + 依赖容器（保留数据卷，下次启动更快）
