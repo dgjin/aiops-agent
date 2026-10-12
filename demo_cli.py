@@ -279,7 +279,25 @@ def _check_bff() -> tuple[bool, str]:
         temporal = data.get("temporal", {})
         state = "Temporal 已连" if temporal.get("connected") else "Temporal 未连"
         return True, f"控制台运行中（http://127.0.0.1:8600，{state}）"
+    # 鉴权升级后 /api 全部需 Bearer 令牌（无令牌返回 401）：
+    # 此时静态页可达同样证明控制台在运行，避免误报「未启动」
+    if _http_ok("http://127.0.0.1:8600/", timeout=2.0):
+        return True, "控制台运行中（http://127.0.0.1:8600，/api 需 Bearer 令牌）"
     return False, "控制台未启动 → .venv/bin/uvicorn bff.app:app --host 127.0.0.1 --port 8600"
+
+
+def _check_disk() -> tuple[bool, str]:
+    """数据盘水位：剩余空间低于 20% 视为未就绪（指向清理/轮转工具）。"""
+    import shutil
+
+    usage = shutil.disk_usage(_ROOT)
+    free_pct = usage.free / usage.total * 100
+    if free_pct < 20:
+        return False, (
+            f"剩余 {free_pct:.0f}% → bash scripts/cleanup-sandbox.sh 与 "
+            "bash scripts/rotate-logs.sh"
+        )
+    return True, f"剩余 {free_pct:.0f}%（{usage.free // (1 << 30)} GiB 可用）"
 
 
 async def cmd_doctor(args: argparse.Namespace) -> None:
@@ -292,6 +310,7 @@ async def cmd_doctor(args: argparse.Namespace) -> None:
         ("策略文件", _check_policy()),
         ("前端构建", _check_web_dist()),
         ("BFF 控制台", _check_bff()),
+        ("磁盘水位", _check_disk()),
     ]
     print("AIOps 环境自检：\n")
     failed = 0

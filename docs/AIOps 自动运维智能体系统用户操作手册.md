@@ -523,6 +523,12 @@ export AIOPS_REDIS_URL='redis://127.0.0.1:6380/0' AIOPS_POLICY_PATH=./release-ga
 python scripts/production-smoke.py            # 生产冒烟 9 项
 python -m aiops_agent.cleanup --dry-run       # 清理预演
 bash scripts/security-scan.sh                 # SAST（Bandit，HIGH 必须为 0）
+
+# 运维治理（P0-P2）
+bash scripts/cleanup-sandbox.sh --status      # 数据清理：查看沙箱/Qoder 占用（--dry-run 预演 / --days N 保留期）
+bash scripts/rotate-logs.sh                   # 日志轮转：>1MB 的 *.log 压缩轮转（copytruncate，进程免重启）
+python scripts/backup-data.py                 # 数据备份（MySQL + 关键 JSON → backups/）；--restore-test 恢复演练
+bash scripts/launchd-install.sh install       # 组件守护交 launchd 托管（登录自启/崩溃自动重启）；status/uninstall 管理
 ```
 
 ## 附录 B 阶段字典

@@ -6,7 +6,7 @@
 | 日期 | 2026-10-12 |
 | 适用对象 | SRE / 实施工程师 / 环境维护人员 |
 | 关联文档 | 《系统设计说明书》、《用户操作手册》 |
-| 修订记录 | v1.1（2026-10-12）：同步最新工程现状——BFF 控制台（0.0.0.0:8600，支持局域网访问）、可用性巡检 / 日志采集 / 组件守护、需求基线闭环、Qoder 修复引擎、模型默认值切换（qwen3.8:27b-mlx）、测试基线 832 用例 |
+| 修订记录 | v1.1（2026-10-12）：同步最新工程现状——BFF 控制台（0.0.0.0:8600，支持局域网访问）、可用性巡检 / 日志采集 / 组件守护、需求基线闭环、Qoder 修复引擎、模型默认值切换（qwen3.8:27b-mlx）、测试基线 836 用例；v1.2（2026-10-12）：运维治理（沙箱清理 / 日志轮转 / 数据备份与恢复演练 / launchd 开机自启）、watchdog 单实例锁与档位锁定 |
 
 ---
 
@@ -37,7 +37,7 @@
 | Alertmanager | 可选（告警自动触发） | 任意 0.2x | 9093 |
 | 稳定容器 | 发布链路必需 | 由 demo-app 构建 | 18080 |
 
-> 此外，系统自身有 **6 个常驻组件**（worker、BFF 控制台 `:8600`、告警接入 `:8099`、可用性巡检、日志采集、突增检测），并由 `scripts/aiops-watchdog.py` 组件守护看护（每 30 秒巡检、崩溃自动拉起）；日常演示建议用 `scripts/demo-up.sh` 一键启动（见 3.1）。
+> 此外，系统自身有 **6 个常驻组件**（worker、BFF 控制台 `:8600`、告警接入 `:8099`、可用性巡检、日志采集、突增检测），并由 `scripts/aiops-watchdog.py` 组件守护看护（每 30 秒巡检、崩溃自动拉起，可经 launchd 托管实现登录自启，见 7.6）；日常演示建议用 `scripts/demo-up.sh` 一键启动（见 3.1）。
 
 ---
 
@@ -75,7 +75,7 @@ export AIOPS_POLICY_PATH=./demo-policy.yaml
 .venv/bin/python -m aiops_agent.worker
 
 # ⑧ 冒烟（另开终端，同样 export 策略）
-.venv/bin/python -m unittest discover -s tests -t . -v       # 期望 832 用例全绿
+.venv/bin/python -m unittest discover -s tests -t . -v       # 期望 836 用例全绿
 .venv/bin/python demo_cli.py start --service order --alert-id smoke-001
 ```
 
@@ -240,7 +240,7 @@ nohup .venv/bin/python -m uvicorn bff.app:app --host 0.0.0.0 --port 8600 > bff.l
 ### 2.11 冒烟验证
 
 ```bash
-# ① 单元测试（期望：Ran 832 tests ... OK；必须带 -t .，防止误收集 data/ 下演示样例）
+# ① 单元测试（期望：Ran 836 tests ... OK；必须带 -t .，防止误收集 data/ 下演示样例）
 .venv/bin/python -m unittest discover -s tests -t . -v
 
 # ② 向量检索冒烟（FAISS/Python 双后端一致性）
@@ -273,9 +273,11 @@ bash scripts/demo-up.sh down-all   # 停止应用 + 依赖容器（保留数据�
 bash scripts/demo-up.sh env        # 仅环境准备（Colima + Temporal/Loki 容器）
 ```
 
-脚本强制 `AIOPS_MODE=demo`（绝不触达生产 MySQL），按序启动 worker → BFF(:8600) → 告警接入(:8099) → 可用性巡检 → 日志采集 → 突增检测 → **组件守护** → 灌入演示日志 → 发起修复流程。
+脚本缺省 `AIOPS_MODE=demo`（外部 `export` 可覆盖——启动横幅如实展示生效档位，非 demo 档红色警示），按序启动 worker → BFF(:8600) → 告警接入(:8099) → 可用性巡检 → 日志采集 → 突增检测 → **组件守护** → 灌入演示日志 → 发起修复流程。
 
-组件守护 `scripts/aiops-watchdog.py` 每 30 秒巡检 6 个常驻组件，异常自动拉起；崩溃风暴（窗口内 5 次）自动冷却 10 分钟。参数：`AIOPS_WATCHDOG_INTERVAL`（巡检周期）、`AIOPS_WATCHDOG_SURGE_ARGS`（突增检测器拉起参数）。
+组件守护 `scripts/aiops-watchdog.py` 每 30 秒巡检 6 个常驻组件，异常自动拉起；崩溃风暴（窗口内 5 次）自动冷却 10 分钟。守护启动时获取单实例锁（`data/aiops-watchdog.lock`，防双守护）并锁定生效档位（环境变量 > .env > production），显式传给被拉起组件。参数：`AIOPS_WATCHDOG_INTERVAL`（巡检周期）、`AIOPS_WATCHDOG_SURGE_ARGS`（突增检测器拉起参数）。
+
+开机自启（可选）：`bash scripts/launchd-install.sh install` 将守护交由 launchd 托管（登录自启、崩溃自动重启，详见 7.6）。
 
 ### 3.2 告警接入服务（Alertmanager 自动触发）
 
@@ -562,7 +564,7 @@ docker compose --profile obs up -d    # Prometheus http://127.0.0.1:9095 / Grafa
 - 一致性：`workflow_runs` 表与 Temporal 工作流记录 1:1（同步任务实测）；
 - SAST：Bandit HIGH=0（16 个 Medium 均为已知误报 / 设计需要，见 `scripts/security-scan.sh` 头注）；
 - 镜像构建实测：`docker build` 成功（753MB / 压缩 168MB）；容器内：非 root（uid=10001）、`cleanup --dry-run` 正常、BFF `/metrics` 200 / 无令牌 401 / 带令牌 200（Temporal connected=true）、SPA 首页 200；
-- 全量单测零回归（b9 验收时 471 用例；当前全量基线 832 用例，含部署清单 39 项静态校验）。
+- 全量单测零回归（b9 验收时 471 用例；当前全量基线 836 用例，含部署清单 39 项静 态校验）。
 
 ### 5.5 生产接线点清单（按需启用）
 
@@ -584,7 +586,7 @@ docker compose --profile obs up -d    # Prometheus http://127.0.0.1:9095 / Grafa
 
 | # | 验证项 | 方法 | 通过标准 |
 | --- | --- | --- | --- |
-| 1 | 单元测试 | `.venv/bin/python -m unittest discover -s tests -t .` | 832 用例全绿 |
+| 1 | 单元测试 | `.venv/bin/python -m unittest discover -s tests -t .` | 836 用例全绿 |
 | 2 | 策略校验 | 启动 worker | 打印策略快照；非法 YAML 启动即失败 |
 | 3 | 向量检索 | `index_codebase.py --query ...` | 返回相似度有序的代码块/工单 |
 | 4 | 双后端一致性（可选） | 分别以 `AIOPS_VECTOR_BACKEND=faiss/python` 检索同一 query | 结果与相似度一致 |
@@ -597,6 +599,8 @@ docker compose --profile obs up -d    # Prometheus http://127.0.0.1:9095 / Grafa
 | 11 | 生产冒烟（production 模式） | `.venv/bin/python scripts/production-smoke.py` | 9 项检查全绿（MySQL 建表/审计/令牌指纹/应用 CRUD/workflow_runs/kill switch/清理预演） |
 | 12 | K8s 清单静态校验 | `.venv/bin/python -m unittest tests.test_deploy_manifests` | 39 用例（含 144 子断言）全绿 |
 | 13 | 组件守护自愈 | `pkill -f app_prober.py` 后等待 ≤30 秒 | 巡检被自动拉起（`bash scripts/demo-up.sh status` 全绿） |
+| 14 | 备份可恢复 | `.venv/bin/python scripts/backup-data.py && .venv/bin/python scripts/backup-data.py --restore-test` | 备份生成；演练临时库表数与源库一致 |
+| 15 | 开机自启（可选） | `bash scripts/launchd-install.sh install` → `status` | `state = running` 且守护进程唯一 |
 
 ---
 
@@ -631,6 +635,7 @@ docker compose --profile obs up -d    # Prometheus http://127.0.0.1:9095 / Grafa
 | 采集位点 | `ship_app_logs.log` / `data/log_ship_positions.json` | 日志采集进度（重启不重复推送） |
 | 突增检测 | `log_surge_detector.log` | 每轮统计与告警注入 |
 | 组件守护 | `aiops_watchdog.log` | 组件巡检与自动拉起记录 |
+| 备份归档 | `backups/aiops-backup-*.tar.gz`（600） | MySQL 导出 + data 关键 JSON + .env；`scripts/backup-data.py` 生成 |
 | 令牌注册表 | `data/console_tokens.json`（demo） | 权限 600，含明文令牌，勿提交 |
 | Qoder 工作区 | `data/qoder/` | Qoder 修复引擎隔离工作区（保留期内由清理任务回收） |
 
@@ -644,10 +649,37 @@ docker compose --profile obs up -d    # Prometheus http://127.0.0.1:9095 / Grafa
 | 代码升级 | 拉取新代码 → 重装依赖 → 全量单测 → 重启 worker/接入服务/BFF；前端有变更时 `cd web && npm run build` 后再重启 BFF |
 | 回滚 | 代码回滚后重启进程；容器侧稳定版本由发布链路自身保障（金丝雀劣化时稳定容器不动） |
 
-### 7.4 数据清理建议
+### 7.4 数据清理与日志轮转
 
-- 可安全清理：`data/notify/`、`data/argocd/`（审计归档后）、`data/sandbox-eval/`；旧 `data/sandbox/<patch_id>/`（确认无镜像构建引用后）；
+- 沙箱产物（TTL 自动化）：`bash scripts/cleanup-sandbox.sh`（默认清理 `data/sandbox/`、`data/qoder/` 中 7 天前产物；`--dry-run` 预演 / `--status` 只看占用 / `--days N` 调整保留期）；
+- 日志轮转：`bash scripts/rotate-logs.sh`（copytruncate：>1MB 的 `*.log` 压缩为 `.1.gz` 轮转、保留 7 份，进程无需重启）；
+- doctor 的「磁盘水位」项低于 20% 时会指向以上两个工具；
+- 手工清理参考——可安全清理：`data/notify/`、`data/argocd/`（审计归档后）、`data/sandbox-eval/`；旧 `data/sandbox/<patch_id>/`（确认无镜像构建引用后）；
 - 谨慎清理：`data/code_index.*`（清理后检索降级为空引用，需重建）；`data/sandbox/` 根目录勿整体删除（发布链路会复用最近工作区）。
+
+### 7.5 备份与恢复（MySQL + 关键 JSON）
+
+```bash
+.venv/bin/python scripts/backup-data.py                # 全量备份 → backups/aiops-backup-<时间>.tar.gz（600 权限，默认保留 7 份）
+.venv/bin/python scripts/backup-data.py --list         # 列出已有备份
+.venv/bin/python scripts/backup-data.py --restore-test # 恢复演练：最新归档灌入 aiops_restore_drill 临时库并对比表数（自动清理）
+```
+
+- 归档内容：MySQL 全库导出（`--single-transaction`，gzip）+ `data/` 下 9 个关键 JSON（应用清单 / 控制台用户与令牌 / 升级记录 / 采集位点等）+ `.env`（含密钥，故归档 600、目录 700，勿外传）；
+- 真实恢复：`tar xzf backups/aiops-backup-*.tar.gz` → `gunzip -c mysql/aiops.sql.gz | mysql -u<user> -p`；`data_files/*` 拷回 `data/`，`env/.env` 拷回工程根；
+- 恢复演练依赖 `aiops-mysql` 容器 root 通道（在容器内建临时库验证），`--keep-drill` 保留演练库供人工检查。
+
+### 7.6 开机自启（launchd，macOS）
+
+```bash
+bash scripts/launchd-install.sh install    # 安装：登录自启 + 崩溃自动重启（仅托管 watchdog 一个进程，6 组件由其巡检拉起）
+bash scripts/launchd-install.sh status     # 查看托管状态与守护进程
+bash scripts/launchd-install.sh uninstall  # 卸载（常驻组件保持运行）
+```
+
+- 安装时自动接管手动启动的守护（组件不中断）；KeepAlive=SuccessfulExit:false + 30s 节流：正常退出（如单实例锁被占）不重启、崩溃才重启；
+- `bash scripts/demo-up.sh down` 检测到 launchd 托管会先临时摘除任务（下次登录随 plist 恢复）；永久停用请用 `uninstall`；
+- 模板：`deploy/launchd/com.aiops.watchdog.plist`（安装时替换 `__ROOT__` / `__PYTHON__` 占位符写入 `~/Library/LaunchAgents/`）。
 
 ---
 
@@ -696,7 +728,7 @@ aiops-agent/
 ├── demo-app/                   # 演示被修复的服务（源码 + tests + Dockerfile + http_server）
 ├── scripts/                    # demo-up.sh（一键编排）/ aiops-watchdog.py（组件守护）/
 │                               # production-smoke.py / security-scan.sh / scenarios/**（8 场景剧本）
-├── tests/                      # 单元测试（37 个测试文件 / 832 用例）
+├── tests/                      #  单元测试（37 个测试文件 / 836 用例）
 ├── monitoring/                 # Alertmanager 路由注入脚本
 ├── prometheus/                 # 告警规则样例
 ├── data/                       # 索引 / 留痕 / 沙箱工作区 / 评测报告（运行期生成）

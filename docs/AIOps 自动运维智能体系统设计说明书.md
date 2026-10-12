@@ -2,12 +2,12 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 文档版本 | v1.1 |
-| 日期 | 2026-10-01（v1.1 修订 2026-10-12） |
+| 文档版本 | v1.2 |
+| 日期 | 2026-10-01（v1.2 修订 2026-10-12） |
 | 状态 | 已实现系统（与 aiops-agent/ 工程代码逐项对齐） |
 | 关联文档 | 《AIOps 自动运维智能体系统设计方案》v1.1、《AIOps 自动运维智能体系统实施计划》v1.0、《用户操作手册》、《部署手册》 |
 | 适用范围 | 应用服务器异常自愈、AI 辅助代码修复与自动化发布（含演示环境全链路） |
-| 修订记录 | v1.1：测试基线 832 用例；默认模型切换 qwen3.8:27b-mlx；新增 Qoder 修复引擎（4.3.3）、需求分析闭环（4.9）、可用性巡检/日志采集/组件守护；BFF 路由扩至 11 域 |
+| 修订记录 | v1.2：测试基线 836 用例；运维治理加固：组件守护单实例锁与档位锁定+一致性校验、开机自启（launchd）、备份与恢复演练、数据清理与日志轮转、doctor 磁盘水位检查、启动档位横幅；v1.1：测试基线 832 用例；默认模型切换 qwen3.8:27b-mlx；新增 Qoder 修复引擎（4.3.3）、需求分析闭环（4.9）、可用性巡检/日志采集/组件守护；BFF 路由扩至 11 域 |
 
 ---
 
@@ -17,7 +17,7 @@
 
 本文档描述 AIOps 自动运维智能体**已落地实现**的系统设计：五层架构、Temporal 工作流编排、三道闸门、各模块真实实现细节、接口契约与容错机制。与《设计方案》（顶层设计）和《实施计划》（工作包拆解）配套，供开发维护、评审验收与生产化改造参照。
 
-本文所有接口名、配置键、环境变量、数据字段均与 `aiops-agent/` 工程代码一一对应，行文中的行为描述已通过单元测试（832 个用例，2026-10-12 基线）与端到端实测验证。
+本文所有接口名、配置键、环境变量、数据字段均与 `aiops-agent/` 工程代码一一对应，行文中的行为描述已通过单元测试（836 个用例，2026-10-12 基线）与端到端实测验证。
 
 ### 1.2 系统定位
 
@@ -123,7 +123,7 @@
 | 应用注册表 | `aiops_agent/app_registry.py`、`app_manifest.py` | 清单/Manifest → 修复契约（关键字/健康路径/专属索引/仓库定位） |
 | 变更关联 | `aiops_agent/changes.py` | 最近发布/配置变更注入 triage 上下文（双通道变更源：外部 feed + ArgoCD 留痕） |
 | 控制台 | `bff/` + `web/` | FastAPI BFF（11 域路由，:8600）+ React SPA（同源托管，局域网可访问） |
-| 组件守护与编排 | `scripts/aiops-watchdog.py`、`scripts/demo-up.sh` | 6 常驻组件巡检自动拉起 / 一键启动停止与状态 |
+| 组件守护与编排 | `scripts/aiops-watchdog.py`、`scripts/demo-up.sh` | 6 常驻组件巡检自动拉起（单实例锁 + 档位锁定/一致性校验，可交 launchd 托管）/ 一键启动停止与状态（含档位横幅） |
 | 生产交付物 | `deploy/` | Dockerfile、K8s 清单 12 文件（38 资源）、Prometheus、Grafana |
 
 ### 2.3 技术栈
@@ -538,7 +538,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 
 ## 8 质量保障与评测体系
 
-### 8.1 单元测试矩阵（37 个测试文件 / 832 用例，全绿）
+### 8.1 单元测试矩阵（37 个测试文件 / 836 用例，全绿）
 
 | 测试文件 | 覆盖范围 |
 | --- | --- |
@@ -557,7 +557,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 | `tests/test_kill_switch.py` / `test_cleanup.py` | 紧急停止（fail-closed）、TTL 清理与 dry-run |
 | `tests/test_git_integration.py` / `test_qoder_fix.py` | MR 三平台创建/降级、Qoder 修复接入 |
 | `tests/test_ratelimit.py` / `test_ship_app_logs.py` | 限速窗口（Redis/进程内）、日志采集器（清单模式/位点） |
-| `tests/test_watchdog.py` / `test_page_health.py` / `test_app_prober.py` | 组件守护（冷却/拉起）、通用白屏判据、可用性巡检（防抖/告警/状态落盘） |
+| `tests/test_watchdog.py` / `test_page_health.py` / `test_app_prober.py` | 组件守护（冷却/拉起/档位锁定/单实例锁）、通用白屏判据、可用性巡检（防抖/告警/状态落盘） |
 | `tests/test_requirements.py` / `test_bff_requirements.py` / `test_requirement_analyses.py` / `test_requirement_agent.py` / `test_requirement_workflow.py` | 需求基线：客户端/域路由/分析闭环存储/分析器降级/工作流信号兼容 |
 | `tests/test_escalations.py` / `test_auth_users.py` / `test_ops_metrics.py` | 转人工处置闭环（SLA 巡检）、用户与会话（登录/改密/吊销）、运营度量（MTTR/比率） |
 | `tests/test_app_manifest.py` / `test_changes.py` / `test_release_direct.py` / `test_worker_registry.py` | Manifest 校验与探测、变更关联、直连发布、活动注册表防回归 |

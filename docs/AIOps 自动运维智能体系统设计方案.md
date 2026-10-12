@@ -229,7 +229,7 @@ NOTIFYING（倒计时中）
 
 ## 8. 工程实现概要
 
-> 本节已按最新工程现状同步（2026-10）。演示期桩已全部真实化：真实 LLM 根因/修复、Docker 沙箱验证、金丝雀发布与自动回滚、飞书/钉钉通知、三平台 MR 创建、控制台 BFF 与前端 SPA、可用性巡检与日志采集闭环；全量单测 832 用例。
+> 本节已按最新工程现状同步（2026-10）。演示期桩已全部真实化：真实 LLM 根因/修复、Docker 沙箱验证、金丝雀发布与自动回滚、飞书/钉钉通知、三平台 MR 创建、控制台 BFF 与前端 SPA、可用性巡检与日志采集闭环、运维治理（清理/轮转/备份/launchd/档位横幅）；全量单测 836 用例。
 
 ```text
 aiops-agent/                          # 单一代码库、双模运行（production 默认 / demo 演示）
@@ -244,7 +244,7 @@ aiops-agent/                          # 单一代码库、双模运行（product
 │   ├── git_integration.py            # GitLab / GitHub / Gitee MR 真实创建
 │   └── ...（app_registry / kill_switch / cleanup / db / metrics / tracing 等）
 ├── bff/ + web/                       # 控制台：FastAPI BFF（:8600，11 域路由）+ React SPA
-├── demo-app/ + tests/                # 演示被修复服务 / 单元测试（832 用例）
+├── demo-app/ + tests/                # 演示被修复服务 / 单元测试（836 用例）
 ├── scripts/demo-up.sh                # 一键编排 6 常驻组件 + 组件守护（watchdog）
 ├── release-gate-policy.yaml / demo-policy.yaml   # 生产 / 演示加速策略
 └── demo_cli.py                       # 操作 CLI（start/status/approve/deploy-now/queue-patch）

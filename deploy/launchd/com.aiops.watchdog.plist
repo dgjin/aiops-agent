@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  组件守护开机自启模板（launchd 用户级代理）——由 scripts/launchd-install.sh 安装时
+  替换 __ROOT__ / __PYTHON__ 两个占位符后写入 ~/Library/LaunchAgents/ 并 bootstrap。
+  只托管 watchdog 一个进程；6 个业务组件仍由 watchdog 巡检拉起。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aiops.watchdog</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON__</string>
+        <string>__ROOT__/scripts/aiops-watchdog.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__ROOT__</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- 仅崩溃（信号/异常退出）时重启；正常退出（如单实例锁被占，退出码 0）不重启 -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <!-- 重启限速：距上次退出不足 30s 不重启（防风暴；watchdog 内还有 RestartGuard 兜底） -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>__ROOT__/aiops_watchdog.log</string>
+    <key>StandardErrorPath</key>
+    <string>__ROOT__/aiops_watchdog.log</string>
+</dict>
+</plist>

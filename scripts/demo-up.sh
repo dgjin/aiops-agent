@@ -11,7 +11,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 PY="$ROOT/.venv/bin/python"
-export AIOPS_MODE="${AIOPS_MODE:-demo}"   # 演示强制文件后端，绝不触达生产 MySQL
+export AIOPS_MODE="${AIOPS_MODE:-demo}"   # 缺省 demo；外部 export 可覆盖（横幅如实展示生效档位）
 export AIOPS_POLICY_PATH="${AIOPS_POLICY_PATH:-./demo-policy.yaml}"
 SERVICE="${AIOPS_DEMO_SERVICE:-order}"
 ALERT_ID="demo-$(date +%H%M%S)"
@@ -62,7 +62,23 @@ wait_http() { # url timeout_s
   return 1
 }
 
+# 档位横幅（P2-1）：如实展示生效档位，防「以为是 demo、实际跑 production」的档位混用
+show_mode_banner() {
+  if [ "${AIOPS_MODE}" = "demo" ]; then
+    echo "${c_green}== 档位：demo（演示）==${c_reset} 策略 ${AIOPS_POLICY_PATH}（数据走文件/演示容器，不触达生产 MySQL）"
+  else
+    echo "${c_red}== 档位：${AIOPS_MODE}（非演示档！外部环境变量覆盖了缺省 demo）==${c_reset} 策略 ${AIOPS_POLICY_PATH}"
+    warn "演示操作请先 unset AIOPS_MODE；正式环境使用本脚本仅建议 down/status"
+  fi
+}
+
 cmd_down() {
+  # launchd 托管场景：先摘任务，否则 KeepAlive 会把被停守护立即拉起
+  local domain="gui/$(id -u)"
+  if launchctl print "${domain}/com.aiops.watchdog" >/dev/null 2>&1; then
+    launchctl bootout "${domain}/com.aiops.watchdog" >/dev/null 2>&1 \
+      && warn "watchdog 由 launchd 托管：已临时卸载（下次登录会随 plist 自动恢复；永久停用执行 bash scripts/launchd-install.sh uninstall）"
+  fi
   # 先停守护再停组件，否则被停组件会被守护就地复活（组件守护专门守护这 6 个组件）
   pkill -f "aiops-watchdog.py" 2>/dev/null && info "组件守护已停止" || warn "组件守护本未运行"
   pkill -f "aiops_agent.worker" 2>/dev/null && info "worker 已停止" || warn "worker 本未运行"
@@ -95,6 +111,9 @@ cmd_status() {
   running "ship_app_logs.py" && info "日志采集器运行中（被监控应用日志 → Loki）" || { warn "日志采集器未运行"; ok=1; }
   running "log_surge_detector.py" && info "突增检测器运行中（错误日志突增 → 自动修复流程）" || { warn "突增检测器未运行"; ok=1; }
   running "aiops-watchdog.py" && info "组件守护运行中（每 30 秒巡检 6 组件，异常自动拉起）" || { warn "组件守护未运行"; ok=1; }
+  if launchctl print "gui/$(id -u)/com.aiops.watchdog" >/dev/null 2>&1; then
+    info "watchdog 由 launchd 托管（登录自启 / 崩溃自动重启；状态 bash scripts/launchd-install.sh status）"
+  fi
   if docker info >/dev/null 2>&1; then
     docker ps --format '{{.Names}}' | grep -qx aiops-temporal && info "Temporal 运行中（127.0.0.1:7233）" || { warn "Temporal 未运行"; ok=1; }
     docker ps --format '{{.Names}}' | grep -qx aiops-loki && info "Loki 运行中（http://localhost:3101）" || { warn "Loki 未运行"; ok=1; }
@@ -133,6 +152,7 @@ cmd_env() {
 }
 
 cmd_up() {
+  show_mode_banner
   cmd_env
 
   echo "${c_dim}== 1/10 环境自检 ==${c_reset}"

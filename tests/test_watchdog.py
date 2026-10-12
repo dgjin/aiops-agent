@@ -122,5 +122,53 @@ class TestComponentTable(unittest.TestCase):
         self.assertEqual(surge.cmd[-4:], ("--min-lines", "100", "--factor", "3"))
 
 
+class TestModeAndLock(unittest.TestCase):
+    """档位锁定与单实例锁（P1/P2）：防档位混用、防双守护。"""
+
+    def test_env_mode_wins_over_dotenv(self) -> None:
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"AIOPS_MODE": "demo"}):
+            self.assertEqual(watchdog._effective_mode(), ("demo", "环境变量"))
+
+    def test_fallback_chain_when_env_missing(self) -> None:
+        import os
+        from unittest import mock
+
+        env = {k: v for k, v in os.environ.items() if k != "AIOPS_MODE"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch.object(watchdog, "_read_env_mode", return_value="demo"):
+                self.assertEqual(watchdog._effective_mode(), ("demo", ".env"))
+            with mock.patch.object(watchdog, "_read_env_mode", return_value=None):
+                self.assertEqual(watchdog._effective_mode(), ("production", "默认值"))
+
+    def test_component_env_locks_mode_and_demo_policy(self) -> None:
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"AIOPS_MODE": "demo"}, clear=True):
+            env = watchdog._component_env()
+        self.assertEqual(env["AIOPS_MODE"], "demo")
+        self.assertEqual(env["AIOPS_POLICY_PATH"], "./demo-policy.yaml")
+        with mock.patch.dict(os.environ, {"AIOPS_MODE": "production"}, clear=True):
+            env = watchdog._component_env()
+        self.assertEqual(env["AIOPS_MODE"], "production")
+        self.assertNotIn("AIOPS_POLICY_PATH", env)  # 生产档不注入演示策略
+
+    def test_acquire_lock_single_instance(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "wd.lock"
+            first = watchdog.acquire_lock(LOGGER, path=path)
+            self.assertIsNotNone(first)
+            self.assertIsNone(watchdog.acquire_lock(LOGGER, path=path))  # 第二实例被拒
+            first.close()  # 释放锁
+            third = watchdog.acquire_lock(LOGGER, path=path)
+            self.assertIsNotNone(third)
+            third.close()
+
+
 if __name__ == "__main__":
     unittest.main()

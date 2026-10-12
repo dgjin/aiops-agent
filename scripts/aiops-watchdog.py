@@ -6,17 +6,23 @@
 demo-up.sh 同款命令拉起，并写入日志。
 
 不变量：
-    - 不覆盖任何环境变量：完全继承启动时的环境（demo-up.sh 以 demo 档启动本守护，则被拉起的
-      组件保持 demo 档；单独启动时组件各自加载工程根 .env，与手动启动行为一致）；
+    - 档位锁定（P1）：守护启动时解析一次生效档位（环境变量 > .env > production，与
+      config.load_dotenv(override=False) 语义一致），拉起的组件显式继承该档位；
+      demo 档且未显式配置策略时自动补齐 ./demo-policy.yaml（与 demo-up.sh 成对语义），
+      防止 .env 与启动环境不一致造成「档位混用」；
+    - 单实例锁（P1）：常驻模式经 data/aiops-watchdog.lock（fcntl.flock）防双守护——
+      launchd 托管与手动启动并存时，后到者检测到锁占用即退出（退出码 0，配合 launchd
+      KeepAlive=SuccessfulExit:false 不触发重启），由在跑实例负责；
     - 组件以独立会话（start_new_session）脱离进程组运行，语义同手动 nohup，日志追加到各自
       *.log（与 demo-up.sh 相同文件）；
     - 停止全部组件的正确姿势是 `bash scripts/demo-up.sh down`（先停本守护再停组件，
-      否则组件会被守护原地复活）。
+      否则组件会被守护原地复活）；launchd 托管时用 `bash scripts/launchd-install.sh uninstall`。
 
 用法：
     python3 scripts/aiops-watchdog.py              # 常驻守护（建议 nohup 后台运行）
     python3 scripts/aiops-watchdog.py --once       # 单轮巡检后退出（排查/CI 用）
     python3 scripts/aiops-watchdog.py --status     # 只看存活状态（有任何缺失退出码 1）
+    bash scripts/launchd-install.sh install        # 开机自启（launchd 用户级托管，可卸载）
     环境变量：AIOPS_WATCHDOG_INTERVAL（巡检周期秒，默认 30）；
              AIOPS_WATCHDOG_SURGE_ARGS（突增检测器拉起参数覆盖，默认与 demo-up.sh 演示值一致）
 """
@@ -24,6 +30,7 @@ demo-up.sh 同款命令拉起，并写入日志。
 from __future__ import annotations
 
 import argparse
+import fcntl
 import logging
 import os
 import subprocess
@@ -40,6 +47,9 @@ if not PY.exists():  # 无 venv 时退回当前解释器（与 security-scan.sh 
 DEFAULT_INTERVAL = 30.0
 # 与 demo-up.sh 演示灵敏度一致（生产建议 --min-lines 100 --factor 3，可用环境变量覆盖）
 DEFAULT_SURGE_ARGS = "--min-lines 5 --factor 2 --cooldown 300"
+
+# 单实例锁（P1）：常驻模式独占，防止 launchd 托管与手动启动双守护并存
+LOCK_PATH = ROOT / "data" / "aiops-watchdog.lock"
 
 
 @dataclass(frozen=True)
@@ -82,6 +92,65 @@ def build_components() -> tuple[Component, ...]:
     )
 
 
+def _read_env_mode() -> str | None:
+    """工程根 .env 中的 AIOPS_MODE（惰性读取：测试以 importlib 加载本文件，模块级禁止 IO）。"""
+    try:
+        for line in (ROOT / ".env").read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, raw = line.partition("=")
+            if key.strip() == "AIOPS_MODE":
+                value = raw.strip().strip("'\"")
+                if value:
+                    return value
+    except OSError:
+        return None
+    return None
+
+
+def _effective_mode() -> tuple[str, str]:
+    """生效档位与来源：环境变量 > .env > production（与 config.load_dotenv 优先级一致）。"""
+    env_mode = os.environ.get("AIOPS_MODE")
+    if env_mode:
+        return env_mode, "环境变量"
+    file_mode = _read_env_mode()
+    if file_mode:
+        return file_mode, ".env"
+    return "production", "默认值"
+
+
+def _component_env() -> dict[str, str]:
+    """组件子进程环境：显式锁定生效档位；demo 档未配策略时补齐 demo-policy（同 demo-up.sh）。"""
+    env = dict(os.environ)
+    mode, _ = _effective_mode()
+    env["AIOPS_MODE"] = mode
+    if mode == "demo" and not env.get("AIOPS_POLICY_PATH"):
+        env["AIOPS_POLICY_PATH"] = "./demo-policy.yaml"
+    return env
+
+
+def acquire_lock(logger: logging.Logger, path: Path | None = None) -> object | None:
+    """单实例锁：返回持锁文件对象；被占用返回 None；锁文件不可建时返回 True 哨兵（放行并告警）。"""
+    lock_path = path or LOCK_PATH
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path, "a+", encoding="utf-8")
+    except OSError as exc:
+        logger.warning("单实例锁不可用（%s）：%s —— 跳过加锁继续运行", lock_path, exc)
+        return True
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"pid={os.getpid()}\n")
+    handle.flush()
+    return handle
+
+
 def is_running(pattern: str) -> bool:
     """pgrep -f 判活（与 demo-up.sh 的 running() 等价）。"""
     return (
@@ -100,6 +169,7 @@ def start_component(comp: Component) -> int:
         proc = subprocess.Popen(
             comp.cmd,
             cwd=ROOT,
+            env=_component_env(),
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -217,6 +287,19 @@ def main() -> None:
         restarted = check_once(components, guard, time.monotonic(), logger, dry_run=args.dry_run)
         logger.info("单轮巡检完成：拉起 %d 个组件", restarted)
         return
+    # 常驻模式：单实例锁 + 档位锁定（P1/P2）
+    lock = acquire_lock(logger)
+    if lock is None:
+        logger.warning("已有组件守护在运行（%s 被占用），本进程退出（组件保持现状）", LOCK_PATH)
+        return
+    mode, source = _effective_mode()
+    logger.info("档位锁定：%s（来源 %s）——后续拉起的组件统一使用该档位", mode, source)
+    file_mode = _read_env_mode()
+    if file_mode and file_mode != mode:
+        logger.warning(
+            "档位不一致：生效 %s（%s）≠ .env %s —— 拉起的组件将使用生效档位（有意覆盖可忽略）",
+            mode, source, file_mode,
+        )
     try:
         while True:
             try:

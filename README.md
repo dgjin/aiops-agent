@@ -79,7 +79,7 @@ cd aiops-agent
 bash scripts/demo-up.sh        # 等价底层脚本（子命令 up/env/down/down-all/status；start.sh 为其薄封装）
 ```
 
-脚本会自动完成依赖探活，后台常驻启动 worker / BFF / 告警接入 / 可用性巡检 / **日志采集（ship_app_logs --follow）** / **错误日志突增检测（log_surge_detector）**，再灌入演示日志、启动一个修复流程，并打印控制台地址与后续操作提示。第 8 步额外启动**组件守护（aiops-watchdog.py）**：每 30 秒巡检 6 个组件，任一崩溃自动拉起；同一组件在窗口内反复崩溃时自动冷却（防拉起风暴）。状态可用 `python3 scripts/aiops-watchdog.py --status` 单独查看。
+脚本会自动完成依赖探活，后台常驻启动 worker / BFF / 告警接入 / 可用性巡检 / **日志采集（ship_app_logs --follow）** / **错误日志突增检测（log_surge_detector）**，再灌入演示日志、启动一个修复流程，并打印控制台地址与后续操作提示。启动时打印**档位横幅**（缺省 demo；外部 `AIOPS_MODE` 覆盖时红字警示），防演示/生产档位混用。第 8 步额外启动**组件守护（aiops-watchdog.py）**：每 30 秒巡检 6 个组件，任一崩溃自动拉起；同一组件在窗口内反复崩溃时自动冷却（防拉起风暴）。守护启动时获取**单实例锁**（`data/aiops-watchdog.lock`，防双守护）并**锁定生效档位**显式传给被拉起组件。状态可用 `python3 scripts/aiops-watchdog.py --status` 单独查看；可选 `bash scripts/launchd-install.sh install` 交由 launchd 托管（登录自启、崩溃自动重启）。
 
 ---
 
@@ -92,7 +92,7 @@ cd aiops-agent
 .venv/bin/python demo_cli.py doctor
 ```
 
-输出逐项 ✅/❌ 检查结果（Temporal / Loki / Ollama / Docker / 策略 / 前端构建 / 日志新鲜度），并给出修复建议。
+输出逐项 ✅/❌ 检查结果（Temporal / Loki / Ollama / Docker / 策略 / 前端构建 / BFF 控制台 / 磁盘水位），并给出修复建议。
 
 ---
 
@@ -110,6 +110,10 @@ cd aiops-agent
 | 环境自检 | `demo_cli.py doctor` |
 | 突增检测（单轮） | `log_surge_detector.py --once` |
 | 组件守护状态 | `python3 scripts/aiops-watchdog.py --status` |
+| 数据清理 | `bash scripts/cleanup-sandbox.sh [--dry-run\|--status]` |
+| 日志轮转 | `bash scripts/rotate-logs.sh [--dry-run]` |
+| 数据备份 / 恢复演练 | `python scripts/backup-data.py [--restore-test]` |
+| 开机自启托管 | `bash scripts/launchd-install.sh install\|uninstall\|status` |
 | 需求基线分析 | `analyze_requirements.py --url http://localhost:3000` |
 | 灌演示日志 | `demo_log_generator.py --service order --mode surge --count 800` |
 
