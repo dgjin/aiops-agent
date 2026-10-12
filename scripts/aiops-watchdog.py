@@ -59,7 +59,8 @@ def build_components() -> tuple[Component, ...]:
         ),
         Component(
             "bff", "uvicorn bff.app:app",
-            (str(PY), "-m", "uvicorn", "bff.app:app", "--host", "127.0.0.1", "--port", "8600"),
+            # 监听全部网卡（0.0.0.0）：本机 127.0.0.1 与局域网地址均可访问控制台
+            (str(PY), "-m", "uvicorn", "bff.app:app", "--host", "0.0.0.0", "--port", "8600"),
             ROOT / "bff.log",
         ),
         Component(

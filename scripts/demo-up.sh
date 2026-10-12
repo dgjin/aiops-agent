@@ -24,6 +24,8 @@ SURGE_LOG="$ROOT/log_surge_detector.log"
 WATCHDOG_LOG="$ROOT/aiops_watchdog.log"
 TEMPORAL_ADDR="127.0.0.1:7233"
 LOKI_URL="http://localhost:3101"
+# 本机局域网 IP（用于提示控制台局域网地址；取不到则留空，不影响启动）
+LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
 
 c_green=$'\033[32m'; c_red=$'\033[31m'; c_yellow=$'\033[33m'; c_dim=$'\033[2m'; c_reset=$'\033[0m'
 info()  { echo "${c_green}✔${c_reset} $*"; }
@@ -87,7 +89,7 @@ cmd_down_all() {
 cmd_status() {
   local ok=0
   running "aiops_agent.worker" && info "worker 运行中" || { warn "worker 未运行"; ok=1; }
-  running "uvicorn bff.app:app" && info "BFF 运行中（http://127.0.0.1:8600）" || { warn "BFF 未运行"; ok=1; }
+  running "uvicorn bff.app:app" && info "BFF 运行中（http://127.0.0.1:8600${LAN_IP:+，局域网 http://${LAN_IP}:8600}）" || { warn "BFF 未运行"; ok=1; }
   running "alert_webhook.py" && info "告警接入服务运行中（127.0.0.1:8099）" || { warn "告警接入服务未运行"; ok=1; }
   running "app_prober.py" && info "可用性巡检运行中（被监控应用 → 自动修复流程）" || { warn "可用性巡检未运行"; ok=1; }
   running "ship_app_logs.py" && info "日志采集器运行中（被监控应用日志 → Loki）" || { warn "日志采集器未运行"; ok=1; }
@@ -156,8 +158,8 @@ cmd_up() {
   if running "uvicorn bff.app:app"; then
     info "BFF 已在运行，跳过"
   else
-    nohup "$PY" -m uvicorn bff.app:app --host 127.0.0.1 --port 8600 >>"$BFF_LOG" 2>&1 &
-    wait_up "uvicorn bff.app:app" && info "BFF 已启动（http://127.0.0.1:8600，日志 ${BFF_LOG}）" || { err "BFF 启动失败，见 ${BFF_LOG}"; exit 1; }
+    nohup "$PY" -m uvicorn bff.app:app --host 0.0.0.0 --port 8600 >>"$BFF_LOG" 2>&1 &
+    wait_up "uvicorn bff.app:app" && info "BFF 已启动（http://127.0.0.1:8600${LAN_IP:+，局域网 http://${LAN_IP}:8600}，日志 ${BFF_LOG}）" || { err "BFF 启动失败，见 ${BFF_LOG}"; exit 1; }
   fi
 
   echo "${c_dim}== 4/10 启动告警接入服务 ==${c_reset}"
@@ -212,7 +214,7 @@ cmd_up() {
   cat <<EOF
 
 ${c_green}启动完成${c_reset}
-  控制台：  http://127.0.0.1:8600
+  控制台：  http://127.0.0.1:8600${LAN_IP:+（局域网 http://${LAN_IP}:8600）}
   工作流：  aiops-fix-$SERVICE-$ALERT_ID
   巡检：    每 15 秒探测「被监控应用」，连续 3 次不可达自动触发修复流程
   日志：    被监控应用日志 → Loki → 突增检测（每 15 秒）→ 自动发起修复流程

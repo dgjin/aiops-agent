@@ -44,11 +44,11 @@ docker compose up -d
 # 4. 启动 worker（终端 1，保持运行）
 AIOPS_POLICY_PATH=./demo-policy.yaml .venv/bin/python -m aiops_agent.worker
 
-# 5. 启动 BFF 控制台（终端 2，保持运行）
-AIOPS_POLICY_PATH=./demo-policy.yaml .venv/bin/uvicorn bff.app:app --host 127.0.0.1 --port 8600
+# 5. 启动 BFF 控制台（终端 2，保持运行；0.0.0.0 监听全部网卡，局域网设备也可访问）
+AIOPS_POLICY_PATH=./demo-policy.yaml .venv/bin/uvicorn bff.app:app --host 0.0.0.0 --port 8600
 ```
 
-打开控制台：**http://127.0.0.1:8600**
+打开控制台：**http://127.0.0.1:8600**（局域网设备：**http://<本机IP>:8600**）
 
 ### 跑一个真实修复流程（终端 3）
 

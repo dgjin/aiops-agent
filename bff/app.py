@@ -13,7 +13,8 @@
 - 本模块只保留：lifespan、异常处理器、中间件与路由挂载、静态托管、可选 tracing。
 
 运行（工程根目录）：
-    .venv/bin/uvicorn bff.app:app --host 127.0.0.1 --port 8600
+    .venv/bin/uvicorn bff.app:app --host 0.0.0.0 --port 8600
+（--host 0.0.0.0 监听全部网卡：本机 127.0.0.1 与局域网地址均可访问控制台）
 """
 
 from __future__ import annotations
