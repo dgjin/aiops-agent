@@ -140,7 +140,7 @@ function SortableTh({
   const Icon = active ? (sort.dir === 'asc' ? ArrowUp : ArrowDown) : ArrowUpDown
   return (
     <th
-      className="px-3 py-2 font-medium"
+      className="whitespace-nowrap px-3 py-2 font-medium"
       aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : undefined}
     >
       <button
@@ -626,20 +626,21 @@ export function Requirements() {
                         sort={sort}
                         onToggle={toggleSort}
                       />
-                      <th className="px-3 py-2 font-medium">智能分析</th>
+                      <th className="whitespace-nowrap px-3 py-2 font-medium">智能分析</th>
                     </tr>
                   </thead>
                   <tbody>
                     {paged.map((entry) => (
                       <tr key={String(entry.id)} className="border-b border-line/60 last:border-0">
-                        <td className="px-3 py-2 font-mono text-muted">{entry.id}</td>
-                        <td className="px-3 py-2 text-muted">
+                        <td className="whitespace-nowrap px-3 py-2 font-mono text-muted">{entry.id}</td>
+                        <td className="whitespace-nowrap px-3 py-2 text-muted">
                           {KIND_LABELS[entry.kind] ?? (entry.kind || '—')}
                         </td>
-                        <td className="px-3 py-2">
+                        <td className="whitespace-nowrap px-3 py-2">
                           <PriorityBadge priority={entry.priority} />
                         </td>
-                        <td className="max-w-md px-3 py-2">
+                        {/* 标题列上限 20rem：保证表格在 1280 宽视口无横向滚动（超长省略 + 悬停看全） */}
+                        <td className="max-w-[20rem] px-3 py-2">
                           <div className="truncate" title={entry.title}>
                             {entry.title}
                           </div>
@@ -649,15 +650,25 @@ export function Requirements() {
                             </div>
                           )}
                         </td>
-                        <td className="px-3 py-2 text-muted">{entry.baselineVersion || '—'}</td>
-                        <td className="px-3 py-2 text-muted">
-                          {entry.submitter || '—'}
-                          {entry.department ? ` · ${entry.department}` : ''}
+                        <td className="whitespace-nowrap px-3 py-2 text-muted">
+                          {entry.baselineVersion || '—'}
                         </td>
                         <td className="px-3 py-2 text-muted">
+                          {/* 单行展示（不折行）：超长部门省略号 + 悬停看全 */}
+                          <div
+                            className="max-w-[9rem] truncate"
+                            title={
+                              [entry.submitter, entry.department].filter(Boolean).join(' · ') || '—'
+                            }
+                          >
+                            {entry.submitter || '—'}
+                            {entry.department ? ` · ${entry.department}` : ''}
+                          </div>
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-2 text-muted">
                           {entry.updatedAt ? fmtDateTime(entry.updatedAt) : '—'}
                         </td>
-                        <td className="px-3 py-2">
+                        <td className="whitespace-nowrap px-3 py-2">
                           <AnalysisButton
                             summary={analysisMap.get(String(entry.id))}
                             onOpen={() => openAnalysis(entry)}
