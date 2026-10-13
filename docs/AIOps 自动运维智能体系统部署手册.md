@@ -79,7 +79,7 @@ export AIOPS_POLICY_PATH=./demo-policy.yaml
 .venv/bin/python demo_cli.py start --service order --alert-id smoke-001
 ```
 
-> **更省事的方式**：`bash scripts/demo-up.sh` 一键完成环境准备（Colima/Temporal/Loki 容器）、拉起全部 6 个常驻组件与组件守护、灌入演示日志并发起流程（幂等，已运行组件自动跳过）——详见 3.1。
+> **更省事的方式**：`bash scripts/demo-up.sh` 一键拉起全部 6 个常驻组件与组件守护（幂等，已运行组件自动跳过；演示播种用 `demo` 子命令，仅 demo 档）——详见 3.1。
 
 ### 2.1 前置检查
 
@@ -275,23 +275,23 @@ export AIOPS_POLICY_PATH=./demo-policy.yaml
 
 ### 3.1 一键启动与组件守护（推荐）
 
-演示环境推荐用一键脚本编排全部常驻组件（替代逐一手工启动 3.2-3.5 各组件）：
+本地（production / demo 档均可）推荐用一键脚本编排全部常驻组件（替代逐一手工启动 3.2-3.5 各组件）：
 
 ```bash
-./start.sh                         # 一键启动（推荐入口）：等价 demo-up.sh up + 就绪等待 + 自动打开控制台
-./start.sh web                     # 开发档：额外在前台启动前端 vite dev（热更，5273）
-bash scripts/demo-up.sh            # 一键启动（幂等：已运行组件自动跳过；start.sh 的底层脚本）
-bash scripts/demo-up.sh status     # 查看 6 组件 + Temporal/Loki 状态（含局域网控制台地址）
-bash scripts/demo-up.sh down       # 停止全部常驻组件（含组件守护）
-bash scripts/demo-up.sh down-all   # 停止应用 + 依赖容器（保留数据卷，下次启动更快）
-bash scripts/demo-up.sh env        # 仅环境准备（Colima + Temporal/Loki 容器）
+./start.sh                         # 受控启动（推荐入口）：依赖与端口预检后拉起 6 常驻组件与组件守护（无隐式动作）
+./start.sh web                     # 额外在前台启动前端 vite dev（热更，5273；Ctrl+C 只停前端）
+./start.sh install                 # 将组件守护交 launchd 托管（登录自启；受控重装同命令）
+bash scripts/demo-up.sh            # 等价底层脚本（start.sh 即其薄封装）
+bash scripts/demo-up.sh status     # 查看组件与守护状态、生效档位快照
+bash scripts/demo-up.sh down       # 停止全部常驻组件（含组件守护；保留 launchd 注册）
+bash scripts/demo-up.sh env        # 仅依赖与端口预检（不启动任何服务）
 ```
 
-脚本缺省 `AIOPS_MODE=demo`（外部 `export` 可覆盖——启动横幅如实展示生效档位，非 demo 档红色警示），按序启动 worker → BFF(:8600) → 告警接入(:8099) → 可用性巡检 → 日志采集 → 突增检测 → **组件守护** → 灌入演示日志 → 发起修复流程。
+脚本档位=环境变量 > .env > production（缺省 production），启动日志如实打印有效配置快照；按序启动 worker → BFF(:8600) → 告警接入(:8099) → 可用性巡检 → 日志采集 → 突增检测 → **组件守护**（不自动灌日志/起流程；演示播种用 `bash scripts/demo-up.sh demo`，仅 demo 档）。
 
 组件守护 `scripts/aiops-watchdog.py` 每 30 秒巡检 6 个常驻组件，异常自动拉起；崩溃风暴（窗口内 5 次）自动冷却 10 分钟。守护启动时获取单实例锁（`data/aiops-watchdog.lock`，防双守护）并锁定生效档位（环境变量 > .env > production），显式传给被拉起组件。参数：`AIOPS_WATCHDOG_INTERVAL`（巡检周期）、`AIOPS_WATCHDOG_SURGE_ARGS`（突增检测器拉起参数）。另按 RSS 内存水位守护（默认 1024MB，`AIOPS_WATCHDOG_RSS_MB` 可调，0=关闭）：超限即就地重启——macOS 无 cgroup 场景的组件软限额（P1，2026-10-12；`demo_cli.py doctor` 的「组件内存」检查项同口径）。
 
-开机自启（可选）：`bash scripts/launchd-install.sh install` 将守护交由 launchd 托管（登录自启、崩溃自动重启，详见 7.6）。
+开机自启：`./start.sh install`（等价 `bash scripts/launchd-install.sh install`）将守护交由 launchd 托管（登录自启、崩溃自动重启，详见 7.6）。
 
 ### 3.2 告警接入服务（Alertmanager 自动触发）
 

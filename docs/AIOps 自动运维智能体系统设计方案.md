@@ -281,7 +281,7 @@ aiops-agent/                          # 单一代码库、双模运行（product
 ### 8.3 运行方式
 
 ```bash
-bash scripts/demo-up.sh                           # 一键：环境 + 6 常驻组件 + 守护 + 灌日志 + 起流程
+bash scripts/demo-up.sh                           # 一键：依赖与端口预检 + 6 常驻组件 + 组件守护（无隐式动作；演示播种用 demo 子命令）
 # 或手工：
 pip install -r requirements.txt
 python -m aiops_agent.worker                      # 终端 1（需 Temporal 服务端）

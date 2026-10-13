@@ -68,18 +68,18 @@ AIOPS_POLICY_PATH=./demo-policy.yaml .venv/bin/python demo_cli.py start \
 
 ---
 
-## 三、一键演示脚本
+## 三、一键启动脚本
 
 ```bash
 cd aiops-agent
-./start.sh                     # 一键启动（推荐）：探活依赖 → 6 常驻组件 + 组件守护 → 灌日志 → 起流程 → 自动打开控制台
-./start.sh web                 # 开发档：同上，另在前台启动前端 vite dev（热更 @5273，Ctrl+C 只停前端）
+./start.sh                     # 一键启动（受控）：依赖预检 → 6 常驻组件 + 组件守护（无隐式动作：不灌日志/不起流程/不开浏览器）
+./start.sh web                 # 另在前台启动前端 vite dev（热更 @5273，Ctrl+C 只停前端）
 ./start.sh down                # 停止全部（先停组件守护再停组件）
 
-bash scripts/demo-up.sh        # 等价底层脚本（子命令 up/env/down/down-all/status；start.sh 为其薄封装）
+bash scripts/demo-up.sh        # 等价底层脚本（子命令 up/env/down/status/install 等；start.sh 为其薄封装）
 ```
 
-脚本会自动完成依赖探活，后台常驻启动 worker / BFF / 告警接入 / 可用性巡检 / **日志采集（ship_app_logs --follow）** / **错误日志突增检测（log_surge_detector）**，再灌入演示日志、启动一个修复流程，并打印控制台地址与后续操作提示。启动时打印**档位横幅**（缺省 demo；外部 `AIOPS_MODE` 覆盖时红字警示），防演示/生产档位混用。第 8 步额外启动**组件守护（aiops-watchdog.py）**：每 30 秒巡检 6 个组件，任一崩溃自动拉起；同一组件在窗口内反复崩溃时自动冷却（防拉起风暴）。守护启动时获取**单实例锁**（`data/aiops-watchdog.lock`，防双守护）并**锁定生效档位**显式传给被拉起组件。状态可用 `python3 scripts/aiops-watchdog.py --status` 单独查看；可选 `bash scripts/launchd-install.sh install` 交由 launchd 托管（登录自启、崩溃自动重启）。
+脚本会先做依赖与端口预检，后台常驻启动 worker / BFF / 告警接入 / 可用性巡检 / **日志采集（ship_app_logs --follow）** / **错误日志突增检测（log_surge_detector）**，随后启动**组件守护（aiops-watchdog.py）**：每 30 秒巡检 6 个组件，任一崩溃自动拉起；同一组件在窗口内反复崩溃时自动冷却（防拉起风暴）。守护启动时获取**单实例锁**（`data/aiops-watchdog.lock`，防双守护）并**锁定生效档位**（环境变量 > .env > production，启动日志如实打印配置快照）显式传给被拉起组件。无隐式动作：演示播种需显式执行 `bash scripts/demo-up.sh demo`（灌演示日志并发起修复流程，仅 demo 档）。状态可用 `./start.sh status` 查看；可选 `./start.sh install` 交由 launchd 托管（登录自启、崩溃自动重启）。
 
 ---
 

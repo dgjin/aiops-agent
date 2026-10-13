@@ -532,11 +532,11 @@ curl -X POST http://127.0.0.1:8600/api/system/kill-switch \
 ## 附录 A 命令速查卡
 
 ```bash
-# 一键启动（推荐）：环境 + 6 常驻组件（含 BFF 控制台）+ 组件守护 + 灌日志 + 起流程
-./start.sh                         # 自动打开浏览器；./start.sh web 加前端热更；底层即 demo-up.sh
-./start.sh status                  # 查看组件状态与局域网控制台地址
+# 一键启动（受控）：依赖预检 + 6 常驻组件（含 BFF 控制台）+ 组件守护（不自动灌日志/起流程）
+./start.sh                         # 无隐式动作；./start.sh web 加前端热更；底层即 demo-up.sh
+./start.sh status                  # 查看组件与守护状态、生效档位快照
 
-# 控制台（手工启动时）：本机 http://127.0.0.1:8600；局域网 http://<本机IP>:8600
+# 控制台：demo 档本机 http://127.0.0.1:8600、局域网 http://<本机IP>:8600；production 经 Caddy https://<本机IP>:8643
 .venv/bin/python -m uvicorn bff.app:app --host 0.0.0.0 --port 8600
 
 # 环境准备（每个操作终端）
