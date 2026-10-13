@@ -2,12 +2,12 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 文档版本 | v1.2 |
-| 日期 | 2026-10-01（v1.2 修订 2026-10-12） |
+| 文档版本 | v1.3 |
+| 日期 | 2026-10-01（v1.3 修订 2026-10-13） |
 | 状态 | 已实现系统（与 aiops-agent/ 工程代码逐项对齐） |
 | 关联文档 | 《AIOps 自动运维智能体系统设计方案》v1.1、《AIOps 自动运维智能体系统实施计划》v1.0、《用户操作手册》、《部署手册》 |
 | 适用范围 | 应用服务器异常自愈、AI 辅助代码修复与自动化发布（含演示环境全链路） |
-| 修订记录 | v1.2：测试基线 836 用例；运维治理加固：组件守护单实例锁与档位锁定+一致性校验、开机自启（launchd）、备份与恢复演练、数据清理与日志轮转、doctor 磁盘水位检查、启动档位横幅；v1.1：测试基线 832 用例；默认模型切换 qwen3.8:27b-mlx；新增 Qoder 修复引擎（4.3.3）、需求分析闭环（4.9）、可用性巡检/日志采集/组件守护；BFF 路由扩至 11 域 |
+| 修订记录 | v1.3（2026-10-13）：IM 流程通知补齐——新增接收/需求接收/进入修复三类流程卡片（4.6 共 7 类卡片），工作流调用以 patched 标记守护（flow-intake-notify-g1 / requirement-intake-notify-g1 / fix-start-notify-g1）；activity 13→16；v1.2：测试基线 836 用例；运维治理加固：组件守护单实例锁与档位锁定+一致性校验、开机自启（launchd）、备份与恢复演练、数据清理与日志轮转、doctor 磁盘水位检查、启动档位横幅；v1.1：测试基线 832 用例；默认模型切换 qwen3.8:27b-mlx；新增 Qoder 修复引擎（4.3.3）、需求分析闭环（4.9）、可用性巡检/日志采集/组件守护；BFF 路由扩至 11 域 |
 
 ---
 
@@ -92,7 +92,7 @@
 | 组件 | 文件 | 职责 |
 | --- | --- | --- |
 | 工作流编排 | `aiops_agent/workflows.py` | `AIOpsFixWorkflow` 状态机、信号/查询、三道闸门、FIFO 队列、审计记录 |
-| 活动集合 | `aiops_agent/activities.py` | 13 个 activity：感知/分析/修复/沙箱/审批/公告/金丝雀与发布终态 |
+| 活动集合 | `aiops_agent/activities.py` | 16 个 activity：感知/分析/修复/沙箱/审批/公告/流程通知（接收·需求接收·进入修复）/金丝雀与发布终态 |
 | 策略配置 | `aiops_agent/config.py` | YAML + pydantic 强校验、锁定项校验器、启动快照 |
 | 数据模型 | `aiops_agent/models.py` | Alert / RootCause / Patch / TestReport / CanaryResult / ReleaseResult |
 | Worker | `aiops_agent/worker.py` | 注册工作流与 activity、加载策略快照、连接 Temporal |
@@ -103,7 +103,7 @@
 | Code RAG | `aiops_agent/code_rag.py` | AST 切块、嵌入、FAISS/纯 Python 双后端索引与检索 |
 | 修复 Agent | `aiops_agent/fix_agent.py` | 目标定位、修复 prompt、diff 应用管线、编译校验、兜底补丁 |
 | 沙箱 | `aiops_agent/sandbox.py` | SAST、工作区、Docker/K8s 隔离执行、unittest 解析、TestReport |
-| 通知 | `aiops_agent/notify.py` | 三类卡片渲染、投递器（recorded/live/failed）、回调解析 |
+| 通知 | `aiops_agent/notify.py` | 七类卡片渲染（审批/公告/升级/影子建议/接收/需求接收/进入修复）、投递器（recorded/live/failed）、回调解析 |
 | 发布 | `aiops_agent/release.py` | ArgoCD 渲染/提交、镜像构建、金丝雀容器、探活观测、晋级/回收 |
 | 演示 CLI | `demo_cli.py` | 启动流程、审批/加速/取消/排队、状态查询、结果获取 |
 | 索引工具 | `index_codebase.py` | 建库 / 检索 CLI（代码块 + 历史工单） |
@@ -177,29 +177,33 @@ DETECTED → TRIAGING → FIXING ⇄ TESTING → WAIT_APPROVAL → NOTIFYING →
 
 FIXING ⇄ TESTING 为回炉重试环：每次失败后 `attempt+1` 重新生成补丁，默认重试上限 `max_fix_retries=2`（共 3 次尝试），耗尽进入 `ESCALATED`。
 
+测试通过后若策略 `shadow_mode=true`（生产档强制，P1-2 渐进信任），流程进入 `SHADOWED` 终态：仅推送影子档建议卡片（`notify_shadow_suggestion`），不创建 MR、不进入审批与发布。生产实例流程终态因此普遍为 `SHADOWED`（控制台显示「已建议（影子档）」）；演示档 `demo-policy.yaml` 为 `shadow_mode=false`，可跑全链路。
+
 ### 3.2 阶段说明
 
 | 阶段 | 动作 | 对应 activity | 关键产出 |
 | --- | --- | --- | --- |
-| DETECTED | 告警事件生成（webhook / CLI / 突增检测） | —（启动参数） | `Alert` |
+| DETECTED | 告警事件生成（webhook / CLI / 突增检测）；**接收卡片**（处理流程说明） | `notify_flow_intake` | `Alert` |
 | TRIAGING | 日志取证（Loki 近 10 分钟）+ Drain3 聚类 + LLM 根因 | `collect_evidence`、`cluster_logs`、`analyze_root_cause` | `RootCause` |
-| FIXING | RAG 检索 + LLM 生成最小 diff + 应用/编译校验 | `retrieve_similar_fixes`、`generate_patch` | `Patch` |
+| FIXING | RAG 检索 + LLM 生成最小 diff + 应用/编译校验；**进入修复卡片**（结论/链路/模式） | `retrieve_similar_fixes`、`generate_patch`、`notify_fix_started` | `Patch` |
 | TESTING | SAST + 隔离沙箱执行单测 | `run_tests_in_sandbox` | `TestReport` |
 | WAIT_APPROVAL | 创建 MR（桩）+ 审批卡片 + 等待信号（超时 30m 自动驳回） | `create_merge_request`、`notify_approvers` | 审批结果 + `gate_events` |
 | NOTIFYING | 公告卡片 + 倒计时（默认 15m）+ 窗口事件处理 | `notify_users` | 发布决策（expiry / deploy_now / cancel） |
 | CANARY | ArgoCD 提交 + 镜像构建 + 金丝雀容器真实探活 | `deploy_canary` | `CanaryResult` |
 | ROLLING_OUT | 达标全量滚动 / 劣化回收 | `finalize_release` | `ReleaseResult` |
-| DONE / ESCALATED / CANCELLED | 审计记录 + 队列承接 | `escalate_to_human`、子工作流 | 审计 dict |
+| DONE / SHADOWED / ESCALATED / CANCELLED | 审计记录 + 队列承接；SHADOWED 推送修复建议后收口 | `escalate_to_human`、`notify_shadow_suggestion`、子工作流 | 审计 dict |
 
 ### 3.3 一次成功流程的数据流（实测链路）
 
 ```text
 Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 id）
   │
+  ├─ notify_flow_intake：接收卡片（流程启动即推送处理流程说明）
   ├─ collect_evidence：Loki 拉取近 10m 日志 → 提取 trace_id（最多 10 个）
   ├─ cluster_logs：Drain3 聚类 → 模板 + 计数（压缩比下降）
   ├─ analyze_root_cause：Ollama qwen3.8:27b-mlx → RootCause{error_type, suspect_files, confidence, summary}
   ├─ gate1：confidence ≥ 0.8 放行
+  ├─ notify_fix_started：进入修复卡片（分析结论 + 修复链路 + 影子档/全链路模式）
   ├─ retrieve_similar_fixes：向量检索 top-5（代码块 + 历史工单）
   ├─ generate_patch：LLM diff → 应用 → py_compile 校验 → Patch
   ├─ run_tests_in_sandbox：SAST → docker run（禁网/只读/限额）→ unittest
@@ -360,13 +364,19 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 
 ### 4.6 通知层（`notify.py`）
 
-- **三类卡片**：
+- **七类卡片**（决策类：审批/公告/升级；状态类：影子建议 + 三类流程通知）：
 
 | 卡片 | 渲染函数 | 内容要素 | 颜色主题 |
 | --- | --- | --- | --- |
 | 审批卡片 | `render_approval_card` | 根因（含置信度）+ 补丁（含风险/文件）+ 完整 diff + 测试报告 + 回滚预案 + 批准/驳回按钮；受保护目录追加二级提示 | 橙 |
 | 用户公告卡片 | `render_broadcast_card` | 版本号 + 影响提示 + 服务/补丁标识 | 蓝 |
 | 升级卡片 | `render_escalation_card` | 转人工原因 + 严重级别 + 处置动作 | 红 |
+| 影子档建议卡片 | `render_shadow_card` | 根因 + 建议补丁（含完整 diff）+ 沙箱测试 + 「未创建 MR / 未审批 / 未发布」说明 | 青 |
+| 接收卡片 | `render_intake_card` | 告警服务/描述 + 处理流程（日志取证 → 聚类降噪 → 根因分析 → 闸门1；通过后进入修复） | 浅蓝 |
+| 需求接收卡片 | `render_requirement_intake_card` | 需求标题 + 来源分析（版本·批准人）+ 需求原文 + 验收要点 + 「已批准 → 直接进入修复」说明 | 浅蓝 |
+| 进入修复卡片 | `render_fix_started_card` | 分析结论（含置信度）+ 疑似文件 + 修复链路 + 模式标注（影子档仅建议 / 全链路审批发布） | 靛蓝 |
+
+- **流程通知挂载**（活动由工作流调用，投递同走 `NotificationSender` 留痕 `data/notify/`；`workflow.patched` 版本守护，旧运行中历史重放自动跳过）：告警流程启动即调 `notify_flow_intake`（标记 `flow-intake-notify-g1`，msg_id=`intake-<alert_id>`）；进入修复段（`_fix_to_release`，告警/需求共用）调 `notify_fix_started`（标记 `fix-start-notify-g1`，msg_id=`fix-start-<alert_id>`）；需求流程批准后调 `notify_requirement_intake`（标记 `requirement-intake-notify-g1`，msg_id=`req-intake-<entry_id>`）；
 
 - **双 provider**：飞书（interactive card，按钮 `value` 携带回调契约）；钉钉（actionCard，按钮 `actionURL` 查询参数携带回调契约）；
 - **投递器 `NotificationSender`**：三种模式——`live`（配置 webhook 真实 POST 且机器人应答码为 0，飞书加签秒级时间戳/钉钉加签毫秒级时间戳）、`recorded`（未配置 webhook，留痕 `data/notify/<msg_id>.json`）、`failed`（网络异常或机器人应答非零如加签不符，降级并携带原因，**通知失败不阻断修复主流程**）；无论何种模式均先留痕；
@@ -538,7 +548,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 
 ## 8 质量保障与评测体系
 
-### 8.1 单元测试矩阵（836 用例基线；2026-10-13 整改后全量 48 个文件 / 1267 用例通过、7 跳过）
+### 8.1 单元测试矩阵（2026-10-13 回归复核：49 个测试文件 / 1289 用例通过、跳过 6）
 
 | 测试文件 | 覆盖范围 |
 | --- | --- |
@@ -563,7 +573,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 | `tests/test_app_manifest.py` / `test_changes.py` / `test_release_direct.py` / `test_worker_registry.py` | Manifest 校验与探测、变更关联、直连发布、活动注册表防回归 |
 | `tests/test_deploy_manifests.py` | K8s 清单 39 项静态校验（命名空间/镜像/副本/PDB/HPA/探针/PVC/策略/告警名集合对齐）+ compose profiles + Dockerfile |
 
-> 2026-10-13 单机生产化整改后全量回归复核：**Ran 1267 tests — OK（skipped=7）**（48 个测试文件；发现式运行必须带 `-t .`）。整改新增套件包括：`test_production_safety` / `test_chatops` / `test_mcp_server` / `test_alert_store` / `test_release_safety` / `test_release_replay` / `test_backup` / `test_readiness` / `test_startup_mode` / `test_production_deploy` / `test_topology`。
+> 2026-10-13 单机生产化整改后全量回归复核：**Ran 1289 tests — OK（skipped=6）**（49 个测试文件；发现式运行必须带 `-t .`）。整改新增套件包括：`test_production_safety` / `test_chatops` / `test_mcp_server` / `test_alert_store` / `test_release_safety` / `test_release_replay` / `test_backup` / `test_readiness` / `test_startup_mode` / `test_production_deploy` / `test_topology`。同日 IM 流程通知补齐（接收/需求接收/进入修复，activity 13→16）后同口径复核通过；`test_notify` / `test_worker_registry` / `test_release_replay` 覆盖新卡片、活动注册与重放守护。
 
 ### 8.2 triage 离线评测（`eval_triage.py`）
 

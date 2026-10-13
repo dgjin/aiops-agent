@@ -1,6 +1,9 @@
 """通知层（WP8 交付物）：飞书/钉钉交互卡片 + 真实投递 + 回调解析。
 
 流程（对齐实施计划 WP8，替换日志桩卡片）：
+    render_intake_card        接收卡片：监控到告警/日志 → 处理流程说明（IM 交互补齐）
+    render_requirement_intake_card  需求接收卡片：已批准需求任务 → 直接进入修复流程
+    render_fix_started_card   进入修复卡片：分析结论 + 修复链路（含影子档/全链路模式）
     render_approval_card      审批卡片：根因分析 + 完整 diff + 测试报告 + 回滚预案 + 审批按钮
     render_broadcast_card     用户公告卡片（闸门 3 倒计时窗口）
     render_escalation_card    转人工升级卡片（值班负责人）
@@ -33,7 +36,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from .models import Alert, Patch, RootCause, TestReport
+from .models import Alert, Patch, RequirementTask, RootCause, TestReport
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 NOTIFY_DIR = BASE_DIR / "data" / "notify"
@@ -229,6 +232,140 @@ def render_shadow_card(
         "msg_type": "interactive",
         "card": {
             "header": {"title": {"tag": "plain_text", "content": title}, "template": "turquoise"},
+            "elements": elements,
+        },
+    }
+
+
+def render_intake_card(alert: Alert, *, provider: str = DEFAULT_PROVIDER) -> dict:
+    """接收卡片（告警流程）：监控到告警/日志信息进入处理流程，附全链路阶段说明。"""
+    title = f"已接收告警 · {alert.service}/{alert.alert_id}"
+    desc = " ".join(alert.description.split())[:120] or "-"
+    pipeline = (
+        "① 日志取证（Loki 近 10 分钟）→ ② Drain3 聚类降噪 → ③ LLM 根因分析 → "
+        "④ 闸门1 置信度判定；通过后进入修复流程（补丁生成 → 沙箱验证 → 审批/发布）"
+    )
+    note = "本消息为流程启动通知，后续将推送「进入修复流程」及审批/发布/终态消息。"
+    if provider == "dingtalk":
+        lines = [
+            f"**服务**：{alert.service} · 告警：{alert.alert_id} · 级别：{alert.severity}",
+            f"**描述**：{desc}",
+            f"**处理流程**：{pipeline}",
+            f"**说明**：{note}",
+        ]
+        return {
+            "msgtype": "markdown",
+            "markdown": {"title": title, "text": f"### {title}\n\n" + "\n\n".join(lines)},
+        }
+    elements: list[dict] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"**服务**：{alert.service} · 告警：{alert.alert_id} · 级别：{alert.severity}",
+            },
+        },
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**描述**\n{desc}"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**处理流程**\n{pipeline}"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**说明**\n{note}"}},
+    ]
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "header": {"title": {"tag": "plain_text", "content": title}, "template": "wathet"},
+            "elements": elements,
+        },
+    }
+
+
+def render_requirement_intake_card(
+    task: RequirementTask, *, provider: str = DEFAULT_PROVIDER
+) -> dict:
+    """需求接收卡片（需求流程）：已批准的需求任务进入修复流程（跳过日志诊断）。"""
+    title = f"已接收需求实现任务 · {task.service}/{task.entry_id}"
+    requirement = " ".join(task.requirement.split())[:150] or "-"
+    acceptance = "；".join(task.acceptance)[:200] or "（未列出）"
+    pipeline = (
+        "需求分析已由管理员批准（跳过日志诊断与闸门1）→ 直接进入修复流程："
+        "① 生成最小补丁 → ② 沙箱隔离验证 → ③ 审批与发布（按当前模式执行）"
+    )
+    if provider == "dingtalk":
+        lines = [
+            f"**需求标题**：{task.title}",
+            f"**来源分析**：{task.analysis_id} v{task.version} · 批准人：{task.approved_by}",
+            f"**需求原文**：{requirement}",
+            f"**验收要点**：{acceptance}",
+            f"**处理流程**：{pipeline}",
+        ]
+        return {
+            "msgtype": "markdown",
+            "markdown": {"title": title, "text": f"### {title}\n\n" + "\n\n".join(lines)},
+        }
+    elements: list[dict] = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**需求标题**\n{task.title}"}},
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"**来源分析**：{task.analysis_id} v{task.version} · 批准人：{task.approved_by}",
+            },
+        },
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**需求原文**\n{requirement}"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**验收要点**\n{acceptance}"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**处理流程**\n{pipeline}"}},
+    ]
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "header": {"title": {"tag": "plain_text", "content": title}, "template": "wathet"},
+            "elements": elements,
+        },
+    }
+
+
+def render_fix_started_card(
+    alert: Alert,
+    root_cause: RootCause,
+    shadow_mode: bool,
+    *,
+    provider: str = DEFAULT_PROVIDER,
+) -> dict:
+    """进入修复卡片：分析结论 + 修复链路；按 shadow_mode 标注影子档/全链路模式。"""
+    title = f"进入修复流程 · {alert.service}/{alert.alert_id}"
+    files = ", ".join(root_cause.suspect_files) or "（未定位）"
+    pipeline = "① 生成最小补丁（Code RAG 上下文）→ ② 沙箱隔离验证 → ③ 审批与发布（按模式执行）"
+    mode = (
+        "影子档（仅建议不执行）：测试通过后仅推送修复建议，不创建 MR、不审批、不发布"
+        if shadow_mode
+        else "全链路：测试通过后创建 MR → IM 审批（受保护目录二级）→ 用户公告倒计时 → 金丝雀发布（劣化自动回滚）"
+    )
+    if provider == "dingtalk":
+        lines = [
+            f"**分析结论**（confidence={root_cause.confidence:.2f}）：{root_cause.summary}",
+            f"**疑似文件**：{files}",
+            f"**修复链路**：{pipeline}",
+            f"**模式**：{mode}",
+        ]
+        return {
+            "msgtype": "markdown",
+            "markdown": {"title": title, "text": f"### {title}\n\n" + "\n\n".join(lines)},
+        }
+    elements: list[dict] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"**分析结论**（confidence={root_cause.confidence:.2f}）\n{root_cause.summary}",
+            },
+        },
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**疑似文件**\n{files}"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**修复链路**\n{pipeline}"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**模式**\n{mode}"}},
+    ]
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "header": {"title": {"tag": "plain_text", "content": title}, "template": "indigo"},
             "elements": elements,
         },
     }

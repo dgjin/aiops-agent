@@ -32,6 +32,7 @@ from .models import (
     CanaryResult,
     Patch,
     ReleaseResult,
+    RequirementTask,
     RootCause,
     TestReport,
 )
@@ -466,6 +467,69 @@ async def escalate_to_human(alert: Alert, reason: str) -> None:
         delivery["mode"], alert.alert_id, reason,
     )
     return None
+
+
+@activity.defn
+async def notify_flow_intake(alert: Alert) -> dict:
+    """接收通知（告警流程）：监控到告警/日志信息后投递处理流程说明卡片。"""
+    from . import notify
+
+    sender = notify.NotificationSender()
+    card = notify.render_intake_card(alert, provider=sender.provider)
+    delivery = sender.send(card, msg_id=f"intake-{alert.alert_id}")
+    log.info(
+        "[notify] 已接收告警通知（%s）：alert=%s 投递=%s",
+        alert.service, alert.alert_id, delivery["mode"],
+    )
+    return {
+        "msg_id": delivery.get("msg_id") or f"intake-{alert.alert_id}",
+        "delivery": delivery["mode"],
+        "path": delivery.get("path"),
+    }
+
+
+@activity.defn
+async def notify_requirement_intake(task: RequirementTask) -> dict:
+    """接收通知（需求流程）：已批准的需求任务进入修复流程时投递任务与流程说明卡片。"""
+    from . import notify
+
+    sender = notify.NotificationSender()
+    card = notify.render_requirement_intake_card(task, provider=sender.provider)
+    delivery = sender.send(card, msg_id=f"req-intake-{task.entry_id}")
+    log.info(
+        "[notify] 已接收需求任务通知（%s）：entry=%s v%d 投递=%s",
+        task.service, task.entry_id, task.version, delivery["mode"],
+    )
+    return {
+        "msg_id": delivery.get("msg_id") or f"req-intake-{task.entry_id}",
+        "delivery": delivery["mode"],
+        "path": delivery.get("path"),
+    }
+
+
+@activity.defn
+async def notify_fix_started(alert: Alert, root_cause: RootCause, shadow_mode: bool) -> dict:
+    """进入修复通知（告警/需求共用）：分析结论 + 修复链路与模式（影子档/全链路）。"""
+    from . import notify
+
+    sender = notify.NotificationSender()
+    card = notify.render_fix_started_card(
+        alert, root_cause, shadow_mode, provider=sender.provider
+    )
+    delivery = sender.send(card, msg_id=f"fix-start-{alert.alert_id}")
+    log.info(
+        "[notify] 进入修复流程通知（%s）：alert=%s confidence=%.2f 模式=%s 投递=%s",
+        alert.service,
+        alert.alert_id,
+        root_cause.confidence,
+        "shadow" if shadow_mode else "full-chain",
+        delivery["mode"],
+    )
+    return {
+        "msg_id": delivery.get("msg_id") or f"fix-start-{alert.alert_id}",
+        "delivery": delivery["mode"],
+        "path": delivery.get("path"),
+    }
 
 
 @activity.defn

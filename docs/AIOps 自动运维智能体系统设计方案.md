@@ -244,22 +244,22 @@ NOTIFYING（倒计时中）
 
 ## 8. 工程实现概要
 
-> 本节已按最新工程现状同步（2026-10-13）。演示期桩已全部真实化：真实 LLM 根因/修复、Docker 沙箱验证、金丝雀发布与自动回滚、飞书/钉钉通知、三平台 MR 创建、控制台 BFF 与前端 SPA、可用性巡检与日志采集闭环、运维治理（清理/轮转/备份/launchd/档位横幅）；单机生产化整改（批次 A–I，见 5.1）已落地：事件聚合持久化、ChatOps 专用通道、发布互斥日志、统一启动门禁、HTTPS/网络收敛产物与加密备份。全量单测 1267 用例（48 个测试文件，2026-10-13 回归复核，skipped=7）。
+> 本节已按最新工程现状同步（2026-10-13）。演示期桩已全部真实化：真实 LLM 根因/修复、Docker 沙箱验证、金丝雀发布与自动回滚、飞书/钉钉通知（七类卡片，含流程接收/进入修复状态消息）、三平台 MR 创建、控制台 BFF 与前端 SPA、可用性巡检与日志采集闭环、运维治理（清理/轮转/备份/launchd/档位横幅）；单机生产化整改（批次 A–I，见 5.1）已落地：事件聚合持久化、ChatOps 专用通道、发布互斥日志、统一启动门禁、HTTPS/网络收敛产物与加密备份。全量单测 1289 用例（49 个测试文件，2026-10-13 回归复核，skipped=6）。
 
 ```text
 aiops-agent/                          # 单一代码库、双模运行（production 默认 / demo 演示）
-├── aiops_agent/                      # 业务核心：13 个 Temporal activity（activities.py）
+├── aiops_agent/                      # 业务核心：16 个 Temporal activity（activities.py）
 │   ├── workflows.py                  # AIOpsFixWorkflow 主工作流（状态机/闸门/队列/审计）
 │   ├── config.py / models.py         # 策略加载 + pydantic 强校验（启动快照）/ 数据模型
 │   ├── worker.py                     # Worker 注册与启动
 │   ├── triage.py / logs.py / page_health.py      # 分析层（LLM 根因 + Drain3 + 通用白屏判据）
 │   ├── code_rag.py / fix_agent.py / qoder_fix.py # 决策层（Ollama / Qoder 双修复提供者）
 │   ├── sandbox.py / release.py       # Docker 沙箱验证 / 金丝雀发布与自动回滚
-│   ├── notify.py                     # 飞书/钉钉交互卡片 + 回调解析
+│   ├── notify.py                     # 飞书/钉钉七类交互卡片（含流程通知）+ 回调解析
 │   ├── git_integration.py            # GitLab / GitHub / Gitee MR 真实创建
 │   └── ...（app_registry / kill_switch / cleanup / db / metrics / tracing 等）
 ├── bff/ + web/                       # 控制台：FastAPI BFF（:8600，11 域路由）+ React SPA
-├── demo-app/ + tests/                # 演示被修复服务 / 单元测试（836 用例）
+├── demo-app/ + tests/                # 演示被修复服务 / 单元测试（1289 用例）
 ├── scripts/demo-up.sh                # 一键编排 6 常驻组件 + 组件守护（watchdog）
 ├── release-gate-policy.yaml / demo-policy.yaml   # 生产 / 演示加速策略
 └── demo_cli.py                       # 操作 CLI（start/status/approve/deploy-now/queue-patch）

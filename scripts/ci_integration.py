@@ -287,11 +287,16 @@ async def integration():
             return Patch("ci-patch", alert["alert_id"], [], "", "fixture", "low", "fixture", 0.99)
         @activity.defn(name="run_tests_in_sandbox")
         async def sandbox(alert, patch, attempt): return TestReport("ci-patch", True)
+        @activity.defn(name="notify_flow_intake")
+        async def intake(alert): return {"recorded": True}
+        @activity.defn(name="notify_fix_started")
+        async def fix_started(alert, cause, shadow): return {"recorded": True}
         @activity.defn(name="notify_shadow_suggestion")
         async def notify(alert, cause, patch, report): return {"recorded": True}
 
         async with Worker(client, task_queue=QUEUE, workflows=[AIOpsFixWorkflow],
-                          activities=[evidence, cluster, analyze, retrieve, generate, sandbox, notify]):
+                          activities=[evidence, cluster, analyze, retrieve, generate, sandbox,
+                                      intake, fix_started, notify]):
             gw = TemporalGateway()
             for _ in range(30):
                 report = await readiness.check(gw)
@@ -336,7 +341,8 @@ async def integration():
                 scheduled = [e.activity_task_scheduled_event_attributes.activity_type.name for e in history.events
                              if e.HasField("activity_task_scheduled_event_attributes")]
                 require(set(scheduled) == {"collect_evidence", "cluster_logs", "analyze_root_cause", "retrieve_similar_fixes",
-                                           "generate_patch", "run_tests_in_sandbox", "notify_shadow_suggestion"}, "unexpected side-effect activity")
+                                           "generate_patch", "run_tests_in_sandbox", "notify_flow_intake", "notify_fix_started",
+                                           "notify_shadow_suggestion"}, "unexpected side-effect activity")
                 require(not any(e.HasField("workflow_execution_signaled_event_attributes") for e in history.events), "forged signal accepted")
             finally:
                 for process in processes:

@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 from aiops_agent import activities, notify
-from aiops_agent.models import Alert, Patch, RootCause, TestReport
+from aiops_agent.models import Alert, Patch, RequirementTask, RootCause, TestReport
 
 ALERT = Alert(alert_id="nt-1", service="order", description="通知单测")
 ROOT_CAUSE = RootCause(
@@ -46,6 +46,19 @@ REPORT = TestReport(
     unit_tests="6/6 passed",
     regression_tests="通过",
     sast="无高危模式",
+)
+TASK = RequirementTask(
+    analysis_id="an-1",
+    app_id="app",
+    service="order",
+    entry_id="e-1",
+    title="优惠券空值防护需求",
+    requirement="下单链路查询优惠券为空时应返回 0 而非抛错。",
+    plan="在取券分支补充空值防御并用单测覆盖。",
+    acceptance=["空券下单返回 200", "单测全绿"],
+    suspect_files=["order_service.py"],
+    version=2,
+    approved_by="li",
 )
 
 
@@ -106,6 +119,43 @@ class TestBroadcastAndEscalation(unittest.TestCase):
         for provider in ("feishu", "dingtalk"):
             card = notify.render_escalation_card(ALERT, "金丝雀劣化自动回滚", provider=provider)
             self.assertIn("金丝雀劣化自动回滚", _card_text(card))
+
+
+class TestIntakeAndFixStartedCards(unittest.TestCase):
+    """IM 交互补齐：接收/进入修复通知卡片（处理流程说明、模式标注与 provider 双形态）。"""
+
+    def test_alert_intake_feishu_pipeline(self) -> None:
+        card = notify.render_intake_card(ALERT)
+        self.assertEqual(card["msg_type"], "interactive")
+        self.assertIn("已接收告警", card["card"]["header"]["title"]["content"])
+        self.assertIn("order/nt-1", card["card"]["header"]["title"]["content"])
+        text = _card_text(card)
+        for step in ("日志取证", "聚类降噪", "根因分析", "闸门1"):
+            self.assertIn(step, text)
+
+    def test_alert_intake_dingtalk_markdown(self) -> None:
+        card = notify.render_intake_card(ALERT, provider="dingtalk")
+        self.assertEqual(card["msgtype"], "markdown")
+        self.assertIn("处理流程", card["markdown"]["text"])
+        self.assertIn("order/nt-1", card["markdown"]["text"])
+
+    def test_requirement_intake_contains_task_and_approval(self) -> None:
+        for provider in ("feishu", "dingtalk"):
+            card = notify.render_requirement_intake_card(TASK, provider=provider)
+            text = _card_text(card)
+            self.assertIn("已接收需求实现任务", text)
+            self.assertIn(TASK.title, text)
+            self.assertIn(TASK.approved_by, text)
+            self.assertIn("直接进入修复流程", text)
+
+    def test_fix_started_mode_annotation(self) -> None:
+        shadow = _card_text(notify.render_fix_started_card(ALERT, ROOT_CAUSE, True))
+        self.assertIn("影子档（仅建议不执行）", shadow)
+        full = _card_text(notify.render_fix_started_card(ALERT, ROOT_CAUSE, False))
+        self.assertIn("全链路", full)
+        for text in (shadow, full):
+            self.assertIn(ROOT_CAUSE.summary, text)
+            self.assertIn("order_service.py", text)
 
 
 class TestShadowCard(unittest.TestCase):
@@ -295,3 +345,25 @@ class TestActivityIntegration(unittest.TestCase):
         record = self.tmp / "notify" / "escalation-nt-1.json"
         self.assertTrue(record.is_file())
         self.assertIn("重试耗尽", record.read_text(encoding="utf-8"))
+
+    def test_notify_flow_intake_traces(self) -> None:
+        result = asyncio.run(activities.notify_flow_intake(ALERT))
+        self.assertEqual(result["msg_id"], "intake-nt-1")
+        self.assertEqual(result["delivery"], "recorded")
+        record = self.tmp / "notify" / "intake-nt-1.json"
+        self.assertTrue(record.is_file())
+        self.assertIn("处理流程", record.read_text(encoding="utf-8"))
+
+    def test_notify_requirement_intake_traces(self) -> None:
+        result = asyncio.run(activities.notify_requirement_intake(TASK))
+        self.assertEqual(result["msg_id"], "req-intake-e-1")
+        record = self.tmp / "notify" / "req-intake-e-1.json"
+        self.assertTrue(record.is_file())
+        self.assertIn(TASK.title, record.read_text(encoding="utf-8"))
+
+    def test_notify_fix_started_traces_mode(self) -> None:
+        result = asyncio.run(activities.notify_fix_started(ALERT, ROOT_CAUSE, True))
+        self.assertEqual(result["msg_id"], "fix-start-nt-1")
+        record = self.tmp / "notify" / "fix-start-nt-1.json"
+        self.assertTrue(record.is_file())
+        self.assertIn("影子档", record.read_text(encoding="utf-8"))

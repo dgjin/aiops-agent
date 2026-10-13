@@ -6,7 +6,7 @@
 | 日期 | 2026-10-12 |
 | 适用对象 | SRE / 实施工程师 / 环境维护人员 |
 | 关联文档 | 《系统设计说明书》、《用户操作手册》 |
-| 修订记录 | v1.1（2026-10-12）：同步最新工程现状——BFF 控制台（0.0.0.0:8600，支持局域网访问）、可用性巡检 / 日志采集 / 组件守护、需求基线闭环、Qoder 修复引擎、模型默认值切换（qwen3.8:27b-mlx）、测试基线 836 用例；v1.2（2026-10-12）：运维治理（沙箱清理 / 日志轮转 / 数据备份与恢复演练 / launchd 开机自启）、watchdog 单实例锁与档位锁定；v1.3（2026-10-12）：P1 生产就绪续轮——Temporal dev server 持久化语义实测文档化（§2.4.1）、watchdog RSS 内存守护（AIOPS_WATCHDOG_RSS_MB，doctor「组件内存」检查项）、沙箱产物独立卷 env 化（AIOPS_SANDBOX_ROOT / AIOPS_QODER_ROOT，代码/清理/doctor/K8s 同源）、测试基线 857 用例 |
+| 修订记录 | v1.1（2026-10-12）：同步最新工程现状——BFF 控制台（0.0.0.0:8600，支持局域网访问）、可用性巡检 / 日志采集 / 组件守护、需求基线闭环、Qoder 修复引擎、模型默认值切换（qwen3.8:27b-mlx）、测试基线 836 用例；v1.2（2026-10-12）：运维治理（沙箱清理 / 日志轮转 / 数据备份与恢复演练 / launchd 开机自启）、watchdog 单实例锁与档位锁定；v1.3（2026-10-12）：P1 生产就绪续轮——Temporal dev server 持久化语义实测文档化（§2.4.1）、watchdog RSS 内存守护（AIOPS_WATCHDOG_RSS_MB，doctor「组件内存」检查项）、沙箱产物独立卷 env 化（AIOPS_SANDBOX_ROOT / AIOPS_QODER_ROOT，代码/清理/doctor/K8s 同源）、测试基线 857 用例；v1.4（2026-10-13）：IM 流程通知补齐（接收/需求接收/进入修复卡片，activity 13→16）、测试基线 1289 用例 |
 
 ---
 
@@ -75,7 +75,7 @@ export AIOPS_POLICY_PATH=./demo-policy.yaml
 .venv/bin/python -m aiops_agent.worker
 
 # ⑧ 冒烟（另开终端，同样 export 策略）
-.venv/bin/python -m unittest discover -s tests -t . -v       # 期望 836 用例全绿
+.venv/bin/python -m unittest discover -s tests -t . -v       # 期望 1289 用例全绿
 .venv/bin/python demo_cli.py start --service order --alert-id smoke-001
 ```
 
@@ -254,7 +254,7 @@ nohup .venv/bin/python -m uvicorn bff.app:app --host 0.0.0.0 --port 8600 > bff.l
 ### 2.11 冒烟验证
 
 ```bash
-# ① 单元测试（期望：Ran 836 tests ... OK；必须带 -t .，防止误收集 data/ 下演示样例）
+# ① 单元测试（期望：Ran 1289 tests ... OK；必须带 -t .，防止误收集 data/ 下演示样例）
 .venv/bin/python -m unittest discover -s tests -t . -v
 
 # ② 向量检索冒烟（FAISS/Python 双后端一致性）
@@ -634,7 +634,7 @@ docker compose --profile obs up -d    # Prometheus http://127.0.0.1:9095 / Grafa
 - 一致性：`workflow_runs` 表与 Temporal 工作流记录 1:1（同步任务实测）；
 - SAST：Bandit HIGH=0（16 个 Medium 均为已知误报 / 设计需要，见 `scripts/security-scan.sh` 头注）；
 - 镜像构建实测：`docker build` 成功（753MB / 压缩 168MB）；容器内：非 root（uid=10001）、`cleanup --dry-run` 正常、BFF `/metrics` 200 / 无令牌 401 / 带令牌 200（Temporal connected=true）、SPA 首页 200；
-- 全量单测零回归（b9 验收时 471 用例；当前全量基线 836 用例，含部署清单 39 项静 态校验）。
+- 全量单测零回归（b9 验收时 471 用例；当前全量基线 1289 用例 / 49 个测试文件，含部署清单 39 项静态校验）。
 
 ### 5.5 生产接线点清单（按需启用）
 
@@ -656,14 +656,14 @@ docker compose --profile obs up -d    # Prometheus http://127.0.0.1:9095 / Grafa
 
 | # | 验证项 | 方法 | 通过标准 |
 | --- | --- | --- | --- |
-| 1 | 单元测试 | `.venv/bin/python -m unittest discover -s tests -t .` | 836 用例全绿 |
+| 1 | 单元测试 | `.venv/bin/python -m unittest discover -s tests -t .` | 1289 用例全绿 |
 | 2 | 策略校验 | 启动 worker | 打印策略快照；非法 YAML 启动即失败 |
 | 3 | 向量检索 | `index_codebase.py --query ...` | 返回相似度有序的代码块/工单 |
 | 4 | 双后端一致性（可选） | 分别以 `AIOPS_VECTOR_BACKEND=faiss/python` 检索同一 query | 结果与相似度一致 |
 | 5 | 沙箱真实执行 | E2E 流程观察 `[sandbox]` 日志 | `隔离执行[docker-container] Ran N tests` |
 | 6 | 金丝雀真实探活 | E2E 流程观察 `[canary]` 日志 | `观测窗口实测 错误率=x% P99=xms`（非模拟值） |
 | 7 | 发布滚动 | `docker exec aiops-stable-order python -c "import os;print(os.environ.get('APP_VERSION'))"` 或 `curl :18080/health` | 版本号与最后发布的 `v1.0.x` 一致 |
-| 8 | 通知留痕 | `ls data/notify/` | 每次审批/公告产生 `approval-*/broadcast-*.json` |
+| 8 | 通知留痕 | `ls data/notify/` | 流程各阶段产生 `intake-*/fix-start-*/approval-*/broadcast-*` 等留痕（含需求 `req-intake-*`、影子档 `shadow-*`、升级 `escalation-*`） |
 | 9 | 端到端 | 按《用户操作手册》第 2 章跑通 | `stage=DONE`，`gate_events` 完整 |
 | 10 | 异常分支 | `low-conf` / `canary-bad` 关键词各跑一次 | 分别 `ESCALATED`（闸门 1 / 回滚） |
 | 11 | 生产冒烟（production 模式） | `.venv/bin/python scripts/production-smoke.py` | 9 项检查全绿（MySQL 建表/审计/令牌指纹/应用 CRUD/workflow_runs/kill switch/清理预演） |
@@ -695,7 +695,7 @@ docker compose --profile obs up -d    # Prometheus http://127.0.0.1:9095 / Grafa
 | 产物 | 位置 | 说明 |
 | --- | --- | --- |
 | Worker 日志 | `worker.log`（若按 2.9 后台启动） | 全链路 `[evidence]/[cluster]/[triage]/[rag]/[fix]/[sandbox]/[canary]/[release]` |
-| 通知留痕 | `data/notify/*.json` | `approval-*` / `broadcast-*` / `escalation-*` |
+| 通知留痕 | `data/notify/*.json` | `intake-*` / `req-intake-*` / `fix-start-*` / `approval-*` / `broadcast-*` / `escalation-*` / `shadow-*` |
 | ArgoCD 留痕 | `data/argocd/*.json` | 每次渲染的 Application manifest |
 | 沙箱工作区 | `data/sandbox/<patch_id>/` | 应用补丁后的源码（同时作为镜像构建上下文，**请勿手工清理正在使用的目录**） |
 | 评测报告 | `data/triage_eval_report.json` / `data/fix_eval_report.json` | 离线评测结果 |
@@ -983,7 +983,7 @@ Caddy 清除客户端 `Forwarded`、`X-Forwarded-*`、`X-Real-IP`、`X-Original-
 aiops-agent/
 ├── aiops_agent/                # Python 包（业务核心，27 模块）
 │   ├── workflows.py            # 主工作流（状态机/闸门/队列/审计）
-│   ├── activities.py           # 13 个 Temporal activity
+│   ├── activities.py           # 16 个 Temporal activity
 │   ├── worker.py / config.py / models.py / mode.py
 │   ├── triage.py / logs.py / page_health.py       # 分析层（含通用白屏判据）
 │   ├── code_rag.py / fix_agent.py / qoder_fix.py  # 决策层（Ollama / Qoder 双修复提供者）
@@ -998,7 +998,7 @@ aiops-agent/
 ├── demo-app/                   # 演示被修复的服务（源码 + tests + Dockerfile + http_server）
 ├── scripts/                    # demo-up.sh（一键编排）/ aiops-watchdog.py（组件守护）/
 │                               # production-smoke.py / security-scan.sh / scenarios/**（8 场景剧本）
-├── tests/                      #  单元测试（37 个测试文件 / 836 用例）
+├── tests/                      #  单元测试（49 个测试文件 / 1289 用例）
 ├── monitoring/                 # Alertmanager 路由注入脚本
 ├── prometheus/                 # 告警规则样例
 ├── data/                       # 索引 / 留痕 / 沙箱工作区 / 评测报告（运行期生成）

@@ -14,6 +14,11 @@
 渐进信任档（P1-2）：
     - shadow_mode 开启时，测试通过后不创建 MR、不进入审批/发布，
       仅生成建议卡片留痕后以 SHADOWED 终态结束（只建议不执行）。
+
+IM 通知（接收/进入修复，patched 守护）：
+    - 接收即推送处理流程说明（告警：日志取证→聚类→根因→闸门1；需求：已批准→直接修复）；
+    - 进入修复流程前推送分析结论 + 修复链路与模式（影子档/全链路）；
+    - 新增活动调用以 workflow.patched 标记守护，旧运行中流程的历史重放不受影响。
 """
 
 from __future__ import annotations
@@ -175,6 +180,10 @@ class AIOpsFixWorkflow:
         notify_cfg = policy["notify_window"]
         canary_cfg = policy["canary"]
 
+        # ---------- 接收通知：监控到告警/日志 → IM 推送处理流程说明（IM 交互补齐） ----------
+        if workflow.patched("flow-intake-notify-g1"):
+            await self._call(activities.notify_flow_intake, alert)
+
         # ---------- TRIAGING：日志取证 + 聚类降噪 + LLM 根因 ----------
         self.stage = "TRIAGING"
         evidence = await self._call(activities.collect_evidence, alert)
@@ -214,6 +223,15 @@ class AIOpsFixWorkflow:
         approval_cfg = self._policy["approval"]
         notify_cfg = self._policy["notify_window"]
         canary_cfg = self._policy["canary"]
+
+        # ---------- 进入修复通知：分析结论 + 修复链路与模式（IM 交互补齐） ----------
+        if workflow.patched("fix-start-notify-g1"):
+            await self._call(
+                activities.notify_fix_started,
+                alert,
+                root_cause,
+                self._policy.get("shadow_mode", False),
+            )
 
         # ---------- FIXING / TESTING：补丁生成 + 沙箱验证（回炉限次） ----------
         references = await self._call(
@@ -548,6 +566,9 @@ class AIOpsRequirementWorkflow(AIOpsFixWorkflow):
         self._gate_events.append(
             f"requirement:approved:{task.analysis_id}:v{task.version}:by={task.approved_by}"
         )
+        # ---------- 接收通知：已批准需求任务 → IM 推送任务与流程说明（IM 交互补齐） ----------
+        if workflow.patched("requirement-intake-notify-g1"):
+            await self._call(activities.notify_requirement_intake, task)
         return await self._fix_to_release(alert, root_cause, started)
 
     def _final(
