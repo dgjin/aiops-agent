@@ -2,12 +2,12 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 文档版本 | v1.3 |
-| 日期 | 2026-10-01（v1.3 修订 2026-10-13） |
+| 文档版本 | v1.4 |
+| 日期 | 2026-10-01（v1.4 修订 2026-10-13） |
 | 状态 | 已实现系统（与 aiops-agent/ 工程代码逐项对齐） |
 | 关联文档 | 《AIOps 自动运维智能体系统设计方案》v1.1、《AIOps 自动运维智能体系统实施计划》v1.0、《用户操作手册》、《部署手册》 |
 | 适用范围 | 应用服务器异常自愈、AI 辅助代码修复与自动化发布（含演示环境全链路） |
-| 修订记录 | v1.3（2026-10-13）：IM 流程通知补齐——新增接收/需求接收/进入修复三类流程卡片（4.6 共 7 类卡片），工作流调用以 patched 标记守护（flow-intake-notify-g1 / requirement-intake-notify-g1 / fix-start-notify-g1）；activity 13→16；v1.2：测试基线 836 用例；运维治理加固：组件守护单实例锁与档位锁定+一致性校验、开机自启（launchd）、备份与恢复演练、数据清理与日志轮转、doctor 磁盘水位检查、启动档位横幅；v1.1：测试基线 832 用例；默认模型切换 qwen3.8:27b-mlx；新增 Qoder 修复引擎（4.3.3）、需求分析闭环（4.9）、可用性巡检/日志采集/组件守护；BFF 路由扩至 11 域 |
+| 修订记录 | v1.4（2026-10-13）：生产档切换全链路执行——`release-gate-policy.yaml` 显式声明 `shadow_mode: false`；`validate_runtime_policy` 由「强制影子档」调整为「production 必须显式声明 shadow_mode（true=影子档 / false=全链路），缺失即拒绝启动」防静默漂移；readiness 配置校验标签 `valid_full_chain`；v1.3（2026-10-13）：IM 流程通知补齐——新增接收/需求接收/进入修复三类流程卡片（4.6 共 7 类卡片），工作流调用以 patched 标记守护（flow-intake-notify-g1 / requirement-intake-notify-g1 / fix-start-notify-g1）；activity 13→16；v1.2：测试基线 836 用例；运维治理加固：组件守护单实例锁与档位锁定+一致性校验、开机自启（launchd）、备份与恢复演练、数据清理与日志轮转、doctor 磁盘水位检查、启动档位横幅；v1.1：测试基线 832 用例；默认模型切换 qwen3.8:27b-mlx；新增 Qoder 修复引擎（4.3.3）、需求分析闭环（4.9）、可用性巡检/日志采集/组件守护；BFF 路由扩至 11 域 |
 
 ---
 
@@ -177,7 +177,7 @@ DETECTED → TRIAGING → FIXING ⇄ TESTING → WAIT_APPROVAL → NOTIFYING →
 
 FIXING ⇄ TESTING 为回炉重试环：每次失败后 `attempt+1` 重新生成补丁，默认重试上限 `max_fix_retries=2`（共 3 次尝试），耗尽进入 `ESCALATED`。
 
-测试通过后若策略 `shadow_mode=true`（生产档强制，P1-2 渐进信任），流程进入 `SHADOWED` 终态：仅推送影子档建议卡片（`notify_shadow_suggestion`），不创建 MR、不进入审批与发布。生产实例流程终态因此普遍为 `SHADOWED`（控制台显示「已建议（影子档）」）；演示档 `demo-policy.yaml` 为 `shadow_mode=false`，可跑全链路。
+测试通过后按策略运行档执行：`shadow_mode=true`（影子档）进入 `SHADOWED` 终态——仅推送影子档建议卡片（`notify_shadow_suggestion`），不创建 MR、不进入审批与发布；`false`（全链路，当前生产档）继续创建 MR → 闸门 2 审批 → 公告 → 金丝雀发布。production 档必须在策略中**显式声明** `shadow_mode`（缺失即拒绝启动，防静默漂移）；演示档 `demo-policy.yaml` 同为 `false`。
 
 ### 3.2 阶段说明
 
@@ -548,7 +548,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 
 ## 8 质量保障与评测体系
 
-### 8.1 单元测试矩阵（2026-10-13 回归复核：49 个测试文件 / 1289 用例通过、跳过 6）
+### 8.1 单元测试矩阵（2026-10-13 回归复核：49 个测试文件 / 1290 用例通过、跳过 6）
 
 | 测试文件 | 覆盖范围 |
 | --- | --- |
@@ -573,7 +573,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 | `tests/test_app_manifest.py` / `test_changes.py` / `test_release_direct.py` / `test_worker_registry.py` | Manifest 校验与探测、变更关联、直连发布、活动注册表防回归 |
 | `tests/test_deploy_manifests.py` | K8s 清单 39 项静态校验（命名空间/镜像/副本/PDB/HPA/探针/PVC/策略/告警名集合对齐）+ compose profiles + Dockerfile |
 
-> 2026-10-13 单机生产化整改后全量回归复核：**Ran 1289 tests — OK（skipped=6）**（49 个测试文件；发现式运行必须带 `-t .`）。整改新增套件包括：`test_production_safety` / `test_chatops` / `test_mcp_server` / `test_alert_store` / `test_release_safety` / `test_release_replay` / `test_backup` / `test_readiness` / `test_startup_mode` / `test_production_deploy` / `test_topology`。同日 IM 流程通知补齐（接收/需求接收/进入修复，activity 13→16）后同口径复核通过；`test_notify` / `test_worker_registry` / `test_release_replay` 覆盖新卡片、活动注册与重放守护。
+> 2026-10-13 单机生产化整改后全量回归复核：**Ran 1290 tests — OK（skipped=6）**（49 个测试文件；发现式运行必须带 `-t .`）。整改新增套件包括：`test_production_safety` / `test_chatops` / `test_mcp_server` / `test_alert_store` / `test_release_safety` / `test_release_replay` / `test_backup` / `test_readiness` / `test_startup_mode` / `test_production_deploy` / `test_topology`。同日 IM 流程通知补齐（接收/需求接收/进入修复，activity 13→16）后同口径复核通过；`test_notify` / `test_worker_registry` / `test_release_replay` 覆盖新卡片、活动注册与重放守护。同日生产档切换全链路执行（`release-gate-policy.yaml` 显式 `shadow_mode: false`；统一启动门禁改为「档位必须显式声明」，缺失即拒绝启动）后再次全量复核通过；`test_startup_mode` / `test_readiness` 按放行/拦截双侧更新。
 
 ### 8.2 triage 离线评测（`eval_triage.py`）
 
@@ -698,7 +698,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 - **事件聚合（C）**：告警事件跨进程持久化与去重（`aiops_agent/alert_store.py`，故障域键 = `{mode}:{namespace}:{service}`，成员唯一约束防重复投递，条件 UPDATE + 租约认领支持崩溃接管，Temporal 调用一律在事务外）；新增 `alert_events` / `alert_event_members` 表与迁移。
 - **ChatOps 信任边界（B）**：`POST /api/im/command` 走 middleware 专用通道认证（`AIOPS_IM_TOKEN`；未配置＝通道关闭、凭证不符＝认证失败，两者都不回落常规鉴权；production 未接可信网桥前整体关闭），路由内二次核对 `token_record.source == 'im'`；发送者角色按 `AIOPS_IM_USERS` 映射，未映射＝viewer。MCP production 仅支持 stdio 且逐调用最小权限凭证。`/metrics`、`/readyz`、`/livez` 收敛为仅 loopback 对端。
 - **发布互斥与急停（G）**：`release_journal.py` 文件锁 + 持久化发布记录锁定真实目标资源；急停与失败恢复沿用 kill switch 与 journal 非终态记录处理。
-- **统一启动（D）**：`config.startup_snapshot` 对 production 强制全组件 loopback、端口不得重复、venv/策略 `shadow_mode` 等 fail-fast 门禁；演示工具在 production 一律拒绝（如 `demo_log_generator`）。
+- **统一启动（D）**：`config.startup_snapshot` 对 production 强制全组件 loopback、端口不得重复、venv/策略档位显式声明（`shadow_mode` 键必填）等 fail-fast 门禁；演示工具在 production 一律拒绝（如 `demo_log_generator`）。
 - **HTTPS 与网络收敛（E/F）**：本机 Caddy（8643）反代 8600 / 8099 / 指标通道，清除客户端转发头、只用真实 TCP 对端重建身份；HSTS 仅在受信代理转发 https 时下发；正式 Temporal Server 使用独立业务库 / visibility 库与生产 namespace。
 - **备份与恢复（H）**：AES-256-GCM 加密归档 + 定向隔离恢复校验；备份与发布共用同一 `release_lock` 并在持锁后执行 `assert_idle_locked()`（见《部署手册》10.2）。K8s 探针契约同步为 exec（I），清单仅静态校验、未集群实测。
 

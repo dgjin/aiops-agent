@@ -147,7 +147,7 @@ async def check(gateway) -> dict:
     try:
         snapshot = config.startup_snapshot()
         summary = {key: snapshot[key] for key in ("mode", "policy_sha256", "shadow_mode", "namespace", "task_queue")}
-        checks["configuration"] = status(True, "valid_shadow" if snapshot["shadow_mode"] else "valid_demo")
+        checks["configuration"] = status(True, "valid_shadow" if snapshot["shadow_mode"] else "valid_full_chain")
     except Exception:
         checks["configuration"] = status(False, "invalid_runtime_configuration")
         for name in ("mysql", "schema", "redis", "temporal", "worker"):

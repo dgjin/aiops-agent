@@ -79,8 +79,15 @@ class StartupModeTest(unittest.TestCase):
         with self.assertRaisesRegex(mode.ModeConfigError, "venv"):
             config.startup_snapshot(self.root / "other")
 
-    def test_production_nonshadow_policy_rejected(self):
+    def test_production_full_chain_policy_allowed(self):
+        """放行侧：显式 shadow_mode: false 在 production 合法（全链路档）。"""
         self.policy.write_text("release_gate: {shadow_mode: false}")
+        policy = config.load_policy()
+        self.assertFalse(config.snapshot_for_workflow(policy)["shadow_mode"])
+
+    def test_production_implicit_shadow_mode_rejected(self):
+        """拦截侧：未显式声明 shadow_mode（含默认构造）仍拒绝，防静默漂移。"""
+        self.policy.write_text("release_gate:\n  triage:\n    confidence_threshold: 0.9\n")
         with self.assertRaisesRegex(mode.ModeConfigError, "shadow_mode"):
             config.load_policy()
         with self.assertRaises(mode.ModeConfigError):

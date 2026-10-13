@@ -198,9 +198,10 @@ class CanaryConfig(BaseModel):
 class ReleaseGatePolicy(BaseModel):
     """release_gate 段总纲。
 
-    shadow_mode（P1-2）：渐进信任档——流程在沙箱测试通过后停止，只生成
-    根因/补丁/测试报告建议并留痕通知，不创建 MR、不进入审批与发布执行链路。
-    默认关闭；建议按「shadow → 小流量自动 → 全自动」逐步提信任。
+    shadow_mode：运行档开关——true = 影子档（沙箱测试通过后停止，只生成
+    根因/补丁/测试报告建议并留痕通知，不创建 MR、不进入审批与发布）；
+    false = 全链路（MR → 审批 → 公告 → 金丝雀发布）。production 档必须
+    显式声明该键（validate_runtime_policy 校验），防配置缺失静默改变执行姿势。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -279,9 +280,14 @@ def load_policy(path: str | os.PathLike | None = None) -> Policy:
 
 
 def validate_runtime_policy(policy: Policy) -> None:
-    """首次生产试点只允许影子策略；不更改正在执行的历史流程。"""
-    if runtime_mode.is_production() and not policy.release_gate.shadow_mode:
-        raise runtime_mode.ModeConfigError("production 必须显式配置 release_gate.shadow_mode=true")
+    """production 必须显式声明运行档（shadow_mode 键必填，true/false 均可）。
+
+    不依赖默认值，防配置缺失静默切换执行姿势；不更改正在执行的历史流程。
+    """
+    if runtime_mode.is_production() and "shadow_mode" not in policy.release_gate.model_fields_set:
+        raise runtime_mode.ModeConfigError(
+            "production 必须显式配置 release_gate.shadow_mode（true=影子档只建议 / false=全链路执行）"
+        )
 
 
 def startup_snapshot(root: Path | None = None) -> dict:

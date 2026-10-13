@@ -127,11 +127,16 @@ class ReadinessReportTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(report["checks"]["configuration"]["ok"])
             gw.client.assert_not_called()
 
-    async def test_production_shadow_required(self):
+    async def test_production_shadow_mode_must_be_explicit(self):
+        """放行：显式 true/false 均合法；拦截：未声明（默认构造）拒绝。"""
         from aiops_agent.config import Policy, validate_runtime_policy
         with patch.dict(os.environ, {"AIOPS_MODE": "production"}):
             with self.assertRaises(readiness.mode.ModeConfigError):
-                validate_runtime_policy(Policy())
+                validate_runtime_policy(Policy())  # 未显式声明 shadow_mode → 拒绝
+            validate_runtime_policy(Policy.model_validate({"release_gate": {"shadow_mode": False}}))
+            validate_runtime_policy(Policy.model_validate({"release_gate": {"shadow_mode": True}}))
+        with patch.dict(os.environ, {"AIOPS_MODE": "demo"}):
+            validate_runtime_policy(Policy())  # demo 档无显式要求
 
     async def test_each_critical_failure_and_optional_degradation(self):
         snapshot = dict(mode="production", policy_sha256="abc", shadow_mode=True,
