@@ -6,7 +6,7 @@
     render_escalation_card    转人工升级卡片（值班负责人）
     NotificationSender.send   配置 webhook 时真实 POST（支持飞书/钉钉加签）；
                               未配置时留痕 data/notify/<msg_id>.json（recorded）；
-                              投递失败降级为 failed（通知失败不阻断修复主流程）
+                              投递失败或机器人应答非零（如加签不符）降级为 failed，不阻断修复主流程
     parse_callback            卡片按钮回调解析（飞书 action.value / 钉钉 actionURL 查询参数），
                               返回 (workflow_id, gate, decision)，供回调服务端校验后转发 signal
 
@@ -315,8 +315,25 @@ class NotificationSender:
             body["sign"] = _feishu_sign(timestamp, self.secret)
         return url, body
 
+    def _reply_code(self, resp) -> tuple[int | None, str]:
+        """解析群机器人应答业务码：飞书 code / 钉钉 errcode（兼容飞书旧版 StatusCode）。
+
+        机器人拒收（加签不符、参数错误等）以 HTTP 200 + 非零应答码返回；读取/解析
+        异常一律回退 (None, "")，由 HTTP 状态码兜底判定（通知层不因解析失败抛错）。
+        """
+        try:
+            data = json.loads(resp.read().decode("utf-8"))
+            code = data["errcode"] if self.provider == "dingtalk" else data.get("code", data.get("StatusCode"))
+            reply = data.get("errmsg") or data.get("msg") or data.get("StatusMessage") or ""
+            return int(code), str(reply)
+        except Exception:  # noqa: BLE001 - 应答读取/解析异常回退 HTTP 判据
+            return None, ""
+
     def send(self, message: dict, msg_id: str) -> dict:
-        """投递卡片：始终留痕；配置 webhook 时真实 POST。失败降级（通知不阻断主流程）。"""
+        """投递卡片：始终留痕；配置 webhook 时真实 POST。失败降级（通知不阻断主流程）。
+
+        成功 = HTTP 2xx 且业务应答码为 0；仅看 HTTP 状态会把机器人拒收误报为 live。
+        """
         NOTIFY_DIR.mkdir(parents=True, exist_ok=True)
         record = NOTIFY_DIR / f"{msg_id}.json"
         record.write_text(json.dumps(message, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -331,15 +348,23 @@ class NotificationSender:
         )
         try:
             with urllib.request.urlopen(request, timeout=10) as resp:
-                return {
-                    "mode": "live",
-                    "msg_id": msg_id,
-                    "status_code": resp.status,
-                    "path": str(record),
-                }
+                status_code = resp.status
+                code, reply = self._reply_code(resp)
         except (urllib.error.HTTPError, OSError) as exc:
             # 通知失败不影响修复主流程：降级记录，留痕兜底审计
             return {"mode": "failed", "msg_id": msg_id, "error": str(exc), "path": str(record)}
+        if code is not None and code != 0:
+            return {
+                "mode": "failed",
+                "msg_id": msg_id,
+                "status_code": status_code,
+                "error": f"机器人应答非零 code={code}：{reply}",
+                "path": str(record),
+            }
+        result = {"mode": "live", "msg_id": msg_id, "status_code": status_code, "path": str(record)}
+        if code is not None:
+            result["provider_code"] = code
+        return result
 
 
 def parse_callback(payload: dict | str) -> tuple[str, str, str] | None:

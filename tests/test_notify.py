@@ -163,9 +163,10 @@ class TestSenderLive(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _resp(self) -> mock.MagicMock:
+    def _resp(self, body: bytes = b'{"code": 0, "msg": "success"}') -> mock.MagicMock:
         resp = mock.MagicMock()
         resp.status = 200
+        resp.read.return_value = body
         resp.__enter__.return_value = resp
         return resp
 
@@ -192,7 +193,8 @@ class TestSenderLive(unittest.TestCase):
             provider="dingtalk", webhook="http://dingtalk.example/hook", secret="s3cret"
         )
         with mock.patch.object(notify, "NOTIFY_DIR", self.tmp / "notify"), mock.patch(
-            "aiops_agent.notify.urllib.request.urlopen", return_value=self._resp()
+            "aiops_agent.notify.urllib.request.urlopen",
+            return_value=self._resp(b'{"errcode": 0, "errmsg": "ok"}'),
         ) as urlopen:
             result = sender.send(card, msg_id="approval-p-nt-1-r1")
         self.assertEqual(result["mode"], "live")
@@ -211,6 +213,23 @@ class TestSenderLive(unittest.TestCase):
         self.assertEqual(result["mode"], "failed")
         self.assertIn("conn refused", result["error"])
         self.assertTrue(Path(result["path"]).is_file())  # 降级仍留痕
+
+    def test_provider_error_code_degrades(self) -> None:
+        """HTTP 200 + 非零应答码（如飞书加签不符）必须判 failed，而非误报 live。"""
+        card = notify.render_broadcast_card(ALERT, PATCH, "v1.0.242")
+        cases = [
+            ("feishu", b'{"code": 19021, "msg": "sign match fail"}', "19021"),
+            ("dingtalk", b'{"errcode": 310000, "errmsg": "keywords not in content"}', "310000"),
+        ]
+        for provider, body, code in cases:
+            sender = notify.NotificationSender(provider=provider, webhook="http://bot.example/hook")
+            with mock.patch.object(notify, "NOTIFY_DIR", self.tmp / "notify"), mock.patch(
+                "aiops_agent.notify.urllib.request.urlopen", return_value=self._resp(body)
+            ):
+                result = sender.send(card, msg_id="broadcast-p-nt-1-r1")
+            self.assertEqual(result["mode"], "failed")
+            self.assertIn(code, result["error"])
+            self.assertTrue(Path(result["path"]).is_file())  # 降级仍留痕
 
 
 class TestParseCallback(unittest.TestCase):
