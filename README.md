@@ -75,6 +75,7 @@ cd aiops-agent
 ./start.sh                     # 一键启动（受控）：依赖预检 → 6 常驻组件 + 组件守护（无隐式动作：不灌日志/不起流程/不开浏览器）
 ./start.sh web                 # 另在前台启动前端 vite dev（热更 @5273，Ctrl+C 只停前端）
 ./start.sh down                # 停止全部（先停组件守护再停组件）
+./start.sh sync-ip             # 网络地址变化后同步生产部署（Caddyfile/settings/监控片段 + 重签 TLS、reload Caddy；--dry-run 预览）
 
 bash scripts/demo-up.sh        # 等价底层脚本（子命令 up/env/down/status/install 等；start.sh 为其薄封装）
 ```

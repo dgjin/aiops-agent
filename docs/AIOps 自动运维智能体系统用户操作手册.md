@@ -535,6 +535,7 @@ curl -X POST http://127.0.0.1:8600/api/system/kill-switch \
 # 一键启动（受控）：依赖预检 + 6 常驻组件（含 BFF 控制台）+ 组件守护（不自动灌日志/起流程）
 ./start.sh                         # 无隐式动作；./start.sh web 加前端热更；底层即 demo-up.sh
 ./start.sh status                  # 查看组件与守护状态、生效档位快照
+./start.sh sync-ip                 # 网络地址变化后同步生产部署（Caddyfile/settings/监控片段 + 重签 TLS、reload Caddy）
 
 # 控制台：demo 档本机 http://127.0.0.1:8600、局域网 http://<本机IP>:8600；production 经 Caddy https://<本机IP>:8643
 .venv/bin/python -m uvicorn bff.app:app --host 0.0.0.0 --port 8600

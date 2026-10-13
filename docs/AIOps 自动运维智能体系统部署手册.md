@@ -281,6 +281,7 @@ export AIOPS_POLICY_PATH=./demo-policy.yaml
 ./start.sh                         # 受控启动（推荐入口）：依赖与端口预检后拉起 6 常驻组件与组件守护（无隐式动作）
 ./start.sh web                     # 额外在前台启动前端 vite dev（热更，5273；Ctrl+C 只停前端）
 ./start.sh install                 # 将组件守护交 launchd 托管（登录自启；受控重装同命令）
+./start.sh sync-ip                 # 按当前网络地址同步生产部署（Caddyfile/settings/监控片段 + 重签 TLS、reload Caddy；--dry-run 预览）
 bash scripts/demo-up.sh            # 等价底层脚本（start.sh 即其薄封装）
 bash scripts/demo-up.sh status     # 查看组件与守护状态、生效档位快照
 bash scripts/demo-up.sh down       # 停止全部常驻组件（含组件守护；保留 launchd 注册）
@@ -1174,3 +1175,20 @@ SQL stdout 直接写入 600 暂存文件，不捕获到整块内存；逐行 SQL
 - **监控接线（G2 前置）**：Alertmanager receiver 指向 `https://10.1.112.39:8643/webhook`（`ca_file` + `credentials_file`），投放验证经 Caddy 到达接入层并实际开出 workflow；Prometheus `aiops-production-bff` / `aiops-production-worker` 双 job `health=up`、无 lastError。
 - **影子冒烟（W5）**：webhook 告警开出 workflow，链路 evidence（Loki）→ Drain3 聚类 → LLM triage（confidence=0.30）→ 闸门 1 转人工（投递=recorded），未触真实仓库/MR/发布路径。
 - **残余待办**：租约签发/解除与无人值守协调（备份调度启用前置）、03:00 实际调度与 26 小时告警接线、真实归档的隔离恢复灌入、SQLite/Loki 恢复演练、RPO≤24h / RTO≤60min 实测。异地容灾与全天日志灾备仍未通过。
+
+> 注（2026-10-13 网络变更后）：主机 LAN 地址由 DHCP 变更为 `192.168.0.6`；入口与监控目标已由 `./start.sh sync-ip` 同步切换，见 10.7。
+
+### 10.7 LAN 地址迁移与动态同步（2026-10-13 增补）
+
+生产入口（Caddy 站点/bind）、TLS 叶证书 SAN 与监控抓取目标均绑定主机 LAN 地址，该地址由 DHCP 分配；网络环境变化后须同步切换。仓库提供一键同步工具（幂等，可反复执行）：
+
+```bash
+./start.sh sync-ip              # 探测当前 LAN 地址（en0/en1）并同步全部地址引用
+./start.sh sync-ip --dry-run    # 只报告将执行的变更；--ip 可显式指定地址
+```
+
+流程（`scripts/sync_lan_ip.py`）：探测并校验新地址（私网 IPv4、8643 可绑定）→ 就地更新 `data/production-deploy/Caddyfile`（站点与 bind）与 `settings.json`（含 `production-deploy-input` 镜像）→ 重渲染监控片段并在 `data/monitoring-wiring-review/lan-ip-<新地址>/` 生成迁移材料 → 调 `scripts/production_tls.py renew` 重签叶证书（SAN 含新地址）并 reload Caddy。地址未变化时仅做证书核查；续签或 reload 失败保留原证书，可重跑本命令重试。
+
+外部监控栈沿用第九节边界（工具不自动改写/重启）：按迁移材料人工替换监控栈 `deploy/prometheus.yml` 两个 targets 与 `deploy/alertmanager.yml` 的 receiver url（替换前保留 `.bak.<时间戳>`），重启两个容器（Alertmanager 由 entrypoint 渲染模板，改模板必须重启容器），以 targets `up` 与 `/-/ready` 验证。
+
+2026-10-13 首次执行记录（DHCP：`10.1.112.39` → `192.168.0.6`）：Caddyfile 2 处、两处 settings 与两个片段已更新；叶证书重签（SAN = host.docker.internal / localhost / 127.0.0.1 / ::1 / 192.168.0.6）并 reload，入口新地址与本机均可达 200；监控栈替换 + 容器重启后 Prometheus 双 job `up`、Alertmanager `/-/ready` 200；被监控应用条目 url 更新为 `http://192.168.0.6:3000/`（生产库 monitored_apps 表），巡检下一轮恢复在线。
