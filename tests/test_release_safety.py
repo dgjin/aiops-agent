@@ -290,11 +290,21 @@ class IsolatedReleaseTest(unittest.TestCase):
         with self.assertRaisesRegex(journal.ReleaseSafetyError, "丢失"):
             self.direct()
 
-    def test_production_no_registry_fallback_and_direct_disabled(self):
+    def test_production_registry_required_and_direct_gated_by_shadow_mode(self):
+        """production 门禁：目标须注册且为直连型（禁止回退与容器交付）；
+        直连发布按 shadow_mode 判定——影子档拒绝（含旁路直调），全链路档放行。"""
+        from aiops_agent import config as config_mod
+
+        shadow_policy = mock.Mock()
+        shadow_policy.release_gate.shadow_mode = True
+        full_policy = mock.Mock()
+        full_policy.release_gate.shadow_mode = False
+        direct_entry = {"repo": self.repo, "url": "http://invalid.test"}
+
         with mock.patch.dict(os.environ, {"AIOPS_MODE": "production"}), mock.patch.object(
                 release, "run_canary") as container:
-            for entry in (None, {"repo": self.repo, "url": "http://invalid.test"},
-                          {"repo": self.repo, "url": ""}):
+            # 未注册 / 容器型（无 url）→ 拒绝（生产禁止回退与容器交付）
+            for entry in (None, {"repo": self.repo, "url": ""}):
                 with mock.patch("aiops_agent.app_registry.resolve", return_value=entry):
                     with self.assertRaises(ApplicationError) as caught:
                         asyncio.run(activities.deploy_canary(Alert("a", "svc"), self.patch, 5, 1))
@@ -302,10 +312,29 @@ class IsolatedReleaseTest(unittest.TestCase):
             with mock.patch("aiops_agent.app_registry.resolve", side_effect=OSError("db unavailable")):
                 with self.assertRaises(ApplicationError):
                     asyncio.run(activities.deploy_canary(Alert("a", "svc"), self.patch, 5, 1))
-            with self.assertRaises(journal.ReleaseSafetyError):
-                self.direct()
             container.assert_not_called()
-        self.assertEqual((self.repo / "page.txt").read_text(), "old\n")
+            # 影子档：直连发布在 release 层拒绝（旁路直调与活动路径一致）
+            with mock.patch.object(config_mod, "load_policy", return_value=shadow_policy):
+                with self.assertRaises(journal.ReleaseSafetyError):
+                    self.direct()
+                with mock.patch("aiops_agent.app_registry.resolve", return_value=direct_entry):
+                    with self.assertRaises(ApplicationError) as caught:
+                        asyncio.run(activities.deploy_canary(Alert("a", "svc"), self.patch, 5, 1))
+                    self.assertTrue(caught.exception.non_retryable)
+            self.assertEqual((self.repo / "page.txt").read_text(), "old\n")
+            # 全链路档：放行（旁路直调真实执行到健康结果）
+            with mock.patch.object(config_mod, "load_policy", return_value=full_policy):
+                canary = self.direct()
+            self.assertTrue(canary.healthy)
+            self.assertEqual(canary.mode, "direct")
+            self.assertEqual((self.repo / "page.txt").read_text(), "new\n")
+            # 全链路档：活动分流到直连发布（不再抛门禁错误）
+            with mock.patch.object(config_mod, "load_policy", return_value=full_policy), \
+                    mock.patch.object(release, "run_canary_direct", return_value=canary) as direct_mock, \
+                    mock.patch("aiops_agent.app_registry.resolve", return_value=direct_entry):
+                got = asyncio.run(activities.deploy_canary(Alert("a", "svc"), self.patch, 5, 1))
+            self.assertTrue(got.healthy)
+            self.assertEqual(direct_mock.call_count, 1)
 
     def test_container_promotion_retains_config_and_cleans_after_health(self):
         runner = MemoryRunner()

@@ -338,11 +338,15 @@ class TemporalGateway:
         self.invalidate_cache()
         return handle.id
 
-    async def start_requirement_flow(self, task, wf_id: str) -> str:
+    async def start_requirement_flow(self, task, wf_id: str, resume_patch: dict | None = None) -> str:
         """启动需求驱动修复流程（管理员批准分析结果后）；幂等键 ``aiops-req-{analysis_id}-v{version}``。
 
         与 :meth:`start_flow` 同约定：策略快照在启动时读取；已存在同 ID 流程时抛 ValueError。
         工作流内部保留沙箱验证 / 人工审批 / 公告倒计时 / 金丝雀发布全链路。
+
+        ``resume_patch``：影子建议续接——影子档已生成补丁的 dict（取自原 SHADOWED
+        流程 result）注入策略快照，工作流首轮跳过补丁生成、直接以该补丁进入完整
+        沙箱验证（见 AIOpsRequirementWorkflow / workflows._patch_from_resume）。
         """
         from temporalio.exceptions import WorkflowAlreadyStartedError
         from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
@@ -350,6 +354,8 @@ class TemporalGateway:
         from aiops_agent.config import load_policy, snapshot_for_workflow
 
         snapshot = snapshot_for_workflow(load_policy())
+        if resume_patch is not None:
+            snapshot["resume_patch"] = resume_patch
         client = await self.client()
         try:
             handle = await client.start_workflow(

@@ -465,3 +465,67 @@ async def api_requirement_analysis_approve(request: Request, analysis_id: str) -
         params={"version": version, "entry_id": entry.get("entry_id")},
     )
     return ok({"analysis": entry, "wf_id": started})
+
+
+@router.post("/api/requirements/analyses/{analysis_id}/resume-shadow")
+async def api_requirement_analysis_resume_shadow(
+    request: Request, analysis_id: str
+) -> dict:
+    """影子建议续接：复用原流程已生成补丁，续接执行完整链路（MR → 审批 → 公告 → 发布）。
+
+    影子档（shadow_mode）下流程以 SHADOWED 终态结束（只建议不执行）。归档评估后
+    决定采纳时走本端点：不重新分析、不重新生成补丁，直接以原补丁进入完整沙箱验证
+    与后续闸门。续接流程 id 固定 ``aiops-req-{analysis_id}-v{version}-resume1``
+    （幂等防重），并将会话 approved.wf_id 指向续接流程（发布状态控制随之跟踪）。
+    """
+    entry = _find_analysis(analysis_id)
+    if entry.get("status") != "approved":
+        raise ApiError(409, f"当前状态 {entry.get('status') or '未知'} 不允许续接（要求已批准）")
+    if await _resolve_release_status(entry) == "released":
+        raise ApiError(409, "该需求已发布成功（终态），不能再次续接")
+    approved = entry.get("approved") or {}
+    original_wf_id = str(approved.get("wf_id") or "")
+    if not original_wf_id:
+        raise ApiError(409, "会话缺少已批准流程记录，无法续接影子建议")
+    try:
+        detail = await gw.flow_detail(original_wf_id)
+    except Exception as exc:  # noqa: BLE001 - Temporal 不可达/记录过期：无法核对原流程
+        raise ApiError(409, "原流程记录不可读（Temporal 记录可能已过期），无法续接影子建议") from exc
+    result = detail.get("result")
+    if not isinstance(result, dict):
+        if detail.get("exec_status") == "RUNNING":
+            raise ApiError(409, "该需求的修复流程正在运行，无需续接")
+        raise ApiError(409, "原流程结果不可读（Temporal 记录可能已过期），无法续接影子建议")
+    if result.get("stage") != "SHADOWED":
+        raise ApiError(
+            409,
+            f"原流程阶段 {result.get('stage') or '未知'} 不是影子拦截（SHADOWED），无需续接",
+        )
+    patch = result.get("patch")
+    if not isinstance(patch, dict) or not patch.get("patch_id"):
+        raise ApiError(409, "原流程结果缺少补丁数据，无法续接影子建议")
+    actor = request.state.identity.user
+    task, version = requirement_analyses.build_requirement_task(entry, actor)
+    wf_id = f"aiops-req-{analysis_id}-v{version}-resume1"
+    try:
+        started = await gw.start_requirement_flow(task, wf_id, resume_patch=patch)
+    except ValueError as exc:
+        raise ApiError(409, str(exc)) from exc
+    try:
+        requirement_analyses.apply_resumed(entry, started, original_wf_id, actor)
+        requirement_analyses.persist_entry(entry)
+    except requirement_analyses.RequirementAnalysisError as exc:
+        # 工作流已启动：状态回写失败不静默——提示运行中流程与人工核对路径
+        raise ApiError(500, f"续接流程已启动（{started}），但会话状态回写失败：{exc}") from exc
+    audit.write_audit(
+        actor=actor,
+        action="requirement:resume-shadow",
+        wf_id=started,
+        target=analysis_id,
+        params={
+            "version": version,
+            "patch_id": patch.get("patch_id"),
+            "resumed_from": original_wf_id,
+        },
+    )
+    return ok({"analysis": entry, "wf_id": started})

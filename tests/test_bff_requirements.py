@@ -166,6 +166,27 @@ _ANALYSIS_RESULT = {
     "degraded": False,
 }
 
+# 影子档终态的工作流 result（SHADOWED：只建议不执行；含待续接的完整补丁）
+_SHADOW_RESULT = {
+    "exec_status": "COMPLETED",
+    "result": {
+        "stage": "SHADOWED",
+        "patch_id": "p-req-b-7-r0",
+        "patch": {
+            "patch_id": "p-req-b-7-r0",
+            "alert_id": "req-ra-app-b-7",
+            "files": ["server/skillLibrary.ts"],
+            "diff": "--- a/server/skillLibrary.ts\n+++ b/server/skillLibrary.ts\n",
+            "description": "增加用户维护管理功能",
+            "risk": "低",
+            "model_version": "qoder-cli:1.1.65",
+            "confidence": 1.0,
+            "degraded": False,
+        },
+        "gate_events": ["shadow:suggestion-only"],
+    },
+}
+
 
 class AnalysisRoutesTest(unittest.TestCase):
     """智能分析闭环路由：创建 / 列表 / 详情 / 反馈 / 批准（状态校验与工作流衔接）。"""
@@ -546,6 +567,169 @@ class AnalysisRoutesTest(unittest.TestCase):
         listed = asyncio.run(routes.api_requirement_analysis_list(app_id="app-b"))
         self.assertNotIn("release_status", listed["analyses"][0])
 
+    # ---- 影子建议续接（resume-shadow）：复用影子补丁续接完整链路 ----
+
+    def _resume_shadow(self, analysis_id: str = "ra-app-b-7"):
+        return asyncio.run(
+            routes.api_requirement_analysis_resume_shadow(self._request(), analysis_id)
+        )
+
+    def _approved_shadow(self) -> None:
+        """创建 → 分析完成 → 批准（原流程已转入修复链路，等待影子/全链路结果）。"""
+        self._create()
+        self._finish("ra-app-b-7")
+        self._approve()
+
+    def test_resume_shadow_starts_full_chain_with_resumed_patch(self) -> None:
+        """续接：以原影子补丁启动续接流程（不重新生成）；会话溯源并指向续接流程。"""
+        self._approved_shadow()
+        started = "aiops-req-ra-app-b-7-v1-resume1"
+        with mock.patch.object(
+            routes.gw, "release_status", new_callable=mock.AsyncMock, return_value="unknown"
+        ), mock.patch.object(
+            routes.gw,
+            "flow_detail",
+            new_callable=mock.AsyncMock,
+            return_value=dict(_SHADOW_RESULT),
+        ), mock.patch.object(
+            routes.gw,
+            "start_requirement_flow",
+            new_callable=mock.AsyncMock,
+            return_value=started,
+        ) as start:
+            data = self._resume_shadow()
+        self.assertEqual(data["wf_id"], started)
+        task, wf_id = start.call_args.args
+        self.assertEqual(wf_id, started)
+        self.assertEqual(task.analysis_id, "ra-app-b-7")
+        self.assertEqual(task.version, 1)
+        resume_patch = start.call_args.kwargs["resume_patch"]
+        self.assertEqual(resume_patch["patch_id"], "p-req-b-7-r0")
+        self.assertEqual(resume_patch["files"], ["server/skillLibrary.ts"])
+        # 会话回写：approved.wf_id 指向续接流程，原流程留作溯源
+        stored = routes.requirement_analyses.get("ra-app-b-7")
+        self.assertEqual(stored["approved"]["wf_id"], started)
+        self.assertEqual(stored["approved"]["resumed_from"], "aiops-req-ra-app-b-7-v1")
+        self.assertEqual(stored["approved"]["resumed_by"], "admin1")
+        self.assertEqual(data["analysis"]["approved"]["wf_id"], started)
+        self.assertEqual(self.audit.call_args.kwargs["action"], "requirement:resume-shadow")
+        self.assertEqual(self.audit.call_args.kwargs["wf_id"], started)
+
+    def test_resume_shadow_before_approved_409(self) -> None:
+        """未批准（analyzing）不允许续接。"""
+        self._create()
+        with self.assertRaises(ApiError) as ctx:
+            self._resume_shadow()
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("已批准", str(ctx.exception))
+
+    def test_resume_shadow_after_released_409(self) -> None:
+        """已发布成功（终态）：不能再次续接。"""
+        self._approved_shadow()
+        with mock.patch.object(
+            routes.gw, "release_status", new_callable=mock.AsyncMock, return_value="released"
+        ):
+            with self.assertRaises(ApiError) as ctx:
+                self._resume_shadow()
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("已发布成功", str(ctx.exception))
+
+    def test_resume_shadow_not_shadowed_409(self) -> None:
+        """原流程阶段不是 SHADOWED（如已走完整链路）：无需续接。"""
+        self._approved_shadow()
+        detail = {"exec_status": "COMPLETED", "result": {"stage": "DONE"}}
+        with mock.patch.object(
+            routes.gw, "release_status", new_callable=mock.AsyncMock, return_value="unknown"
+        ), mock.patch.object(
+            routes.gw, "flow_detail", new_callable=mock.AsyncMock, return_value=detail
+        ):
+            with self.assertRaises(ApiError) as ctx:
+                self._resume_shadow()
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("SHADOWED", str(ctx.exception))
+
+    def test_resume_shadow_result_expired_409(self) -> None:
+        """原流程结果不可读（result 为 None）：精确提示记录可能已过期。"""
+        self._approved_shadow()
+        with mock.patch.object(
+            routes.gw, "release_status", new_callable=mock.AsyncMock, return_value="unknown"
+        ), mock.patch.object(
+            routes.gw,
+            "flow_detail",
+            new_callable=mock.AsyncMock,
+            return_value={"exec_status": "COMPLETED", "result": None},
+        ):
+            with self.assertRaises(ApiError) as ctx:
+                self._resume_shadow()
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("过期", str(ctx.exception))
+
+    def test_resume_shadow_flow_detail_failure_409(self) -> None:
+        """Temporal 不可达 / 记录被清理：提示记录可能已过期。"""
+        self._approved_shadow()
+        with mock.patch.object(
+            routes.gw, "release_status", new_callable=mock.AsyncMock, return_value="unknown"
+        ), mock.patch.object(
+            routes.gw,
+            "flow_detail",
+            new_callable=mock.AsyncMock,
+            side_effect=RuntimeError("workflow not found"),
+        ):
+            with self.assertRaises(ApiError) as ctx:
+                self._resume_shadow()
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("过期", str(ctx.exception))
+
+    def test_resume_shadow_still_running_409(self) -> None:
+        """原流程仍在运行：无需续接（result 尚未产出）。"""
+        self._approved_shadow()
+        with mock.patch.object(
+            routes.gw, "release_status", new_callable=mock.AsyncMock, return_value="running"
+        ), mock.patch.object(
+            routes.gw,
+            "flow_detail",
+            new_callable=mock.AsyncMock,
+            return_value={"exec_status": "RUNNING", "result": None},
+        ):
+            with self.assertRaises(ApiError) as ctx:
+                self._resume_shadow()
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("正在运行", str(ctx.exception))
+
+    def test_resume_shadow_missing_patch_409(self) -> None:
+        """SHADOWED 但结果缺少补丁数据：无法续接。"""
+        self._approved_shadow()
+        detail = {"exec_status": "COMPLETED", "result": {"stage": "SHADOWED"}}
+        with mock.patch.object(
+            routes.gw, "release_status", new_callable=mock.AsyncMock, return_value="unknown"
+        ), mock.patch.object(
+            routes.gw, "flow_detail", new_callable=mock.AsyncMock, return_value=detail
+        ):
+            with self.assertRaises(ApiError) as ctx:
+                self._resume_shadow()
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("补丁", str(ctx.exception))
+
+    def test_resume_shadow_conflict_409(self) -> None:
+        """续接流程已存在（幂等拒绝）：传递 409。"""
+        self._approved_shadow()
+        with mock.patch.object(
+            routes.gw, "release_status", new_callable=mock.AsyncMock, return_value="unknown"
+        ), mock.patch.object(
+            routes.gw,
+            "flow_detail",
+            new_callable=mock.AsyncMock,
+            return_value=dict(_SHADOW_RESULT),
+        ), mock.patch.object(
+            routes.gw,
+            "start_requirement_flow",
+            new_callable=mock.AsyncMock,
+            side_effect=ValueError("流程已存在（幂等拒绝）：aiops-req-ra-app-b-7-v1-resume1"),
+        ):
+            with self.assertRaises(ApiError) as ctx:
+                self._resume_shadow()
+        self.assertEqual(ctx.exception.status_code, 409)
+
 
 class TrackEndpointTest(unittest.TestCase):
     """处理进度跟踪端点：参数校验 / 未跟踪条目 / 会话映射 / 发布终态（服务令牌通道）。"""
@@ -625,6 +809,7 @@ class AnalysisWiringTest(unittest.TestCase):
         self.assertIn("/api/requirements/analyses/{analysis_id}/feedback", paths)
         self.assertIn("/api/requirements/analyses/{analysis_id}/sync", paths)
         self.assertIn("/api/requirements/analyses/{analysis_id}/approve", paths)
+        self.assertIn("/api/requirements/analyses/{analysis_id}/resume-shadow", paths)
 
     def test_registered_in_app(self) -> None:
         from bff import app as bff_app
@@ -635,6 +820,7 @@ class AnalysisWiringTest(unittest.TestCase):
         self.assertIn("/api/requirements/analyses/{analysis_id}/feedback", paths)
         self.assertIn("/api/requirements/analyses/{analysis_id}/sync", paths)
         self.assertIn("/api/requirements/analyses/{analysis_id}/approve", paths)
+        self.assertIn("/api/requirements/analyses/{analysis_id}/resume-shadow", paths)
 
     def test_role_rules(self) -> None:
         from bff.middleware import required_role
@@ -648,6 +834,9 @@ class AnalysisWiringTest(unittest.TestCase):
         )
         self.assertEqual(
             required_role("POST", "/api/requirements/analyses/ra-x-1/approve"), "admin"
+        )
+        self.assertEqual(
+            required_role("POST", "/api/requirements/analyses/ra-x-1/resume-shadow"), "admin"
         )
         self.assertEqual(required_role("GET", "/api/requirements/analyses"), "viewer")
         self.assertEqual(required_role("GET", "/api/requirements/analyses/ra-x-1"), "viewer")

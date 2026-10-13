@@ -645,6 +645,9 @@ async def deploy_canary(
     直连应用（注册表配置 url，如本机 vite dev 前端）走「直连发布」：补丁直接应用到
     真实仓库（落盘即生效），以真实页面探针观测——探针关键词可选（配置时断言页面
     包含关键词，未配置时仅探活 HTTP 200）；其余应用走默认容器金丝雀。
+
+    production 门禁：目标必须在注册表且为直连型（url），禁止回退与容器型交付；
+    影子档（release_gate.shadow_mode=true）的真实发布拦截在 release 层统一判定。
     """
     from . import app_registry, metrics, release
 
@@ -661,9 +664,9 @@ async def deploy_canary(
         if mode.is_production():
             if not resolved:
                 raise ReleaseSafetyError("production目标未注册或注册表不可读，禁止回退")
-            if resolved.get("url"):
-                raise ReleaseSafetyError("production直连发布禁用")
-            raise ReleaseSafetyError("production交付类型未明确，真实发布未放行")
+            if not resolved.get("url"):
+                raise ReleaseSafetyError("production容器型交付未放行（仅支持已注册直连应用的全链路发布）")
+            # 直连应用的全链路发布：影子档拦截在 release.shadow_release_only（按当前策略）统一判定
         if resolved and resolved.get("url"):
             return release.run_canary_direct(patch, resolved["repo"], resolved["url"],
                 (resolved.get("contract") or {}).get("keyword", ""), traffic_percent,

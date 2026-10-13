@@ -6,7 +6,7 @@
 | 日期 | 2026-10-12 |
 | 适用对象 | SRE / 实施工程师 / 环境维护人员 |
 | 关联文档 | 《系统设计说明书》、《用户操作手册》 |
-| 修订记录 | v1.1（2026-10-12）：同步最新工程现状——BFF 控制台（0.0.0.0:8600，支持局域网访问）、可用性巡检 / 日志采集 / 组件守护、需求基线闭环、Qoder 修复引擎、模型默认值切换（qwen3.8:27b-mlx）、测试基线 836 用例；v1.2（2026-10-12）：运维治理（沙箱清理 / 日志轮转 / 数据备份与恢复演练 / launchd 开机自启）、watchdog 单实例锁与档位锁定；v1.3（2026-10-12）：P1 生产就绪续轮——Temporal dev server 持久化语义实测文档化（§2.4.1）、watchdog RSS 内存守护（AIOPS_WATCHDOG_RSS_MB，doctor「组件内存」检查项）、沙箱产物独立卷 env 化（AIOPS_SANDBOX_ROOT / AIOPS_QODER_ROOT，代码/清理/doctor/K8s 同源）、测试基线 857 用例；v1.4（2026-10-13）：IM 流程通知补齐（接收/需求接收/进入修复卡片，activity 13→16）、测试基线 1289 用例；v1.5（2026-10-13）：生产档切换全链路执行（`release-gate-policy.yaml` 显式 `shadow_mode: false`；生产档「必须显式声明档位」校验保留），策略变更后须 `./start.sh restart` 受控重启、测试基线 1290 用例 |
+| 修订记录 | v1.1（2026-10-12）：同步最新工程现状——BFF 控制台（0.0.0.0:8600，支持局域网访问）、可用性巡检 / 日志采集 / 组件守护、需求基线闭环、Qoder 修复引擎、模型默认值切换（qwen3.8:27b-mlx）、测试基线 836 用例；v1.2（2026-10-12）：运维治理（沙箱清理 / 日志轮转 / 数据备份与恢复演练 / launchd 开机自启）、watchdog 单实例锁与档位锁定；v1.3（2026-10-12）：P1 生产就绪续轮——Temporal dev server 持久化语义实测文档化（§2.4.1）、watchdog RSS 内存守护（AIOPS_WATCHDOG_RSS_MB，doctor「组件内存」检查项）、沙箱产物独立卷 env 化（AIOPS_SANDBOX_ROOT / AIOPS_QODER_ROOT，代码/清理/doctor/K8s 同源）、测试基线 857 用例；v1.4（2026-10-13）：IM 流程通知补齐（接收/需求接收/进入修复卡片，activity 13→16）、测试基线 1289 用例；v1.5（2026-10-13）：生产档切换全链路执行（`release-gate-policy.yaml` 显式 `shadow_mode: false`；生产档「必须显式声明档位」校验保留），策略变更后须 `./start.sh restart` 受控重启、测试基线 1290 用例；v1.6（2026-10-13）：影子建议续接（`resume-shadow` 端点复用影子档补丁续接完整链路）；发布层门禁按策略档位判定（影子档禁止真实发布 / 全链路放行；已注册直连型应用 `deploy_canary` 放行）、测试基线 1305 用例 |
 
 ---
 
@@ -171,7 +171,7 @@ ollama pull qwen3:8b          # 约 5.2GB；export AIOPS_TRIAGE_MODEL=qwen3:8b �
 
 | 文件 | 用途 | 关键时长 |
 | --- | --- | --- |
-| `release-gate-policy.yaml` | 生产/默认策略 | 审批超时 30m、倒计时 15m、观测 5m |
+| `release-gate-policy.yaml` | 生产/默认策略 | 审批超时 30m、倒计时 15m、观测 5m；`shadow_mode` 档位（当前 `false` 全链路；`true`=影子档禁止真实发布） |
 | `demo-policy.yaml` | 演示加速策略 | 审批超时 300s、倒计时 30s、观测 10s |
 
 **使用规则（重要）**：

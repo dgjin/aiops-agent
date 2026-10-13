@@ -7,7 +7,7 @@
 | 状态 | 已实现系统（与 aiops-agent/ 工程代码逐项对齐） |
 | 关联文档 | 《AIOps 自动运维智能体系统设计方案》v1.1、《AIOps 自动运维智能体系统实施计划》v1.0、《用户操作手册》、《部署手册》 |
 | 适用范围 | 应用服务器异常自愈、AI 辅助代码修复与自动化发布（含演示环境全链路） |
-| 修订记录 | v1.4（2026-10-13）：生产档切换全链路执行——`release-gate-policy.yaml` 显式声明 `shadow_mode: false`；`validate_runtime_policy` 由「强制影子档」调整为「production 必须显式声明 shadow_mode（true=影子档 / false=全链路），缺失即拒绝启动」防静默漂移；readiness 配置校验标签 `valid_full_chain`；v1.3（2026-10-13）：IM 流程通知补齐——新增接收/需求接收/进入修复三类流程卡片（4.6 共 7 类卡片），工作流调用以 patched 标记守护（flow-intake-notify-g1 / requirement-intake-notify-g1 / fix-start-notify-g1）；activity 13→16；v1.2：测试基线 836 用例；运维治理加固：组件守护单实例锁与档位锁定+一致性校验、开机自启（launchd）、备份与恢复演练、数据清理与日志轮转、doctor 磁盘水位检查、启动档位横幅；v1.1：测试基线 832 用例；默认模型切换 qwen3.8:27b-mlx；新增 Qoder 修复引擎（4.3.3）、需求分析闭环（4.9）、可用性巡检/日志采集/组件守护；BFF 路由扩至 11 域 |
+| 修订记录 | v1.5（2026-10-13）：影子建议续接——影子档 SHADOWED 建议归档评估后可续接执行完整链路（`resume_patch` 快照键复用原补丁、首轮跳过生成直入完整沙箱验证；端点 `POST /api/requirements/analyses/{id}/resume-shadow`，续接流程 id 固定 `-resume1` 幂等防重、会话 `approved.wf_id` 重指向并溯源 `resumed_from`）；发布层门禁按策略档位判定（影子档禁止真实发布 / 全链路放行，策略不可确认 fail-closed 防旁路）；测试基线 1305 用例；v1.4（2026-10-13）：生产档切换全链路执行——`release-gate-policy.yaml` 显式声明 `shadow_mode: false`；`validate_runtime_policy` 由「强制影子档」调整为「production 必须显式声明 shadow_mode（true=影子档 / false=全链路），缺失即拒绝启动」防静默漂移；readiness 配置校验标签 `valid_full_chain`；v1.3（2026-10-13）：IM 流程通知补齐——新增接收/需求接收/进入修复三类流程卡片（4.6 共 7 类卡片），工作流调用以 patched 标记守护（flow-intake-notify-g1 / requirement-intake-notify-g1 / fix-start-notify-g1）；activity 13→16；v1.2：测试基线 836 用例；运维治理加固：组件守护单实例锁与档位锁定+一致性校验、开机自启（launchd）、备份与恢复演练、数据清理与日志轮转、doctor 磁盘水位检查、启动档位横幅；v1.1：测试基线 832 用例；默认模型切换 qwen3.8:27b-mlx；新增 Qoder 修复引擎（4.3.3）、需求分析闭环（4.9）、可用性巡检/日志采集/组件守护；BFF 路由扩至 11 域 |
 
 ---
 
@@ -177,7 +177,7 @@ DETECTED → TRIAGING → FIXING ⇄ TESTING → WAIT_APPROVAL → NOTIFYING →
 
 FIXING ⇄ TESTING 为回炉重试环：每次失败后 `attempt+1` 重新生成补丁，默认重试上限 `max_fix_retries=2`（共 3 次尝试），耗尽进入 `ESCALATED`。
 
-测试通过后按策略运行档执行：`shadow_mode=true`（影子档）进入 `SHADOWED` 终态——仅推送影子档建议卡片（`notify_shadow_suggestion`），不创建 MR、不进入审批与发布；`false`（全链路，当前生产档）继续创建 MR → 闸门 2 审批 → 公告 → 金丝雀发布。production 档必须在策略中**显式声明** `shadow_mode`（缺失即拒绝启动，防静默漂移）；演示档 `demo-policy.yaml` 同为 `false`。
+测试通过后按策略运行档执行：`shadow_mode=true`（影子档）进入 `SHADOWED` 终态——仅推送影子档建议卡片（`notify_shadow_suggestion`），不创建 MR、不进入审批与发布；`false`（全链路，当前生产档）继续创建 MR → 闸门 2 审批 → 公告 → 金丝雀发布。production 档必须在策略中**显式声明** `shadow_mode`（缺失即拒绝启动，防静默漂移）；演示档 `demo-policy.yaml` 同为 `false`。影子档建议经归档评估决定采纳时走**影子建议续接**（`POST /api/requirements/analyses/{analysis_id}/resume-shadow`）：不重新分析、不重新生成补丁，以原 SHADOWED 结果的补丁经策略快照 `resume_patch` 注入续接流程（`workflows._patch_from_resume`，字段防御性兜底、非法输入返回 `None` 回落正常链路），首轮跳过 `generate_patch` 直入完整沙箱验证（`gate_events` 记 `resume:patch:{patch_id}`），验证失败回炉后仍走正常生成链路；续接流程 id 固定 `aiops-req-{analysis_id}-v{version}-resume1`（幂等防重），会话 `approved.wf_id` 重指向续接流程并记录 `resumed_from` 溯源。发布层另有按档位判定的最终防御（`release.shadow_release_only`）：影子档禁止真实发布（防绕过工作流 shadow 分支的旁路调用）、全链路档放行，策略不可确认时 fail-closed 按影子档处理；`deploy_canary` 对已注册直连型应用（含 url）放行全链路发布、容器型交付仍拒绝。
 
 ### 3.2 阶段说明
 
@@ -573,7 +573,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 | `tests/test_app_manifest.py` / `test_changes.py` / `test_release_direct.py` / `test_worker_registry.py` | Manifest 校验与探测、变更关联、直连发布、活动注册表防回归 |
 | `tests/test_deploy_manifests.py` | K8s 清单 39 项静态校验（命名空间/镜像/副本/PDB/HPA/探针/PVC/策略/告警名集合对齐）+ compose profiles + Dockerfile |
 
-> 2026-10-13 单机生产化整改后全量回归复核：**Ran 1290 tests — OK（skipped=6）**（49 个测试文件；发现式运行必须带 `-t .`）。整改新增套件包括：`test_production_safety` / `test_chatops` / `test_mcp_server` / `test_alert_store` / `test_release_safety` / `test_release_replay` / `test_backup` / `test_readiness` / `test_startup_mode` / `test_production_deploy` / `test_topology`。同日 IM 流程通知补齐（接收/需求接收/进入修复，activity 13→16）后同口径复核通过；`test_notify` / `test_worker_registry` / `test_release_replay` 覆盖新卡片、活动注册与重放守护。同日生产档切换全链路执行（`release-gate-policy.yaml` 显式 `shadow_mode: false`；统一启动门禁改为「档位必须显式声明」，缺失即拒绝启动）后再次全量复核通过；`test_startup_mode` / `test_readiness` 按放行/拦截双侧更新。
+> 2026-10-13 单机生产化整改后全量回归复核：**Ran 1290 tests — OK（skipped=6）**（49 个测试文件；发现式运行必须带 `-t .`）。整改新增套件包括：`test_production_safety` / `test_chatops` / `test_mcp_server` / `test_alert_store` / `test_release_safety` / `test_release_replay` / `test_backup` / `test_readiness` / `test_startup_mode` / `test_production_deploy` / `test_topology`。同日 IM 流程通知补齐（接收/需求接收/进入修复，activity 13→16）后同口径复核通过；`test_notify` / `test_worker_registry` / `test_release_replay` 覆盖新卡片、活动注册与重放守护。同日生产档切换全链路执行（`release-gate-policy.yaml` 显式 `shadow_mode: false`；统一启动门禁改为「档位必须显式声明」，缺失即拒绝启动）后再次全量复核通过；`test_startup_mode` / `test_readiness` 按放行/拦截双侧更新。同日影子建议续接落地（`resume_patch` 快照键 + `resume-shadow` 端点 + 发布层门禁按档位判定，见 3.1）后再次全量复核：**Ran 1305 tests — OK（skipped=6）**；`test_requirement_workflow`（续接纯函数）/ `test_requirement_analyses`（`apply_resumed`）/ `test_bff_requirements`（端点分支）/ `test_release_safety`（门禁双侧）覆盖。
 
 ### 8.2 triage 离线评测（`eval_triage.py`）
 

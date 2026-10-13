@@ -13,7 +13,10 @@
 
 渐进信任档（P1-2）：
     - shadow_mode 开启时，测试通过后不创建 MR、不进入审批/发布，
-      仅生成建议卡片留痕后以 SHADOWED 终态结束（只建议不执行）。
+      仅生成建议卡片留痕后以 SHADOWED 终态结束（只建议不执行）；
+    - 影子建议续接（resume_patch 快照键）：对影子档已生成补丁执行「续接」——
+      首轮跳过补丁生成直入完整沙箱验证，失败回炉后回落到正常生成链路
+      （BFF「影子建议续接」端点启动，见 bff/routes/requirements.py）。
 
 IM 通知（接收/进入修复，patched 守护）：
     - 接收即推送处理流程说明（告警：日志取证→聚类→根因→闸门1；需求：已批准→直接修复）；
@@ -66,6 +69,34 @@ def _clip_event_text(text: str, limit: int = 180) -> str:
     """压平空白并截断文本（确定性纯函数；事件串/升级文案保持单行且不过长）。"""
     flat = " ".join(str(text).split())
     return flat if len(flat) <= limit else flat[:limit] + "…"
+
+
+def _patch_from_resume(payload) -> Patch | None:
+    """从续接快照恢复补丁（影子建议续接；字段防御性兜底，非法输入返回 None）。
+
+    影子档下流程以 SHADOWED 终态结束（只建议不执行）。续接执行时，原补丁经策略
+    快照 ``resume_patch`` 注入：首轮跳过补丁生成、直接进入完整沙箱验证；验证
+    失败回炉后仍走正常生成链路。纯函数、只读快照（replay 安全）。
+    """
+    if not isinstance(payload, dict):
+        return None
+    patch_id = str(payload.get("patch_id") or "").strip()
+    if not patch_id:
+        return None
+    raw_files = payload.get("files")
+    files = [str(item) for item in raw_files] if isinstance(raw_files, (list, tuple)) else []
+    return Patch(
+        patch_id=patch_id,
+        alert_id=str(payload.get("alert_id") or ""),
+        files=files,
+        diff=str(payload.get("diff") or ""),
+        description=str(payload.get("description") or ""),
+        risk=str(payload.get("risk") or ""),
+        model_version=str(payload.get("model_version") or ""),
+        confidence=float(payload.get("confidence") or 0.0),
+        degraded=bool(payload.get("degraded", False)),
+        degrade_reason=str(payload.get("degrade_reason") or ""),
+    )
 
 
 def _attempt_failure_summary(patch: Patch | None, report: TestReport | None) -> str:
@@ -241,16 +272,23 @@ class AIOpsFixWorkflow:
         test_report: TestReport | None = None
         max_retries = triage_cfg["max_fix_retries"]
         failures: list[str] = []  # 每轮失败的确定性摘要（升级提示与事件流共用）
+        # 影子建议续接：快照携带 resume_patch 时首轮复用其补丁（跳过生成直入完整
+        # 沙箱验证）；验证失败回炉后仍走正常生成链路。读取用 .get 兜底（replay 安全）。
+        resume_patch = _patch_from_resume(self._policy.get("resume_patch"))
         for attempt in range(max_retries + 1):
-            self.stage = "FIXING"
-            patch = await self._call(
-                activities.generate_patch,
-                alert,
-                root_cause,
-                references,
-                attempt,
-                timeout=_FIX_ACTIVITY_TIMEOUT,
-            )
+            if attempt == 0 and resume_patch is not None:
+                patch = resume_patch
+                self._gate_events.append(f"resume:patch:{patch.patch_id}")
+            else:
+                self.stage = "FIXING"
+                patch = await self._call(
+                    activities.generate_patch,
+                    alert,
+                    root_cause,
+                    references,
+                    attempt,
+                    timeout=_FIX_ACTIVITY_TIMEOUT,
+                )
             self._patch_id = patch.patch_id
             self._patch = patch
             self.stage = "TESTING"

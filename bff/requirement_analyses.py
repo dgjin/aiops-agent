@@ -302,6 +302,29 @@ def apply_approved(entry: dict, version: int, wf_id: str, actor: str) -> dict:
     return entry
 
 
+def apply_resumed(entry: dict, wf_id: str, resumed_from: str, actor: str) -> dict:
+    """影子建议续接：approved.wf_id 指向续接流程（发布状态控制随之跟踪续接流程）。
+
+    原 SHADOWED 流程不是发布终态（分类 unknown），不会冻结 approved.result；
+    防御性清除残留 result，防旧值干扰后续状态判定。原流程 id 记录在
+    resumed_from 供审计溯源。
+    """
+    if entry.get("status") != "approved":
+        raise RequirementAnalysisError(
+            f"当前状态 {entry.get('status') or '未知'} 不允许续接（要求已批准）"
+        )
+    ts = _now()
+    approved = dict(entry.get("approved") or {})
+    approved["wf_id"] = wf_id
+    approved["resumed_from"] = resumed_from
+    approved["resumed_at"] = ts
+    approved["resumed_by"] = actor or "system"
+    approved.pop("result", None)
+    entry["approved"] = approved
+    entry["updated_at"] = ts
+    return entry
+
+
 def maybe_mark_stale(entry: dict, now: datetime | None = None) -> bool:
     """卡死自愈：analyzing 且最新版本超时未回写 → 版本与顶层转 failed（可重试）。
 

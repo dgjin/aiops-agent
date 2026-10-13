@@ -14,6 +14,7 @@ from aiops_agent.workflows import (
     AIOpsFixWorkflow,
     AIOpsRequirementWorkflow,
     _attempt_failure_summary,
+    _patch_from_resume,
     build_requirement_context,
 )
 
@@ -120,6 +121,59 @@ class AttemptFailureSummaryTest(unittest.TestCase):
         summary = _attempt_failure_summary(patch, None)
         self.assertNotIn("\n", summary)
         self.assertLess(len(summary), 260)
+
+
+class PatchFromResumeTest(unittest.TestCase):
+    """影子建议续接：快照 resume_patch → Patch 恢复（防御性兜底、字段保真）。"""
+
+    _PAYLOAD = {
+        "patch_id": "p-req-28-r0",
+        "alert_id": "req-28",
+        "files": ["server/skillLibrary.ts"],
+        "diff": "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n",
+        "description": "Qoder 自主修复 REQUIREMENT",
+        "risk": "中",
+        "model_version": "qoder-cli:1.1.65",
+        "confidence": 1.0,
+        "degraded": False,
+        "degrade_reason": "",
+    }
+
+    def test_full_payload_roundtrip(self) -> None:
+        patch = _patch_from_resume(dict(self._PAYLOAD))
+        self.assertIsNotNone(patch)
+        assert patch is not None
+        self.assertEqual(patch.patch_id, "p-req-28-r0")
+        self.assertEqual(patch.alert_id, "req-28")
+        self.assertEqual(patch.files, ["server/skillLibrary.ts"])
+        self.assertIn("-old", patch.diff)
+        self.assertEqual(patch.model_version, "qoder-cli:1.1.65")
+        self.assertEqual(patch.confidence, 1.0)
+        self.assertFalse(patch.degraded)
+
+    def test_missing_or_invalid_payload_returns_none(self) -> None:
+        for payload in (None, {}, "x", 3, [], {"patch_id": ""}, {"patch_id": "  "}):
+            with self.subTest(payload=payload):
+                self.assertIsNone(_patch_from_resume(payload))
+
+    def test_optional_fields_defaulted(self) -> None:
+        patch = _patch_from_resume({"patch_id": "p1"})
+        self.assertIsNotNone(patch)
+        assert patch is not None
+        self.assertEqual(patch.files, [])  # 非列表 files（含字符串）不拆解
+        self.assertEqual(patch.diff, "")
+        self.assertEqual(patch.alert_id, "")
+        self.assertFalse(patch.degraded)
+        self.assertEqual(patch.degrade_reason, "")
+        patch2 = _patch_from_resume({"patch_id": "p1", "files": "a.ts"})  # 字符串 files → 空列表而非拆字符
+        self.assertEqual(patch2.files, [])
+
+    def test_degraded_flag_preserved(self) -> None:
+        patch = _patch_from_resume(
+            {"patch_id": "p2", "degraded": True, "degrade_reason": "QoderFixError: x"}
+        )
+        self.assertTrue(patch.degraded)
+        self.assertEqual(patch.degrade_reason, "QoderFixError: x")
 
 
 class SignalCompatTest(unittest.TestCase):

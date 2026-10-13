@@ -106,9 +106,30 @@ def _validate_patch(patch):
         raise ReleaseSafetyError("降级补丁禁止发布")
 
 
+def shadow_release_only() -> bool:
+    """当前策略是否仅允许影子档（真实发布禁用）；demo 档恒为 False。
+
+    production 必须显式声明 ``release_gate.shadow_mode``（启动校验）；本闸门按
+    当前策略做最终防御：影子档的「只建议不执行」在发布层同样成立（防绕过工作
+    流 shadow 分支的旁路调用），全链路档（false）即操作者已确认走真实发布链路。
+    策略不可确认（文件缺失/校验失败）时 fail-closed：按影子档处理，禁止推进。
+    """
+    if not mode.is_production():
+        return False
+    try:
+        from .config import load_policy
+
+        return bool(load_policy().release_gate.shadow_mode)
+    except Exception as exc:  # noqa: BLE001 - 策略不可读时禁止推进发布
+        raise ReleaseSafetyError(f"生产发布策略不可确认，禁止推进发布：{exc}") from exc
+
+
 def _production_gate():
-    if mode.is_production():
-        raise ReleaseSafetyError("本轮production仅允许影子模式；真实发布须另行确认交付目标与维护风险")
+    if shadow_release_only():
+        raise ReleaseSafetyError(
+            "影子档（release_gate.shadow_mode=true）禁止真实发布；"
+            "确认交付目标与维护风险后切换全链路档"
+        )
 
 
 def _execute(j, stage, inputs, action, restore, result_type):

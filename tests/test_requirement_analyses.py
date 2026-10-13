@@ -129,6 +129,25 @@ class StateMachineTest(unittest.TestCase):
         with self.assertRaises(store.RequirementAnalysisError):
             store.apply_approved(entry, 1, "wf-2", "admin1")
 
+    def test_apply_resumed_repoints_workflow_and_clears_frozen_result(self) -> None:
+        """影子建议续接：approved.wf_id 指向续接流程；resumed_from 溯源；残留 result 清除。"""
+        entry = self._entry()
+        store.complete_version(entry, 1, _ANALYSIS, _META)
+        store.apply_approved(entry, 1, "wf-1", "admin1")
+        entry["approved"]["result"] = {"status": "released", "at": "x"}  # 构造残留（防御路径）
+        store.apply_resumed(entry, "wf-1-resume1", "wf-1", "admin1")
+        self.assertEqual(entry["approved"]["wf_id"], "wf-1-resume1")
+        self.assertEqual(entry["approved"]["resumed_from"], "wf-1")
+        self.assertEqual(entry["approved"]["resumed_by"], "admin1")
+        self.assertIn("resumed_at", entry["approved"])
+        self.assertNotIn("result", entry["approved"])
+        self.assertEqual(entry["approved"]["version"], 1)  # 续接不改变批准版本
+
+    def test_apply_resumed_requires_approved(self) -> None:
+        entry = self._entry()  # analyzing
+        with self.assertRaises(store.RequirementAnalysisError):
+            store.apply_resumed(entry, "wf-r", "wf-1", "admin1")
+
     def test_maybe_mark_stale(self) -> None:
         entry = self._entry()
         # 未超时：不变
