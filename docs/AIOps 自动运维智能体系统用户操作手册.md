@@ -285,7 +285,7 @@ python demo_cli.py result --wf-id aiops-fix-order-a-1001
 
 ### 5.4 影子档建议卡片（青色）
 
-影子档（`shadow_mode=true`）时，沙箱测试通过后推送修复建议：根因、建议补丁与完整 diff、沙箱测试结果，并注明「未创建 MR、未进入审批与发布，仅生成建议供人工参考」；流程到此为终态（`SHADOWED`，控制台显示「已建议（影子档）」）。这是渐进信任策略；当前生产档为**全链路**（`shadow_mode=false`，2026-10-13 起）：沙箱测试通过后创建 MR → 审批 → 公告倒计时 → 金丝雀发布；演示档 `demo-policy.yaml` 同为全链路。归档评估后决定采纳时，可对影子建议执行**续接**（控制台需求分析闭环会话内 / `POST /api/requirements/analyses/{analysis_id}/resume-shadow`，admin 角色）：不重新分析、不重新生成补丁，以原建议补丁续接执行完整链路（完整沙箱验证 → MR → 审批 → 公告 → 金丝雀发布）；续接流程 id 固定 `aiops-req-{analysis_id}-v{version}-resume1`（防重复续接），已发布成功（终态）的需求不可续接，未批准会话不可续接（均 409 精确拒绝）。留痕前缀 `shadow-`。
+影子档（`shadow_mode=true`）时，沙箱测试通过后推送修复建议：根因、建议补丁与完整 diff、沙箱测试结果，并注明「未创建 MR、未进入审批与发布，仅生成建议供人工参考」；流程到此为终态（`SHADOWED`，控制台显示「已建议（影子档）」）。这是渐进信任策略；当前生产档为**全链路**（`shadow_mode=false`，2026-10-13 起）：沙箱测试通过后创建 MR → 审批 → 公告倒计时 → 金丝雀发布；演示档 `demo-policy.yaml` 同为全链路。归档评估后决定采纳时，可对影子建议执行**续接**（API 入口：`POST /api/requirements/analyses/{analysis_id}/resume-shadow`，admin 角色；控制台 UI 入口后续接入）：不重新分析、不重新生成补丁，以原建议补丁续接执行完整链路（完整沙箱验证 → MR → 审批 → 公告 → 金丝雀发布）；续接流程 id 固定 `aiops-req-{analysis_id}-v{version}-resume1`（防重复续接），已发布成功（终态）的需求不可续接，未批准会话不可续接（均 409 精确拒绝）。留痕前缀 `shadow-`。
 
 ### 5.5 接收卡片（浅蓝色）
 
