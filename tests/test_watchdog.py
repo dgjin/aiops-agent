@@ -436,6 +436,9 @@ class WatchdogSafetyTest(unittest.TestCase):
             socket.return_value.__enter__.return_value.bind.side_effect = OSError("in use")
             with self.assertRaises(watchdog.StartupError):
                 watchdog.check_ports(snapshot, watchdog.read_state())
+            # 探测必须携带 SO_REUSEADDR（否则 TIME_WAIT 残留会在 restart 后误报端口占用）。
+            socket.return_value.__enter__.return_value.setsockopt.assert_called_once_with(
+                watchdog.socket.SOL_SOCKET, watchdog.socket.SO_REUSEADDR, 1)
         self.spawn.assert_not_called()
 
     def test_start_failure_rolls_back_only_this_batch(self):

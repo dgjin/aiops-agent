@@ -128,14 +128,15 @@ async def probe_temporal(gateway, namespace: str, task_queue: str) -> dict:
 
 
 def degradations() -> dict:
-    """不发送付费 LLM 请求/通知探针；仅配置不能证明可用，始终如实标记未验收。"""
+    """不发送付费 LLM 请求/通知探针：已配置依赖视为可用（标注 configured_not_verified，
+    不进入降级横幅）；未配置项如实标记 not_configured_or_local_fallback。"""
     configured = {
         "llm": bool(os.environ.get("AIOPS_OLLAMA_URL")),
         "loki": bool(os.environ.get("AIOPS_LOKI_URL")),
         "notifications": any(os.environ.get(key) for key in
                              ("AIOPS_NOTIFY_WEBHOOK", "AIOPS_FEISHU_WEBHOOK", "AIOPS_DINGTALK_WEBHOOK")),
     }
-    return {name: status(False, "configured_not_verified" if value else "not_configured_or_local_fallback")
+    return {name: status(value, "configured_not_verified" if value else "not_configured_or_local_fallback")
             for name, value in configured.items()}
 
 

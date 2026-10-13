@@ -424,6 +424,9 @@ def check_ports(snapshot: dict, state: dict) -> None:
             continue
         try:
             with socket.socket(socket.AF_INET6 if ":" in listener["host"] else socket.AF_INET) as sock:
+                # SO_REUSEADDR 与真实服务（uvicorn）绑定语义一致：仅拒绝活跃监听者。
+                # 不设则 restart 停机后数秒内残留的 TIME_WAIT 会被误判为“已占用”（实测误报）。
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 sock.bind((listener["host"], listener["port"]))
         except OSError:
             raise StartupError(f"{name} 监听端口已占用；拒绝抢占") from None

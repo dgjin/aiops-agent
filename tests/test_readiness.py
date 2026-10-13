@@ -136,10 +136,13 @@ class ReadinessReportTest(unittest.IsolatedAsyncioTestCase):
     async def test_each_critical_failure_and_optional_degradation(self):
         snapshot = dict(mode="production", policy_sha256="abc", shadow_mode=True,
                         namespace="aiops-production", task_queue="aiops-production-tasks")
+        blank = {key: "" for key in ("AIOPS_OLLAMA_URL", "AIOPS_LOKI_URL", "AIOPS_NOTIFY_WEBHOOK",
+                                     "AIOPS_FEISHU_WEBHOOK", "AIOPS_DINGTALK_WEBHOOK")}
         for failed in (None, "mysql", "schema", "redis", "temporal", "worker"):
             values = {name: readiness.status(name != failed, "fixture")
                       for name in ("mysql", "schema", "redis", "temporal", "worker")}
-            with patch.object(readiness.config, "startup_snapshot", return_value=snapshot), \
+            with patch.dict(os.environ, blank), \
+                    patch.object(readiness.config, "startup_snapshot", return_value=snapshot), \
                     patch.object(readiness, "probe_mysql", return_value={k: values[k] for k in ("mysql", "schema")}), \
                     patch.object(readiness, "probe_redis", return_value=values["redis"]), \
                     patch.object(readiness, "probe_temporal", new=AsyncMock(return_value={k: values[k] for k in ("temporal", "worker")})):
@@ -363,3 +366,28 @@ class ReadinessCIContractTest(unittest.TestCase):
                 probe = container[kind]
                 self.assertIn("exec", probe)
                 self.assertNotIn("/metrics", str(probe))
+
+
+class DegradationsTest(unittest.TestCase):
+    """降级判定：已配置依赖不进入降级横幅（标注未验收）；未配置项如实降级。"""
+
+    blank = {key: "" for key in ("AIOPS_OLLAMA_URL", "AIOPS_LOKI_URL", "AIOPS_NOTIFY_WEBHOOK",
+                                 "AIOPS_FEISHU_WEBHOOK", "AIOPS_DINGTALK_WEBHOOK")}
+
+    def test_unconfigured_all_degraded(self):
+        with patch.dict(os.environ, self.blank):
+            result = readiness.degradations()
+        self.assertEqual(set(result), {"llm", "loki", "notifications"})
+        for item in result.values():
+            self.assertFalse(item["ok"])
+            self.assertEqual(item["detail"], "not_configured_or_local_fallback")
+
+    def test_configured_not_degraded_but_unverified(self):
+        configured = {"AIOPS_OLLAMA_URL": "http://localhost:11434",
+                      "AIOPS_LOKI_URL": "http://localhost:3101",
+                      "AIOPS_DINGTALK_WEBHOOK": "https://example.invalid/robot"}
+        with patch.dict(os.environ, {**self.blank, **configured}):
+            result = readiness.degradations()
+        for item in result.values():
+            self.assertTrue(item["ok"])
+            self.assertEqual(item["detail"], "configured_not_verified")
