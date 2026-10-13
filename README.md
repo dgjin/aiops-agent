@@ -266,7 +266,7 @@ aiops-agent/
 ├── bff/                # 运维控制台 BFF（FastAPI；routes/ 按域拆分 + middleware 鉴权/限速/指标）
 ├── web/                # 运维控制台前端（React 19 + Vite + TS + Tailwind 深色主题）
 ├── demo-app/           # 被修复的示例应用（order 服务）
-├── tests/              # 单元测试（unittest；991 用例）
+├── tests/              # 单元测试（unittest；48 个文件 / 1267 用例，2026-10-13 全量回归复核）
 ├── data/               # 运行产物（索引 / 沙箱 / 留痕 / 审计）；生产数据在 data/prod/ 或 MySQL
 ├── scripts/            # 演示脚本 + production-smoke.py（生产冒烟）+ security-scan.sh（SAST）
 ├── deploy/             # 生产交付物：Dockerfile / k8s manifests / prometheus / grafana
@@ -331,7 +331,7 @@ export AIOPS_CONSOLE_AUTH_TOKENS='{"<强随机令牌>":{"user":"admin","role":"a
 docker compose --profile obs up -d           # Prometheus(9095) + Grafana(3200, admin/aiops-demo)
 ```
 
-自动加载 `deploy/grafana/aiops-overview.json`（9 面板：成功率 / 各 stage 速率 / 耗时 p95 / 闸门决策 / 修复提供者 / 沙箱通过率 / 金丝雀 / BFF 速率与延迟）与 `deploy/prometheus/aiops-alerts.yml`（6 条告警）。worker 暴露 `:9090/metrics`、BFF 暴露 `:8600/metrics`（无鉴权，供探针与抓取）。
+自动加载 `deploy/grafana/aiops-overview.json`（9 面板：成功率 / 各 stage 速率 / 耗时 p95 / 闸门决策 / 修复提供者 / 沙箱通过率 / 金丝雀 / BFF 速率 与延迟）与 `deploy/prometheus/aiops-alerts.yml`（6 条告警）。worker 暴露 `127.0.0.1:9091/metrics`（production；demo 为 `:9090`，均仅 loopback）、BFF 暴露 `127.0.0.1:8600/metrics`（无鉴权但仅接受 loopback 对端；生产经本机代理私网通道抓取）。
 
 ### 9.4 Kubernetes 一键部署
 

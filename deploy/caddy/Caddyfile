@@ -1,0 +1,96 @@
+# 静态本地 CA 证书：关闭自动签发、重定向和信任库安装；只由本机用户托管。
+{
+    auto_https off
+    admin "unix/__DEPLOY_DIR__/caddy-admin.sock"
+    persist_config off
+}
+
+# 无上游可信代理：所有转发身份只取当前 TCP 对端，不接受客户端声明。
+(aiops_proxy_headers) {
+    header_up -Forwarded
+    header_up -X-Forwarded-*
+    header_up -X-Real-IP
+    header_up X-Forwarded-For {http.request.remote.host}
+    header_up X-Forwarded-Proto https
+    header_up X-Forwarded-Host {http.request.host}
+    header_up X-Real-IP {http.request.remote.host}
+}
+
+__HTTPS_SITES__ {
+    bind __LAN_IP__ 127.0.0.1 ::1
+    tls "__DEPLOY_DIR__/tls/current/leaf.crt" "__DEPLOY_DIR__/tls/current/leaf.key"
+    header -Server
+
+    @private path_regexp private (?i)^/(metrics|readyz|livez|docs|openapi[.]json|redoc|debug)(/|$)
+    @bff_metrics {
+        method GET
+        path /internal-metrics/bff
+    }
+    @worker_metrics {
+        method GET
+        path /internal-metrics/worker
+    }
+    @hook {
+        method POST
+        path /webhook
+    }
+    @reserved path /internal-metrics* /webhook*
+    @api path /api/*
+    @console {
+        method GET HEAD
+        path / /login /assets/* /favicon.ico /vite.svg /systems/* /flows /flows/* /approvals /escalations /window /audit /monitored-apps /requirements /system /users /help
+    }
+
+    route {
+        # 先移除全套伪造头，避免任何后续处理器误读。
+        request_header -Forwarded
+        request_header -X-Forwarded-*
+        request_header -X-Real-IP
+        request_header -X-Original-*
+        handle @private {
+            respond 404
+        }
+        handle @bff_metrics {
+            basic_auth {
+                aiops_metrics __METRICS_BCRYPT__
+            }
+            rewrite * /metrics
+            reverse_proxy 127.0.0.1:8600 {
+                import aiops_proxy_headers
+                header_up -Authorization
+            }
+        }
+        handle @worker_metrics {
+            basic_auth {
+                aiops_metrics __METRICS_BCRYPT__
+            }
+            rewrite * /metrics
+            reverse_proxy 127.0.0.1:9091 {
+                import aiops_proxy_headers
+                header_up -Authorization
+            }
+        }
+        handle @hook {
+            # 专用 webhook Bearer/HMAC 仍由接入服务校验，控制台令牌不能替代。
+            reverse_proxy 127.0.0.1:8099 {
+                import aiops_proxy_headers
+            }
+        }
+        handle @reserved {
+            respond 404
+        }
+        handle @api {
+            reverse_proxy 127.0.0.1:8600 {
+                import aiops_proxy_headers
+            }
+        }
+        handle @console {
+            reverse_proxy 127.0.0.1:8600 {
+                import aiops_proxy_headers
+            }
+        }
+        handle {
+            respond 404
+        }
+    }
+}

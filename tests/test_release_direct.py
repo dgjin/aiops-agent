@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import tests  # 先安装隔离钩子
 import asyncio
 import json
 import shutil
@@ -18,7 +19,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from aiops_agent import activities, release
+from aiops_agent import activities, release, release_journal
 from aiops_agent.models import Alert, CanaryResult, Patch
 
 FAIL_TEXT = '<div id="eeroot"></div>'
@@ -85,6 +86,9 @@ class TestRunCanaryDirect(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="aiops-direct-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        control = mock.patch.object(release_journal, "CONTROL_ROOT", self.tmp / "control")
+        control.start()
+        self.addCleanup(control.stop)
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
         self.page = self.repo / "index.html"

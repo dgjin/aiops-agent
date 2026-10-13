@@ -44,10 +44,11 @@ from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 
 from aiops_agent import logs
 from aiops_agent.config import load_policy, snapshot_for_workflow
+from aiops_agent.mode import ModeConfigError, is_production, temporal_namespace, temporal_task_queue
 from aiops_agent.models import Alert
 from aiops_agent.workflows import AIOpsFixWorkflow
 
-TASK_QUEUE = "aiops-tasks"
+TASK_QUEUE = temporal_task_queue()
 _ROOT = Path(__file__).resolve().parent
 
 
@@ -60,7 +61,8 @@ def _wf_id(service: str, alert_id: str) -> str:
 
 
 async def _client() -> Client:
-    return await Client.connect(_address())
+    temporal_task_queue()
+    return await Client.connect(_address(), namespace=temporal_namespace())
 
 
 def _dump(data) -> str:
@@ -68,6 +70,8 @@ def _dump(data) -> str:
 
 
 async def cmd_start(args: argparse.Namespace) -> None:
+    if is_production():
+        raise ModeConfigError("production 禁止演示 CLI 播种；请使用受控告警/需求入口")
     policy = load_policy()
     snapshot = snapshot_for_workflow(policy)
     # 策略一致性提示：workflow 快照与 worker 必须使用同一 policy，否则行为错配
@@ -86,7 +90,7 @@ async def cmd_start(args: argparse.Namespace) -> None:
         AIOpsFixWorkflow.run,
         args=[alert, snapshot],
         id=wf_id,
-        task_queue=TASK_QUEUE,
+        task_queue=temporal_task_queue(),
         id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,  # 幂等防重：重复告警不重复开流程
         id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
     )
@@ -123,6 +127,8 @@ async def cmd_cancel(args: argparse.Namespace) -> None:
 
 
 async def cmd_queue_patch(args: argparse.Namespace) -> None:
+    if is_production():
+        raise ModeConfigError("production 禁止演示补丁播种")
     client = await _client()
     handle = client.get_workflow_handle(args.wf_id)
     alert = Alert(
@@ -389,7 +395,7 @@ async def cmd_doctor(args: argparse.Namespace) -> None:
     if failed:
         print(f"共 {failed} 项未就绪，按上方提示修复后重试。")
         sys.exit(1)
-    print("全部就绪，可运行演示：bash scripts/demo-up.sh")
+    print("基础检查通过（不代表业务 readiness）；显式 demo 播种：bash scripts/demo-up.sh demo")
 
 
 def build_parser() -> argparse.ArgumentParser:

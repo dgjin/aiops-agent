@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 import unittest
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 import mcp_server
 from mcp_server import (
@@ -287,11 +289,49 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(args.base_url, "")
 
     def test_http_overrides(self) -> None:
+        # 解析层仅记录参数；是否允许监听由启动门禁 _enforce_transport_policy 判定
         args = build_parser().parse_args(["--http", "--host", "0.0.0.0", "--port", "9999", "--base-url", "http://x:1"])
         self.assertTrue(args.http)
         self.assertEqual(args.host, "0.0.0.0")
         self.assertEqual(args.port, 9999)
         self.assertEqual(args.base_url, "http://x:1")
+
+
+class TransportPolicyTest(unittest.TestCase):
+    """启动门禁：production 仅 stdio；demo HTTP 仅 loopback（在监听前失败）。"""
+
+    def test_stdio_allowed_in_production(self) -> None:
+        with mock.patch.dict(os.environ, {"AIOPS_MODE": "production"}):
+            mcp_server._enforce_transport_policy(build_parser().parse_args([]))
+
+    def test_production_http_rejected(self) -> None:
+        args = build_parser().parse_args(["--http", "--host", "127.0.0.1", "--port", "9971"])
+        with mock.patch.dict(os.environ, {"AIOPS_MODE": "production"}):
+            with self.assertRaises(SystemExit) as ctx:
+                mcp_server._enforce_transport_policy(args)
+        self.assertIn("production", str(ctx.exception))
+
+    def test_main_rejects_production_http_before_start(self) -> None:
+        # main 在构建/启动前即失败：误开 HTTP 不会进入监听状态
+        with mock.patch.dict(os.environ, {"AIOPS_MODE": "production"}):
+            with self.assertRaises(SystemExit):
+                mcp_server.main(["--http", "--host", "127.0.0.1", "--port", "9971"])
+
+    def test_demo_http_loopback_allowed(self) -> None:
+        with mock.patch.dict(os.environ, {"AIOPS_MODE": "demo"}):
+            mcp_server._enforce_transport_policy(
+                build_parser().parse_args(["--http", "--host", "127.0.0.1", "--port", "9971"])
+            )
+            mcp_server._enforce_transport_policy(
+                build_parser().parse_args(["--http", "--host", "::1", "--port", "9971"])
+            )
+
+    def test_demo_http_non_loopback_rejected(self) -> None:
+        with mock.patch.dict(os.environ, {"AIOPS_MODE": "demo"}):
+            for host in ("0.0.0.0", "192.168.1.9", "::", ""):
+                args = build_parser().parse_args(["--http", "--host", host, "--port", "9971"])
+                with self.assertRaises(SystemExit):
+                    mcp_server._enforce_transport_policy(args)
 
 
 if __name__ == "__main__":

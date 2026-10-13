@@ -1,4 +1,7 @@
 # Prometheus Operator 资源（ServiceMonitor 自动发现 + PrometheusRule 告警规则）
+# 批次 I：以下旧直抓模板尚未接线/实测。BFF /metrics 与 worker 127.0.0.1:9091
+# 均为 loopback only，ServiceMonitor 不能跨 Pod 直连；需另行验收同 Pod collector。
+# 不应以 up 或 /metrics 200 替代 /readyz 的业务依赖检查。
 #
 # 适用：集群已安装 kube-prometheus-stack（含 Prometheus Operator）。
 # 未使用 Operator 的集群：删除本文件，改用 deploy/prometheus/ 的静态配置与规则文件。
@@ -58,7 +61,7 @@ spec:
           for: 2m
           labels: { severity: critical, component: aiops-worker }
           annotations:
-            summary: "AIOps worker 指标端点不可达（:9090/metrics）"
+            summary: "AIOps worker 指标采集不可达（loopback :9091，collector 接线待验收）"
             description: "worker 可能已下线或指标服务未启动（AIOPS_METRICS_PORT=0），修复流程将停止推进。"
         - alert: AIOpsBffDown
           expr: up{job=~".*aiops-bff.*"} == 0

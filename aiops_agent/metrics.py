@@ -1,19 +1,21 @@
 """Prometheus 指标（优化方案 3.4，GAP-07）。
 
 - 指标口径与优化方案对齐：工作流 / 修复 / 沙箱 / 发布 / BFF 请求 / 闸门事件；
-- 暴露方式：BFF ``GET /metrics``；worker 独立 HTTP 服务（``start_worker_server``，默认 9090）；
+- 暴露方式：BFF ``GET /metrics``；worker 独立 HTTP 服务（``start_worker_server``，默认 loopback 9091）；
 - ``prometheus_client`` 缺失时全部指标降级为 no-op（零依赖兜底）；
 - 所有 ``observe_*`` 入口均为纯旁路：不改变业务返回值，异常绝不影响主流程。
 
 环境变量：
-    AIOPS_METRICS_PORT   worker 指标服务端口（默认 9090；0 = 关闭）
+    AIOPS_METRICS_PORT   worker 指标服务端口（默认 loopback 9091；0 = 关闭）
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
+import time
 
 from . import mode
 
@@ -23,6 +25,7 @@ try:
     from prometheus_client import (
         CONTENT_TYPE_LATEST,
         Counter,
+        Gauge,
         Histogram,
         generate_latest,
     )
@@ -42,6 +45,9 @@ class _NoopMetric:
         pass
 
     def observe(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        pass
+
+    def set(self, *args, **kwargs):
         pass
 
 
@@ -94,6 +100,69 @@ else:  # pragma: no cover - 降级分支
     BFF_REQUEST_DURATION = _NoopMetric()
     GATE_EVENTS = _NoopMetric()
     AGGREGATED_ALERTS = _NoopMetric()
+
+
+# 批次 I 只提供旁路接口；未接入的生产者不能声称已采集。
+# 固定标签集合，不接收 service / Workflow ID / 错误文本 / 文件路径。
+if _AVAILABLE:
+    ALERT_PENDING = Gauge("aiops_alert_pending", "待补偿聚合事件数，-1 表示未采集")
+    ALERT_PENDING.set(-1)
+    COMPENSATION_FAILURES = Counter("aiops_compensation_failures_total", "聚合补偿失败次数")
+    RELEASE_CONFLICTS = Counter("aiops_release_conflicts_total", "发布资源冲突次数")
+    ROLLBACK_FAILURES = Counter("aiops_rollback_failures_total", "回滚失败次数")
+    COMPONENT_RESTARTS = Counter("aiops_component_restarts_total", "组件重启次数", ["component"])
+    BACKUP_LAST_SUCCESS = Gauge("aiops_backup_last_success_timestamp_seconds", "最后成功且校验通过的备份，0 未知")
+    BACKUP_OVERDUE = Gauge("aiops_backup_overdue", "超过26小时无成功备份或状态未知")
+    CERT_EXPIRES = Gauge("aiops_certificate_expiry_timestamp_seconds", "当前服务证书到期时间，0 未知")
+    CERT_RENEWAL_DUE = Gauge("aiops_certificate_renewal_due", "证书距到期不超过30天或状态未知")
+else:  # pragma: no cover
+    ALERT_PENDING = COMPENSATION_FAILURES = RELEASE_CONFLICTS = ROLLBACK_FAILURES = _NoopMetric()
+    COMPONENT_RESTARTS = BACKUP_LAST_SUCCESS = BACKUP_OVERDUE = CERT_EXPIRES = CERT_RENEWAL_DUE = _NoopMetric()
+
+_backup_success = 0.0
+_certificate_expiry = 0.0
+if _AVAILABLE:
+    # 在抓取时计算，防止旧的“未过期”样本随时间失真；默认未知即告警。
+    BACKUP_OVERDUE.set_function(lambda: float(_backup_success <= 0 or time.time() - _backup_success > 26 * 3600))
+    CERT_RENEWAL_DUE.set_function(lambda: float(_certificate_expiry <= 0 or _certificate_expiry - time.time() <= 30 * 86400))
+
+
+def set_alert_pending(count: int | None) -> None:
+    """None/非法值恢复未采集状态，不能保留上次的零积压冒充正常。"""
+    ALERT_PENDING.set(count if type(count) is int and count >= 0 else -1)
+
+
+def observe_compensation_failure() -> None:
+    COMPENSATION_FAILURES.inc()
+
+
+def observe_release_conflict() -> None:
+    RELEASE_CONFLICTS.inc()
+
+
+def observe_rollback_failure() -> None:
+    ROLLBACK_FAILURES.inc()
+
+
+def observe_component_restart(component: str) -> None:
+    allowed = {"bff", "worker", "webhook", "caddy", "collector", "prober", "detector", "backup"}
+    COMPONENT_RESTARTS.labels(component=component if isinstance(component, str) and component in allowed else "other").inc()
+
+
+def set_backup_last_success(timestamp: float | None) -> None:
+    """H 的已校验成功记录时间；失败不能写当前时间冒充成功。None 表示未知。"""
+    global _backup_success
+    valid = isinstance(timestamp, (int, float)) and math.isfinite(timestamp) and 0 < timestamp <= time.time()
+    _backup_success = float(timestamp) if valid else 0.0
+    BACKUP_LAST_SUCCESS.set(_backup_success)
+
+
+def set_certificate_expiry(timestamp: float | None) -> None:
+    """F 的当前服务证书 notAfter（UTC epoch）；不在指标采集时读取私钥。"""
+    global _certificate_expiry
+    valid = isinstance(timestamp, (int, float)) and math.isfinite(timestamp) and timestamp > 0
+    _certificate_expiry = float(timestamp) if valid else 0.0
+    CERT_EXPIRES.set(_certificate_expiry)
 
 
 def available() -> bool:
@@ -186,16 +255,16 @@ def start_worker_server() -> int:
     if not _AVAILABLE:
         return 0
     try:
-        port = int(os.environ.get("AIOPS_METRICS_PORT", "9090") or 0)
+        port = int(os.environ.get("AIOPS_METRICS_PORT", "9091") or 0)
     except ValueError:
-        port = 9090
-    if port <= 0:
+        return 0
+    if not 1 <= port <= 65535:
         return 0
     try:
         from prometheus_client import start_http_server
 
-        start_http_server(port)
-        log.info("[metrics] worker 指标服务已启动：:%d/metrics", port)
+        start_http_server(port, addr="127.0.0.1")
+        log.info("[metrics] worker 指标服务已启动：127.0.0.1:%d/metrics", port)
         return port
     except Exception as exc:  # noqa: BLE001 - 端口占用等不阻塞 worker
         log.warning("[metrics] worker 指标服务启动失败（端口 %d）：%s", port, exc)

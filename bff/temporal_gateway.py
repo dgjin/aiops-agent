@@ -17,11 +17,13 @@ from datetime import datetime, timedelta, timezone
 from temporalio.client import Client, WorkflowExecution, WorkflowExecutionStatus, WorkflowHandle
 
 from aiops_agent.workflows import AIOpsFixWorkflow, AIOpsRequirementWorkflow
+from aiops_agent.mode import ModeConfigError, temporal_namespace, temporal_task_queue
+from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
 
 WF_TYPE = "AIOpsFixWorkflow"
 # 需求驱动修复流程（管理员批准分析结果后启动）；status query / 信号与告警流程按名称绑定，通用
 WF_TYPE_REQUIREMENT = "AIOpsRequirementWorkflow"
-TASK_QUEUE = "aiops-tasks"  # 与 worker.py / alert_webhook.py 一致
+TASK_QUEUE = temporal_task_queue()  # 与 worker.py / alert_webhook.py 一致
 _QUERY_TIMEOUT = timedelta(seconds=5)
 _LIST_CACHE_TTL = 3.0
 _LIST_MAX_FETCH = 200
@@ -131,23 +133,34 @@ class TemporalGateway:
         self._list_cache: tuple[float, list[dict]] | None = None
 
     async def client(self) -> Client:
+        namespace = temporal_namespace()
+        temporal_task_queue()
         async with self._lock:
             if self._client is None:
                 address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
-                self._client = await Client.connect(address)
+                self._client = await asyncio.wait_for(Client.connect(address, namespace=namespace), timeout=5)
+            if self._client.namespace != namespace:
+                raise ModeConfigError("缓存 Temporal Client namespace 不符；要求受控 restart")
             return self._client
 
     async def ping(self) -> tuple[bool, float, str | None]:
         """连通性探测：返回 (ok, 延迟ms, 错误)。"""
         started = time.monotonic()
         try:
-            await self.client()
+            client = await self.client()
+            reply = await asyncio.wait_for(client.workflow_service.describe_namespace(
+                DescribeNamespaceRequest(namespace=temporal_namespace()), timeout=_QUERY_TIMEOUT,
+            ), timeout=5)
+            if reply.namespace_info.name != temporal_namespace():
+                raise ModeConfigError("Temporal RPC 返回错误 namespace")
             return True, (time.monotonic() - started) * 1000, None
         except Exception as exc:  # noqa: BLE001 - 探测端点需要吞掉所有连接异常
-            return False, (time.monotonic() - started) * 1000, str(exc)
+            return False, (time.monotonic() - started) * 1000, f"Temporal RPC 失败 ({type(exc).__name__})"
 
     def handle(self, wf_id: str, run_id: str | None = None) -> WorkflowHandle:
         assert self._client is not None, "client 未初始化"
+        if self._client.namespace != temporal_namespace():
+            raise ModeConfigError("缓存 Temporal Client namespace 不符")
         return self._client.get_workflow_handle(wf_id, run_id=run_id)
 
     # ------------------------------------------------------------------
@@ -155,6 +168,7 @@ class TemporalGateway:
     # ------------------------------------------------------------------
 
     async def list_flows(self, limit: int = 100, *, use_cache: bool = True) -> list[dict]:
+        client = await self.client()  # 缓存命中也必须验证 namespace，不能跨档返回旧列表
         if (
             use_cache
             and self._list_cache
@@ -162,7 +176,6 @@ class TemporalGateway:
         ):
             return self._list_cache[1][:limit]
 
-        client = await self.client()
         records: list[WorkflowExecution] = []
         # 两类工作流同列聚合：告警驱动 + 需求驱动（控制台列表统一展示，审批/发布指令复用同一交互）
         query = f'WorkflowType="{WF_TYPE}" OR WorkflowType="{WF_TYPE_REQUIREMENT}"'
@@ -316,7 +329,7 @@ class TemporalGateway:
                 AIOpsFixWorkflow.run,
                 args=[alert, snapshot],
                 id=wf_id,
-                task_queue=TASK_QUEUE,
+                task_queue=temporal_task_queue(),
                 id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
                 id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
             )
@@ -343,7 +356,7 @@ class TemporalGateway:
                 AIOpsRequirementWorkflow.run,
                 args=[task, snapshot],
                 id=wf_id,
-                task_queue=TASK_QUEUE,
+                task_queue=temporal_task_queue(),
                 id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
                 id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
             )

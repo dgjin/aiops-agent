@@ -524,6 +524,54 @@ async def notify_users(alert: Alert, patch: Patch) -> dict:
 # 执行层：金丝雀与发布终态（设计方案 4.7）
 # --------------------------------------------------------------------------
 
+async def _release_thread(fn, *args, **kwargs):
+    """取消只置合作标志；执行线程退出前不结束Activity，也不释放其fcntl锁。"""
+    from temporalio.exceptions import ApplicationError
+    from .release_journal import ReleaseSafetyError
+
+    cancelled = threading.Event()
+    active = activity.in_activity()
+    if active:
+        info = activity.info()
+        kwargs.update(workflow_id=info.workflow_id, namespace=info.workflow_namespace)
+    kwargs["cancel_check"] = cancelled.is_set
+    task = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
+    was_cancelled = False
+    try:
+        while not task.done():
+            try:
+                if active:
+                    if activity.is_cancelled():
+                        cancelled.set()
+                    activity.heartbeat("release-running; target remains owned")
+                await asyncio.wait_for(asyncio.shield(task), timeout=1)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                was_cancelled = True
+                cancelled.set()
+            except Exception:
+                cancelled.set()
+                # 心跳失败也必须等执行线程合作退出；不能让后台线程脱离Activity。
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        was_cancelled = True
+                    except Exception:
+                        break
+                raise
+        result = task.result()
+        if was_cancelled:
+            raise asyncio.CancelledError()
+        return result
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        reason = str(exc) if isinstance(exc, ReleaseSafetyError) else "发布执行异常，保留目标占用并转人工核对"
+        raise ApplicationError(reason, type="ReleaseSafetyError", non_retryable=True) from exc
+
+
 @activity.defn
 async def deploy_canary(
     alert: Alert, patch: Patch, traffic_percent: int, observe_seconds: int = 10
@@ -536,29 +584,31 @@ async def deploy_canary(
     """
     from . import app_registry, metrics, release
 
-    resolved = None
-    try:
-        resolved = app_registry.resolve(alert.service)
-    except Exception as exc:  # noqa: BLE001 - 注册表不可用回退默认容器金丝雀
-        log.warning("[registry] 应用注册表不可用，金丝雀走默认容器模式: %s", exc)
+    from . import mode
+    from .release_journal import ReleaseSafetyError
 
-    if resolved and resolved.get("url"):
-        result = await asyncio.to_thread(
-            release.run_canary_direct,
-            patch,
-            resolved["repo"],
-            resolved["url"],
-            (resolved.get("contract") or {}).get("keyword", ""),
-            traffic_percent,
-            observe_seconds,
-            service=alert.service,
-        )
-        mode_label = "直连发布"
-    else:
-        result = await asyncio.to_thread(
-            release.run_canary, alert, patch, traffic_percent, observe_seconds
-        )
-        mode_label = "容器金丝雀"
+    def execute(**context):
+        resolved = None
+        try:
+            resolved = app_registry.resolve(alert.service)
+        except Exception as exc:
+            if mode.is_production():
+                raise ReleaseSafetyError("production应用注册表不可读，禁止回退") from exc
+        if mode.is_production():
+            if not resolved:
+                raise ReleaseSafetyError("production目标未注册或注册表不可读，禁止回退")
+            if resolved.get("url"):
+                raise ReleaseSafetyError("production直连发布禁用")
+            raise ReleaseSafetyError("production交付类型未明确，真实发布未放行")
+        if resolved and resolved.get("url"):
+            return release.run_canary_direct(patch, resolved["repo"], resolved["url"],
+                (resolved.get("contract") or {}).get("keyword", ""), traffic_percent,
+                observe_seconds, service=alert.service, **context)
+        return release.run_canary(alert, patch, traffic_percent, observe_seconds,
+                                  repo_dir=resolved["repo"] if resolved else None, **context)
+
+    result = await _release_thread(execute)
+    mode_label = "直连发布" if result.mode == "direct" else "容器金丝雀"
     log.info(
         "[canary] %s（%s）：错误率=%.2f%% P99=%.0fms → %s",
         patch.patch_id,
@@ -580,8 +630,8 @@ async def finalize_release(canary: CanaryResult, auto_rollback: bool) -> Release
     from . import release
 
     if canary.mode == "direct":
-        result = await asyncio.to_thread(release.run_finalize_direct, canary, auto_rollback)
+        result = await _release_thread(release.run_finalize_direct, canary, auto_rollback)
     else:
-        result = await asyncio.to_thread(release.run_finalize, canary, auto_rollback)
+        result = await _release_thread(release.run_finalize, canary, auto_rollback)
     log.info("[release] %s（%s）", result.reason, result.version)
     return result

@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY
 
-from aiops_agent import db, metrics, tracing
+from aiops_agent import db, metrics, readiness, tracing
 
 from bff import runs_store
 
@@ -140,13 +140,24 @@ class BffMetricsApiTest(unittest.TestCase):
             {"AIOPS_MODE": "demo", "AIOPS_CONSOLE_AUTH_TOKENS": json.dumps(TOKENS)},
         )
         self._env.start()
+        # 中间件测试不依赖真实 Temporal：probe 会经 Rust core 真连本机 7233（现为生产栈），必须隔离。
+        self._temporal = mock.patch.object(
+            readiness, "probe_temporal",
+            new=AsyncMock(return_value={
+                "temporal": {"ok": True, "detail": "namespace_rpc_ok", "latency_ms": 0.0},
+                "worker": {"ok": True, "detail": "active_pollers"},
+            }),
+        )
+        self._temporal.start()
         from bff import app as app_module
 
         self.app_module = app_module
-        self.client = TestClient(app_module.app)
+        # /metrics 仅回环可抓（bff/routes/health.py _loopback_only）：默认 testclient 对端会 404
+        self.client = TestClient(app_module.app, client=("127.0.0.1", 40000))
         self.admin = {"Authorization": "Bearer tok-adm"}
 
     def tearDown(self) -> None:
+        self._temporal.stop()
         self._env.stop()
 
     def test_metrics_endpoint_public_and_prometheus_format(self) -> None:
@@ -305,7 +316,7 @@ class WorkerMetricsServerTest(unittest.TestCase):
 
     def test_port_conflict_degrades(self) -> None:
         with socket.socket() as sock:
-            sock.bind(("0.0.0.0", 0))
+            sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
             with mock.patch.dict(os.environ, {"AIOPS_METRICS_PORT": str(port)}):
                 self.assertEqual(metrics.start_worker_server(), 0)
@@ -318,7 +329,7 @@ class WorkerMetricsServerTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"AIOPS_METRICS_PORT": "19399"}):
             with mock.patch("prometheus_client.start_http_server") as fake_server:
                 self.assertEqual(metrics.start_worker_server(), 19399)
-        fake_server.assert_called_once_with(19399)
+        fake_server.assert_called_once_with(19399, addr="127.0.0.1")
 
 
 if __name__ == "__main__":

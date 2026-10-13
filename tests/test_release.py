@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import tests  # 安装隔离钩子，禁止真实资源
+import dataclasses
 import itertools
 import shutil
 import subprocess
@@ -16,7 +18,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from aiops_agent import code_rag, fix_agent, release, sandbox
+from aiops_agent import code_rag, fix_agent, release, sandbox, release_journal
+from tests.test_release_safety import MemoryRunner
 from aiops_agent.models import Alert, CanaryResult, Patch, RootCause
 
 ROOT_CAUSE = RootCause(
@@ -39,7 +42,8 @@ PLAN = {
 
 def _patch(alert_id: str, *, bad: bool = False) -> Patch:
     alert = Alert(alert_id=alert_id, service="order", description="发布单测")
-    return fix_agent.fallback_patch(alert, ROOT_CAUSE, 0, "order_service.py", bad=bad)
+    return dataclasses.replace(fix_agent.fallback_patch(alert, ROOT_CAUSE, 0, "order_service.py", bad=bad),
+                               degraded=False)
 
 
 class TestReleaseVersionAndManifest(unittest.TestCase):
@@ -121,6 +125,13 @@ class TestObserve(unittest.TestCase):
 class TestRunCanaryWithFakeRunner(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="wp7-canary-"))
+        control = mock.patch.object(release_journal, "CONTROL_ROOT", self.tmp / "control")
+        control.start()
+        self.addCleanup(control.stop)
+        for alert_id in ("wp7-u2", "wp7-u3", "wp7-u4"):
+            workspace = self.tmp / _patch(alert_id).patch_id
+            workspace.mkdir()
+            (workspace / "order_service.py").write_text("# isolated artifact\n")
         self.publisher = mock.Mock()
         self.publisher.apply.return_value = {"mode": "recorded", "application": "x", "path": "y"}
 
@@ -128,9 +139,10 @@ class TestRunCanaryWithFakeRunner(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _fake_runner(self, observed: dict) -> mock.Mock:
-        runner = mock.Mock()
-        runner.build_image.return_value = "aiops-demo-app:p-x"
-        runner.start_canary.return_value = "http://127.0.0.1:12345"
+        memory = MemoryRunner()
+        runner = mock.Mock(wraps=memory)
+        runner.stable_container = memory.stable_container
+        runner.stable_port = memory.stable_port
         runner.observe.return_value = observed
         return runner
 
@@ -142,7 +154,7 @@ class TestRunCanaryWithFakeRunner(unittest.TestCase):
         )
         result = release.run_canary(
             alert, patch, 5, 10,
-            sandbox_root=self.tmp, runner=runner, publisher=self.publisher,
+            repo_dir=self.tmp, sandbox_root=self.tmp, runner=runner, publisher=self.publisher,
         )
         self.assertTrue(result.healthy)
         self.assertEqual(result.error_rate, 0.0)
@@ -159,7 +171,7 @@ class TestRunCanaryWithFakeRunner(unittest.TestCase):
         )
         result = release.run_canary(
             alert, patch, 5, 10,
-            sandbox_root=self.tmp, runner=runner, publisher=self.publisher,
+            repo_dir=self.tmp, sandbox_root=self.tmp, runner=runner, publisher=self.publisher,
         )
         self.assertFalse(result.healthy)
         self.assertIn("金丝雀劣化", result.observation)
@@ -174,24 +186,41 @@ class TestRunCanaryWithFakeRunner(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             release.run_canary(
                 alert, patch, 5, 10,
-                sandbox_root=self.tmp, runner=runner, publisher=self.publisher,
+                repo_dir=self.tmp, sandbox_root=self.tmp, runner=runner, publisher=self.publisher,
             )
         runner.stop.assert_called_once()
 
 
 class TestRunFinalize(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        control = mock.patch.object(release_journal, "CONTROL_ROOT", self.tmp / "control")
+        control.start()
+        self.addCleanup(control.stop)
+
     def _canary(self, *, healthy: bool) -> CanaryResult:
-        return CanaryResult(
-            patch_id="p-wp7-u9-r0",
-            traffic_percent=5,
-            healthy=healthy,
-            error_rate=0.0 if healthy else 50.0,
-            p99_latency_ms=30.0 if healthy else 520.0,
-            observation="",
-        )
+        value = CanaryResult("p-wp7-u9-r0", 5, healthy, 0 if healthy else 50, 30, "")
+        with release_journal.locked():
+            record = release_journal.Journal("local:" + value.patch_id, "default", value.patch_id)
+            record.claim("test-hash", {"kind": "container", "name": "aiops-test-g", "port": 28099},
+                         ["container:aiops-test-g", "port:28099"])
+            record.begin("canary", {})
+            record.update(canary_container="aiops-test-canary", canary_id="canary-id",
+                          image="sha256:" + "a" * 64, version=release.release_version(value.patch_id))
+            record.finish("canary", dataclasses.asdict(value))
+        return value
+
+    def _runner(self):
+        runner = mock.Mock()
+        runner.stable_container = "aiops-test-g"
+        runner.stable_port = 28099
+        runner.inspect.side_effect = lambda name: {"Id": "canary-id"} if name == "aiops-test-canary" else None
+        return runner
 
     def test_healthy_promotes_to_stable(self) -> None:
-        runner = mock.Mock()
+        runner = self._runner()
         result = release.run_finalize(self._canary(healthy=True), True, runner=runner)
         self.assertFalse(result.rolled_back)
         self.assertIn("全量发布", result.reason)
@@ -199,19 +228,19 @@ class TestRunFinalize(unittest.TestCase):
         self.assertRegex(result.version, r"^v1\.0\.\d{3}$")
 
     def test_degraded_rolls_back_and_recycles(self) -> None:
-        runner = mock.Mock()
+        runner = self._runner()
         result = release.run_finalize(self._canary(healthy=False), True, runner=runner)
         self.assertTrue(result.rolled_back)
         self.assertIn("自动回滚", result.reason)
-        runner.stop.assert_called_once()
+        runner.inspect.assert_called()
         runner.promote.assert_not_called()
 
     def test_degraded_without_auto_rollback(self) -> None:
-        runner = mock.Mock()
+        runner = self._runner()
         result = release.run_finalize(self._canary(healthy=False), False, runner=runner)
         self.assertTrue(result.rolled_back)
         self.assertIn("未开启", result.reason)
-        runner.stop.assert_called_once()
+        runner.inspect.assert_called()
 
 
 class TestRunnerIsolation(unittest.TestCase):
@@ -235,40 +264,18 @@ class TestRunnerIsolation(unittest.TestCase):
 
     def test_promote_uses_instance_target_not_module_constant(self) -> None:
         """promote 必须用实例的容器名/端口，绝不回落到模块常量（否则会误伤真实发布）。"""
-        runner = release.DockerRolloutRunner(
-            stable_container="aiops-test-stable", stable_port=18099
-        )
-        calls: list[list[str]] = []
-
-        def fake_run(cmd, timeout=120):
-            calls.append(list(cmd))
-            return subprocess.CompletedProcess(cmd, 0, b"cid\n", b"")
-
-        with mock.patch.object(runner, "_run", side_effect=fake_run), mock.patch.object(
-            runner, "wait_ready"
-        ), mock.patch.object(runner, "stop") as stop:
-            runner.promote("aiops-canary-p-x", "img:tag", "v1.0.1")
-
-        run_cmd = next(c for c in calls if c[1:2] == ["run"])
-        self.assertIn("aiops-test-stable", run_cmd)
-        self.assertIn("127.0.0.1:18099:8000", run_cmd)
-        self.assertNotIn(release.STABLE_CONTAINER, run_cmd)
-        self.assertNotIn(f":{release.STABLE_PORT}:", " ".join(run_cmd))
-        stop.assert_any_call("aiops-canary-p-x")  # 金丝雀正常回收
+        runner = MemoryRunner()
+        record = mock.Mock(key="test-release", record={"stable_before": runner.inspect(runner.stable_container)})
+        runner.promote("aiops-test-canary", "img:tag", "v1.0.1", record=record)
+        self.assertEqual(runner.inspect(runner.stable_container)["Id"], "new-id")
+        bindings = runner.created_config["HostConfig"]["PortBindings"]
+        self.assertEqual(bindings["8000/tcp"][0]["HostPort"], "28099")
+        self.assertIsNone(runner.inspect(release.STABLE_CONTAINER))
+        self.assertIsNotNone(runner.inspect("old-id"))
 
 
 def _docker_available() -> bool:
-    if not shutil.which("docker"):
-        return False
-    try:
-        probe = subprocess.run(
-            ["docker", "image", "inspect", sandbox.SANDBOX_IMAGE],
-            capture_output=True,
-            timeout=20,
-        )
-    except OSError:
-        return False
-    return probe.returncode == 0
+    return False  # G1仅允许离线替身；不探测、不执行真实Docker
 
 
 # 真实发布集成专用容器名/端口：**必须**与生产默认（aiops-stable-order:18080）区分，
@@ -283,7 +290,7 @@ def _test_runner() -> release.DockerRolloutRunner:
     )
 
 
-@unittest.skipUnless(_docker_available(), "docker/镜像不可用，跳过真实发布集成")
+@unittest.skipUnless(_docker_available(), "G1禁止真实容器动作；由内存目标替身覆盖发布与恢复")
 class TestRealCanaryIntegration(unittest.TestCase):
     """真实发布集成：镜像构建 → 金丝雀容器 → 真实探活 → 晋级 / 回滚。
 

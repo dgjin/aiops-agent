@@ -16,12 +16,14 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import unittest
 from unittest import mock
 
 from pydantic import ValidationError
 
-from aiops_agent import config, logs, triage
+from aiops_agent import config, logs, mode, triage
 from aiops_agent.models import Alert
 from log_surge_detector import build_surge_alert, main as surge_main, resolve_services
 
@@ -321,6 +323,27 @@ class TestHistoricalTickets(unittest.TestCase):
         tickets = triage.load_historical_tickets()
         self.assertGreaterEqual(len(tickets), 6)
         self.assertTrue(all(t["error_type"] and t["root_cause"] for t in tickets))
+
+
+class TestDemoLogGeneratorGate(unittest.TestCase):
+    """D 批次收尾：演示日志播种在生产模式 fail-fast，不向真实 Loki 灌假数据。"""
+
+    def test_production_refuses_demo_seed(self) -> None:
+        import demo_log_generator
+
+        with mock.patch.dict(os.environ, {"AIOPS_MODE": "production"}), \
+                mock.patch.object(sys, "argv", ["demo_log_generator.py"]):
+            with self.assertRaises(mode.ModeConfigError):
+                demo_log_generator.main()
+
+    def test_demo_mode_pushes_generated_lines(self) -> None:
+        import demo_log_generator
+
+        with mock.patch.object(logs, "push_lines", return_value=3) as push, \
+                mock.patch.object(sys, "argv", ["demo_log_generator.py", "--count", "3"]):
+            demo_log_generator.main()
+        self.assertEqual(push.call_args.args[0], "nl2sql")
+        self.assertEqual(len(push.call_args.args[2]), 3)
 
 
 if __name__ == "__main__":

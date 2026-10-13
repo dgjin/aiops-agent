@@ -28,8 +28,10 @@
 
 运行（工程根目录）：
     .venv/bin/python mcp_server.py                 # stdio（MCP 客户端本地拉起，主模式）
-    .venv/bin/python mcp_server.py --http          # streamable-http（127.0.0.1:8700/mcp）
-    .venv/bin/python mcp_server.py --http --host 0.0.0.0 --port 8700
+    .venv/bin/python mcp_server.py --http          # streamable-http（仅 demo，127.0.0.1:8700/mcp）
+
+传输安全门禁：production 一律禁用 ``--http``（仅 stdio；HTTP 无入站调用者映射，
+不构成多用户授权服务）；demo 的 ``--http`` 也仅允许 loopback 监听（拒绝 0.0.0.0 等）。
 
 依赖：mcp>=2.3（见 requirements-mcp.txt，可选组件不拖累主链路；本模块顶层
 不 import mcp，未安装时仅 ``build_server`` 不可用，工具函数仍可单测）。
@@ -49,8 +51,9 @@ from typing import Any, Literal
 # 触发 .env 自动加载（与 worker / BFF / cleanup 一致的模式）；依赖缺失时静默跳过
 try:  # pragma: no cover - 取决于 aiops_agent 包可导入性
     from aiops_agent import config as _config  # noqa: F401
+    from aiops_agent import mode as runtime_mode
 except ImportError:  # pragma: no cover
-    pass
+    runtime_mode = None  # type: ignore[assignment]
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8600"
 DEFAULT_HTTP_PORT = 8700
@@ -368,8 +371,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _enforce_transport_policy(args: argparse.Namespace) -> None:
+    """传输安全门禁（启动监听前调用）：production 仅 stdio；HTTP 仅 demo + loopback。"""
+    if not args.http:
+        return
+    if runtime_mode is None:  # pragma: no cover - 仓库内不可达
+        raise SystemExit("无法加载 aiops_agent.mode，拒绝启用 MCP HTTP 传输")
+    if runtime_mode.is_production():
+        raise SystemExit(
+            "MCP HTTP 传输在 production 禁用（未接入多用户授权网关，仅 stdio）；"
+            "如需本地调试请显式设置 AIOPS_MODE=demo"
+        )
+    host = (args.host or "").strip().lower()
+    if host not in {"127.0.0.1", "::1", "localhost"}:
+        raise SystemExit(f"MCP HTTP 仅允许 loopback 监听（收到 {host or '空值'}）")
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    _enforce_transport_policy(args)
     client = BffClient(base_url=args.base_url or None)
     server = build_server(client)
     transport = "streamable-http" if args.http else "stdio"

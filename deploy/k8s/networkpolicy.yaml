@@ -8,9 +8,13 @@
 #   - 同命名空间：组件互访（worker↔temporal↔mysql↔redis、BFF 读 MySQL 等）
 #   - ingress-nginx → BFF:8600（公网入口）
 #   - monitoring → webhook:8099（Alertmanager 告警投递）
-#   - monitoring → worker:9090 / bff:8600（Prometheus 指标抓取）
+#   - monitoring → worker:9090 / bff:8600（Prometheus 指标抓取；旧直抓模板，未接线，见下方批注）
 #   - 出网：443/80（Git 平台 MR / Ollama / 通知回调）
 #   - observability：Loki 3100（日志聚类）/ OTLP 4318（链路追踪）
+#
+# 批次 I 批注：BFF /metrics 与 worker 127.0.0.1:9091 均为 loopback only，monitoring
+# 命名空间跨 Pod 直抓不可达；上述「monitoring → 指标抓取」为旧模板，接线同 Pod
+# collector 后重定端口（见 servicemonitor.yaml）。
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

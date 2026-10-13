@@ -1,0 +1,57 @@
+# Isolated CI ONLY. Never merge with the production Compose files.
+# Digest candidates are shared with batch E; not a claim of vulnerability clearance.
+name: aiops-ci-isolated-i
+services:
+  mysql:
+    image: mysql@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
+    labels: {io.aiops.ci: batch-i}
+    environment:
+      MYSQL_ROOT_PASSWORD: ci-only-disposable-root
+    ports: ["127.0.0.1:23316:3306"]
+    tmpfs: [/var/lib/mysql]
+    volumes:
+      - ${AIOPS_CI_ROOT:?CI preflight required}/bootstrap.sql:/docker-entrypoint-initdb.d/ci.sql:ro
+    healthcheck:
+      test: [CMD-SHELL, "MYSQL_PWD=ci-only-disposable-root mysql -h127.0.0.1 -uroot -e 'SELECT 1'"]
+      interval: 3s
+      timeout: 3s
+      retries: 60
+  redis:
+    image: redis@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    labels: {io.aiops.ci: batch-i}
+    ports: ["127.0.0.1:26380:6379"]
+    tmpfs: [/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  schema:
+    image: temporalio/admin-tools:1.32.1@sha256:9ef0dc5b063bf4ffd5c1512de72e0e73e225bd2c7006a18ce69bd592a8862a83
+    labels: {io.aiops.ci: batch-i}
+    environment:
+      SQL_PASSWORD: ci-only-migration
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        temporal-sql-tool --plugin mysql8 --ep mysql -p 3306 -u ci_migration --db aiops_ci_temporal setup-schema -v 0.0
+        temporal-sql-tool --plugin mysql8 --ep mysql -p 3306 -u ci_migration --db aiops_ci_temporal update-schema -d /etc/temporal/schema/mysql/v8/temporal/versioned
+        temporal-sql-tool --plugin mysql8 --ep mysql -p 3306 -u ci_migration --db aiops_ci_visibility setup-schema -v 0.0
+        temporal-sql-tool --plugin mysql8 --ep mysql -p 3306 -u ci_migration --db aiops_ci_visibility update-schema -d /etc/temporal/schema/mysql/v8/visibility/versioned
+    depends_on:
+      mysql: {condition: service_healthy}
+    restart: "no"
+  temporal:
+    image: temporalio/server:1.32.1@sha256:acecbab5b0b8ae9cf4012b508866ca97feda3709577bf157b537239f40029049
+    labels: {io.aiops.ci: batch-i}
+    entrypoint: [temporal-server]
+    command: [--config-file, /etc/aiops-ci/server.yaml, start]
+    ports: ["127.0.0.1:27233:7233"]
+    volumes:
+      - ${AIOPS_CI_ROOT:?CI preflight required}/server.yaml:/etc/aiops-ci/server.yaml:ro
+    depends_on:
+      schema: {condition: service_completed_successfully}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]

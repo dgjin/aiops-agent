@@ -1,274 +1,467 @@
 #!/usr/bin/env python3
-"""组件守护（P0-3）：巡检 6 个常驻组件，异常退出自动拉起，崩溃风暴自动冷却，内存超限自动重启。
+"""单主机启动控制器：唯一组件表、配置快照、可验证进程身份与 fail-closed 守护。
 
-背景：demo-up.sh 只负责启动、不负责守护——任一常驻组件（worker/BFF/告警接入/可用性巡检/
-日志采集/突增检测）崩溃后链路静默断裂。本脚本按固定周期巡检（pgrep 判活），发现缺失即按
-demo-up.sh 同款命令拉起，并写入日志；同时读取各组件 RSS，超过阈值（默认 1024MB）即重启，
-作为 macOS 无 cgroup 场景的宿主机组件软限额（P1，2026-10-12）。
-
-不变量：
-    - 档位锁定（P1）：守护启动时解析一次生效档位（环境变量 > .env > production，与
-      config.load_dotenv(override=False) 语义一致），拉起的组件显式继承该档位；
-      demo 档且未显式配置策略时自动补齐 ./demo-policy.yaml（与 demo-up.sh 成对语义），
-      防止 .env 与启动环境不一致造成「档位混用」；
-    - 单实例锁（P1）：常驻模式经 data/aiops-watchdog.lock（fcntl.flock）防双守护——
-      launchd 托管与手动启动并存时，后到者检测到锁占用即退出（退出码 0，配合 launchd
-      KeepAlive=SuccessfulExit:false 不触发重启），由在跑实例负责；
-    - 组件以独立会话（start_new_session）脱离进程组运行，语义同手动 nohup，日志追加到各自
-      *.log（与 demo-up.sh 相同文件）；
-    - 停止全部组件的正确姿势是 `bash scripts/demo-up.sh down`（先停本守护再停组件，
-      否则组件会被守护原地复活）；launchd 托管时用 `bash scripts/launchd-install.sh uninstall`。
-
-用法：
-    python3 scripts/aiops-watchdog.py              # 常驻守护（建议 nohup 后台运行）
-    python3 scripts/aiops-watchdog.py --once       # 单轮巡检后退出（排查/CI 用）
-    python3 scripts/aiops-watchdog.py --status     # 只看存活状态（有任何缺失退出码 1）
-    bash scripts/launchd-install.sh install        # 开机自启（launchd 用户级托管，可卸载）
-    环境变量：AIOPS_WATCHDOG_INTERVAL（巡检周期秒，默认 30）；
-             AIOPS_WATCHDOG_SURGE_ARGS（突增检测器拉起参数覆盖，默认与 demo-up.sh 演示值一致）；
-             AIOPS_WATCHDOG_RSS_MB（组件内存上限 MB，默认 1024，0=关闭内存守护）
+up/restart 不播种、不自动切换基础设施。down 保留 launchd 注册与持久维护标志；
+只有 uninstall 删除注册。所有网络/进程操作均在显式入口执行，import 无副作用。
 """
-
 from __future__ import annotations
 
 import argparse
+import asyncio
+import errno
 import fcntl
+import hashlib
+import json
 import logging
 import os
+import plistlib
+import re
+import shlex
 import signal
+import socket
+import stat
 import subprocess
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PY = ROOT / ".venv" / "bin" / "python"
-if not PY.exists():  # 无 venv 时退回当前解释器（与 security-scan.sh 同款降级）
-    PY = Path(sys.executable)
-
+PY = ROOT / ".venv/bin/python"
+LOCK_PATH = ROOT / "data/aiops-watchdog.lock"
 DEFAULT_INTERVAL = 30.0
-# 与 demo-up.sh 演示灵敏度一致（生产建议 --min-lines 100 --factor 3，可用环境变量覆盖）
 DEFAULT_SURGE_ARGS = "--min-lines 5 --factor 2 --cooldown 300"
-# 组件内存软限额（P1，2026-10-12）：RSS 超过该值即重启（实测基线：worker≈556MB 为最高，
-# BFF≈151MB，其余 ≤70MB；1024 对正常波动留足余量，内存失控/泄漏才会触发）
 DEFAULT_RSS_LIMIT_MB = 1024.0
+LABEL = "com.aiops.watchdog"
+CONTROLLED_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+LOGGER = logging.getLogger("aiops.watchdog")
 
-# 单实例锁（P1）：常驻模式独占，防止 launchd 托管与手动启动双守护并存
-LOCK_PATH = ROOT / "data" / "aiops-watchdog.lock"
+
+class StartupError(RuntimeError):
+    """可公开的脱敏启动错误。"""
 
 
 @dataclass(frozen=True)
 class Component:
     name: str
-    pattern: str          # pgrep -f 判活模式（与 demo-up.sh 一致）
-    cmd: tuple[str, ...]  # 拉起命令
-    log_path: Path        # 日志文件（追加）
-
-
-def build_components() -> tuple[Component, ...]:
-    surge_args = (os.environ.get("AIOPS_WATCHDOG_SURGE_ARGS") or DEFAULT_SURGE_ARGS).split()
-    return (
-        Component(
-            "worker", "aiops_agent.worker",
-            (str(PY), "-m", "aiops_agent.worker"), ROOT / "worker.log",
-        ),
-        Component(
-            "bff", "uvicorn bff.app:app",
-            # 监听全部网卡（0.0.0.0）：本机 127.0.0.1 与局域网地址均可访问控制台
-            (str(PY), "-m", "uvicorn", "bff.app:app", "--host", "0.0.0.0", "--port", "8600"),
-            ROOT / "bff.log",
-        ),
-        Component(
-            "alert_webhook", "alert_webhook.py",
-            (str(PY), "alert_webhook.py", "--port", "8099"), ROOT / "alert_webhook.log",
-        ),
-        Component(
-            "app_prober", "app_prober.py",
-            (str(PY), "app_prober.py"), ROOT / "app_prober.log",
-        ),
-        Component(
-            "ship_app_logs", "ship_app_logs.py",
-            (str(PY), "ship_app_logs.py", "--follow"), ROOT / "ship_app_logs.log",
-        ),
-        Component(
-            "log_surge_detector", "log_surge_detector.py",
-            (str(PY), "log_surge_detector.py", *surge_args), ROOT / "log_surge_detector.log",
-        ),
-    )
+    pattern: str
+    cmd: tuple[str, ...]
+    log_path: Path
 
 
 def _read_env_mode() -> str | None:
-    """工程根 .env 中的 AIOPS_MODE（惰性读取：测试以 importlib 加载本文件，模块级禁止 IO）。"""
-    try:
-        for line in (ROOT / ".env").read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, raw = line.partition("=")
-            if key.strip() == "AIOPS_MODE":
-                value = raw.strip().strip("'\"")
-                if value:
-                    return value
-    except OSError:
-        return None
-    return None
+    from dotenv import dotenv_values
+    return dotenv_values(ROOT / ".env").get("AIOPS_MODE")
 
 
 def _effective_mode() -> tuple[str, str]:
-    """生效档位与来源：环境变量 > .env > production（与 config.load_dotenv 优先级一致）。"""
-    env_mode = os.environ.get("AIOPS_MODE")
-    if env_mode:
-        return env_mode, "环境变量"
-    file_mode = _read_env_mode()
-    if file_mode:
-        return file_mode, ".env"
-    return "production", "默认值"
+    value = os.environ.get("AIOPS_MODE")
+    source = "环境变量"
+    if not value:
+        value, source = _read_env_mode(), ".env"
+    value, source = (value, source) if value else ("production", "默认值")
+    value = value.strip().lower()
+    if value not in ("demo", "production"):
+        raise StartupError("AIOPS_MODE 仅支持 demo / production")
+    return value, source
+
+
+def load_environment() -> None:
+    # shell 不 source .env，避免把配置当代码执行；测试调用前必须 import tests。
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    if "tests" not in sys.modules:
+        from dotenv import load_dotenv
+        load_dotenv(ROOT / ".env", override=False)
 
 
 def _component_env() -> dict[str, str]:
-    """组件子进程环境：显式锁定生效档位；demo 档未配策略时补齐 demo-policy（同 demo-up.sh）。"""
     env = dict(os.environ)
-    mode, _ = _effective_mode()
-    env["AIOPS_MODE"] = mode
-    if mode == "demo" and not env.get("AIOPS_POLICY_PATH"):
-        env["AIOPS_POLICY_PATH"] = "./demo-policy.yaml"
+    env["AIOPS_MODE"] = _effective_mode()[0]
+    env["PATH"] = str(ROOT / ".venv/bin") + ":" + CONTROLLED_PATH
+    env["PYTHONUNBUFFERED"] = "1"
     return env
 
 
-def acquire_lock(logger: logging.Logger, path: Path | None = None) -> object | None:
-    """单实例锁：返回持锁文件对象；被占用返回 None；锁文件不可建时返回 True 哨兵（放行并告警）。"""
-    lock_path = path or LOCK_PATH
-    try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        handle = open(lock_path, "a+", encoding="utf-8")
-    except OSError as exc:
-        logger.warning("单实例锁不可用（%s）：%s —— 跳过加锁继续运行", lock_path, exc)
-        return True
-    try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        handle.close()
-        return None
-    handle.seek(0)
-    handle.truncate()
-    handle.write(f"pid={os.getpid()}\n")
-    handle.flush()
-    return handle
-
-
-def is_running(pattern: str) -> bool:
-    """pgrep -f 判活（与 demo-up.sh 的 running() 等价）。"""
+def build_components() -> tuple[Component, ...]:
+    production = _effective_mode()[0] == "production"
+    python = ROOT / ".venv/bin/python"
+    if not os.access(python, os.X_OK):
+        if production:
+            raise StartupError("production 缺少仓库 .venv/bin/python，拒绝系统 Python 回退")
+        python = Path(sys.executable)
+    surge = shlex.split(os.environ.get("AIOPS_WATCHDOG_SURGE_ARGS") or (
+        "--min-lines 100 --factor 3 --cooldown 300" if production else DEFAULT_SURGE_ARGS))
+    def script(name: str, *args: str) -> tuple[str, ...]:
+        return (str(python), str(ROOT / name), *args)
     return (
-        subprocess.run(
-            ["pgrep", "-f", pattern],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        ).returncode
-        == 0
+        Component("worker", "aiops_agent.worker", (str(python), "-m", "aiops_agent.worker"), ROOT / "worker.log"),
+        Component("bff", "uvicorn bff.app:app", (str(python), "-m", "uvicorn", "bff.app:app",
+                  "--host", os.environ.get("AIOPS_BFF_HOST", "127.0.0.1"),
+                  "--port", os.environ.get("AIOPS_BFF_PORT", "8600")), ROOT / "bff.log"),
+        Component("alert_webhook", "alert_webhook.py", script("alert_webhook.py", "--host",
+                  os.environ.get("AIOPS_WEBHOOK_HOST", "127.0.0.1"), "--port",
+                  os.environ.get("AIOPS_WEBHOOK_PORT", "8099")), ROOT / "alert_webhook.log"),
+        Component("app_prober", "app_prober.py", script("app_prober.py"), ROOT / "app_prober.log"),
+        Component("ship_app_logs", "ship_app_logs.py", script("ship_app_logs.py", "--follow"), ROOT / "ship_app_logs.log"),
+        Component("log_surge_detector", "log_surge_detector.py", script("log_surge_detector.py", *surge), ROOT / "log_surge_detector.log"),
     )
 
 
-def _pids_for(pattern: str) -> list[int]:
-    """pgrep -f 返回全部匹配 pid（无匹配/执行失败返回空列表）。"""
+def maintenance_path() -> Path:
+    return ROOT / "data/aiops-maintenance"
+
+
+def maintenance_active() -> bool:
+    path = maintenance_path()
     try:
-        out = subprocess.run(
-            ["pgrep", "-f", pattern], capture_output=True, text=True, check=False
-        ).stdout
+        path.lstat()
+        return True
+    except FileNotFoundError:
+        return False
     except OSError:
-        return []
-    return [int(tok) for tok in out.split() if tok.isdigit()]
+        return True
+
+
+def _safe_path(path: Path) -> None:
+    if any(p.is_symlink() for p in (path, *path.parents)):
+        raise StartupError("运行控制文件不允许符号链接")
+    if path.exists() and path.stat().st_uid != os.getuid():
+        raise StartupError("运行控制文件所有者不符")
+
+
+def _atomic_json(path: Path, value: dict) -> None:
+    _safe_path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".watchdog-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(value, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def set_maintenance(reason: str) -> None:
+    _atomic_json(maintenance_path(), {"repository": str(ROOT), "reason": reason})
+
+
+def clear_maintenance() -> None:
+    _safe_path(maintenance_path())
+    maintenance_path().unlink(missing_ok=True)
+
+
+def acquire_lock(logger: logging.Logger, path: Path | None = None) -> object | None:
+    path = path or LOCK_PATH
+    try:
+        _safe_path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        handle = os.fdopen(fd, "a+")
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            handle.close()
+            raise StartupError("锁文件必须是普通文件")
+    except OSError:
+        raise StartupError("单实例锁不可创建；拒绝无锁运行") from None
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        if exc.errno in (errno.EAGAIN, errno.EACCES):
+            return None
+        raise StartupError("单实例锁不可用；拒绝无锁运行") from None
+    return handle
+
+
+@contextmanager
+def control_lock():
+    handle = acquire_lock(LOGGER, ROOT / "data/aiops-control.lock")
+    if handle is None:
+        raise StartupError("已有启动/停止/守护操作正在执行，请稍后重试")
+    try:
+        yield
+    finally:
+        handle.close()
+
+
+def read_state() -> dict:
+    path = ROOT / "data/aiops-processes.json"
+    _safe_path(path)
+    try:
+        state = json.loads(path.read_text())
+        if state.get("repository") != str(ROOT) or not isinstance(state.get("processes"), dict):
+            raise ValueError
+        return state
+    except FileNotFoundError:
+        return {"repository": str(ROOT), "processes": {}}
+    except (OSError, ValueError, TypeError):
+        raise StartupError("进程登记不可读或仓库不符；禁止接管") from None
+
+
+def save_state(state: dict) -> None:
+    _atomic_json(ROOT / "data/aiops-processes.json", state)
+
+
+def _run(argv: list[str], timeout: float = 10) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                          env={**os.environ, "PATH": CONTROLLED_PATH, "LC_ALL": "C"}, cwd=ROOT)
+
+
+def _cwd(pid: int) -> str:
+    if sys.platform == "darwin":
+        result = _run(["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"])
+        names = [line[1:] for line in result.stdout.splitlines() if line.startswith("n")]
+        if result.returncode or len(names) != 1:
+            raise StartupError("进程工作目录不可验证")
+        return str(Path(names[0]).resolve())
+    try:
+        return str(Path(f"/proc/{pid}/cwd").resolve(strict=True))
+    except OSError:
+        raise StartupError("进程工作目录不可验证") from None
+
+
+def _process_gone(pid: int) -> bool:
+    """进程已退出或僵尸：区分『检查间隙的正常消亡』与真正的身份不可验证。"""
+    result = _run(["ps", "-ww", "-p", str(pid), "-o", "stat="])
+    status = result.stdout.strip()
+    return result.returncode != 0 or not status or status.startswith("Z")
+
+
+def process_identity(pid: int) -> dict | None:
+    if not isinstance(pid, int) or pid <= 1:
+        raise StartupError("非法 PID")
+    result = _run(["ps", "-ww", "-p", str(pid), "-o", "uid=", "-o", "lstart=", "-o", "stat=", "-o", "command="])
+    if result.returncode == 1 and not result.stdout.strip():
+        return None
+    parts = result.stdout.strip().split(None, 7)
+    if result.returncode or len(parts) != 8:
+        raise StartupError("进程身份不可验证")
+    if parts[6].startswith("Z"):
+        return None
+    try:
+        cwd = _cwd(pid)
+    except StartupError:
+        # ps 与 lsof 之间进程可能已退出（停止/退出竞态）；确认确已消亡则视为无进程。
+        if _process_gone(pid):
+            return None
+        raise
+    return {"pid": pid, "uid": int(parts[0]), "started": " ".join(parts[1:6]),
+            "command": parts[7], "cwd": cwd, "repository": str(ROOT)}
+
+
+def verify_identity(record: dict) -> bool:
+    if record.get("repository") != str(ROOT) or record.get("cwd") != str(ROOT) or record.get("uid") != os.getuid():
+        raise StartupError("进程仓库或所有者不符；拒绝操作")
+    current = process_identity(record["pid"])
+    if current is None:
+        return False
+    if current != record:
+        raise StartupError("PID 已复用或启动身份不符；拒绝操作")
+    return True
+
+
+def _matches(command: str, pattern: str) -> bool:
+    return re.search(r"(?:^|[\s/])" + re.escape(pattern) + r"(?:\s|$)", command) is not None
+
+
+def reject_unregistered(state: dict, components: tuple[Component, ...]) -> None:
+    known = {r["pid"] for r in state["processes"].values()}
+    if state.get("watchdog"):
+        known.add(state["watchdog"]["pid"])
+    result = _run(["ps", "-ww", "-axo", "pid=,command="])
+    if result.returncode:
+        raise StartupError("无法盘点已有进程，拒绝启动")
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        pid, command = int(parts[0]), parts[1]
+        if pid in known or pid == os.getpid():
+            continue
+        # 启动控制器等待守护确认期间仍然存活，不是待接管的常驻守护。
+        if re.search(r"aiops-watchdog\.py\s+(?:up|restart|install|resume|demo|down|stop|uninstall|status|env|preflight|maintenance)(?:\s|$)", command):
+            continue
+        if any(_matches(command, p) for p in [*(c.pattern for c in components), "aiops-watchdog.py"]):
+            try:
+                cwd = _cwd(pid)
+            except StartupError:
+                if _process_gone(pid):  # 盘点期间正常退出，不是待接管对象
+                    continue
+                raise
+            if cwd == str(ROOT):
+                raise StartupError("发现本仓库未登记旧进程；先人工核验停止，禁止隐式接管")
+
+
+def _pids_for(pattern: str) -> list[int]:
+    state = read_state()
+    return [record["pid"] for record in state["processes"].values()
+            if _matches(record["command"], pattern) and verify_identity(record)]
+
+
+def is_running(pattern: str) -> bool:
+    return bool(_pids_for(pattern))
 
 
 def _pid_alive(pid: int) -> bool:
-    """进程存活判定（僵尸感知）：自己的子进程用 waitpid 判定并顺带收割——
-
-    kill(pid, 0) 对已退出的僵尸子进程仍返回成功，会把「已死待收」误判为存活
-    （表现为 5s 宽限空转 + 误报 SIGKILL 升级）；非本进程子进程回退 kill(0) 探测。
-    """
     try:
-        wpid, _ = os.waitpid(pid, os.WNOHANG)
-        if wpid == pid:  # 自己的子进程已退出：本次调用完成收割，判死
+        if os.waitpid(pid, os.WNOHANG)[0] == pid:
             return False
-        if wpid == 0:  # 自己的子进程仍在运行
-            return True
     except ChildProcessError:
-        pass  # 非本进程子进程（如 demo-up.sh 拉起的组件）→ 回退信号探测
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
+        pass
+    return process_identity(pid) is not None
 
 
 def _rss_kb(pid: int) -> int | None:
-    """ps 读取 RSS（KB）；进程消失/读取失败返回 None。"""
     try:
-        out = subprocess.run(
-            ["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True, check=False
-        ).stdout.strip()
-    except OSError:
-        return None
-    try:
-        return int(out.split()[0])
-    except (ValueError, IndexError):
+        return int(_run(["ps", "-o", "rss=", "-p", str(pid)]).stdout.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
 
 
-def _terminate_pids(pids: list[int], wait_s: float = 5.0) -> list[int]:
-    """先 SIGTERM 宽限 wait_s 秒，未退出再 SIGKILL，末尾再收割确认；
-
-    返回升级强杀后仍无法确认退出的 pid（正常为空；僵尸经 waitpid 收割不计入）。
-    """
+def _terminate_pids(pids: list[int], wait_s: float = 5.0, *, identities: dict | None = None) -> list[int]:
+    if identities is None:
+        state = read_state()
+        records = [*state["processes"].values(), *([state["watchdog"]] if state.get("watchdog") else [])]
+        identities = {r["pid"]: r for r in records}
+    if any(pid not in identities for pid in pids):
+        raise StartupError("拒绝停止未登记 PID")
+    def alive(pid):
+        return verify_identity(identities[pid])
     for pid in pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
+        if alive(pid):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
     deadline = time.monotonic() + wait_s
-    remaining = sorted({p for p in pids if _pid_alive(p)})
+    remaining = [pid for pid in pids if alive(pid)]
     while remaining and time.monotonic() < deadline:
-        time.sleep(0.2)
-        remaining = sorted({p for p in remaining if _pid_alive(p)})
-    for pid in remaining:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-    if remaining:  # 升级强杀后短等一拍：waitpid 收割并确认，剔除僵尸误报
-        time.sleep(0.2)
-        remaining = sorted({p for p in remaining if _pid_alive(p)})
+        time.sleep(0.1)
+        remaining = [pid for pid in remaining if alive(pid)]
+    # 不强杀业务进程；无法证明优雅退出时停止重启，留待维护窗口处置。
     return remaining
 
 
+def prepare_snapshot() -> dict:
+    from aiops_agent.config import startup_snapshot
+    snapshot = startup_snapshot(ROOT)
+    if snapshot["mode"] == "production" and Path(sys.prefix).resolve() != (ROOT / ".venv").resolve():
+        raise StartupError("production 控制器必须在仓库 .venv 中运行")
+    os.environ.update({"AIOPS_MODE": snapshot["mode"], "AIOPS_POLICY_PATH": snapshot["policy_path"],
+                       "AIOPS_DATA_ROOT": snapshot["data_root"], "AIOPS_POLICY_SHA256": snapshot["policy_sha256"],
+                       "TEMPORAL_NAMESPACE": snapshot["namespace"], "TEMPORAL_TASK_QUEUE": snapshot["task_queue"]})
+    for name, listener in snapshot["listeners"].items():
+        os.environ[f"AIOPS_{name.upper()}_HOST"] = listener["host"]
+        os.environ[f"AIOPS_{name.upper()}_PORT"] = str(listener["port"])
+    # 仅存摘要，原始数据库/Redis URL 与凭证绝不落入状态文件或日志。
+    relevant = {key: value for key, value in os.environ.items()
+                if key.startswith(("AIOPS_", "TEMPORAL_", "LOKI_")) and key != "AIOPS_LAUNCH_FINGERPRINT"}
+    snapshot["fingerprint"] = hashlib.sha256(json.dumps([snapshot, relevant], sort_keys=True).encode()).hexdigest()
+    pinned = os.environ.get("AIOPS_LAUNCH_FINGERPRINT")
+    if pinned and pinned != snapshot["fingerprint"]:
+        raise StartupError("launchd 配置快照不符；要求受控 restart/install")
+    return snapshot
+
+
+async def check_temporal() -> None:
+    from temporalio.client import Client
+    from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
+    from aiops_agent.mode import temporal_namespace
+    namespace = temporal_namespace()
+    client = await asyncio.wait_for(Client.connect(os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"),
+                                                   namespace=namespace), timeout=5)
+    reply = await asyncio.wait_for(client.workflow_service.describe_namespace(
+        DescribeNamespaceRequest(namespace=namespace), timeout=timedelta(seconds=5)), timeout=5)
+    if reply.namespace_info.name != namespace:
+        raise StartupError("Temporal namespace 不符")
+
+
+def check_dependencies(snapshot: dict) -> None:
+    try:
+        if _run(["docker", "info"], timeout=10).returncode:
+            raise StartupError("Docker/Colima 不可用；未启动任何组件")
+        asyncio.run(check_temporal())
+        import urllib.request
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        url = os.environ.get("AIOPS_LOKI_URL", "http://localhost:3101").rstrip("/")
+        with opener.open(url + "/ready", timeout=5) as response:
+            if response.status != 200:
+                raise StartupError("Loki 未就绪")
+        if snapshot["mode"] == "production":
+            from sqlalchemy import create_engine, text
+            from sqlalchemy.pool import NullPool
+            from redis import Redis
+            engine = create_engine(os.environ["AIOPS_DATABASE_URL"], poolclass=NullPool,
+                                   connect_args={"connect_timeout": 5, "read_timeout": 5, "write_timeout": 5})
+            try:
+                with engine.connect() as connection:
+                    connection.execute(text("SELECT 1"))
+            finally:
+                engine.dispose()
+            redis = Redis.from_url(os.environ["AIOPS_REDIS_URL"], socket_connect_timeout=5, socket_timeout=5)
+            try:
+                if not redis.ping():
+                    raise StartupError("Redis 未就绪")
+            finally:
+                redis.close()
+    except StartupError:
+        raise
+    except Exception:
+        raise StartupError("依赖预检失败（Docker/Temporal namespace/Loki/MySQL/Redis）；详情隐藏，未启动组件") from None
+
+
+def check_ports(snapshot: dict, state: dict) -> None:
+    for name, listener in snapshot["listeners"].items():
+        component = "worker" if name == "metrics" else "alert_webhook" if name == "webhook" else name
+        record = state["processes"].get(component)
+        if record and verify_identity(record):
+            continue
+        try:
+            with socket.socket(socket.AF_INET6 if ":" in listener["host"] else socket.AF_INET) as sock:
+                sock.bind((listener["host"], listener["port"]))
+        except OSError:
+            raise StartupError(f"{name} 监听端口已占用；拒绝抢占") from None
+
+
 def start_component(comp: Component) -> int:
-    """以独立会话拉起组件（语义同 nohup：stdin 关闭、日志追加），返回 pid。"""
+    if maintenance_active():
+        raise StartupError("维护标志有效，禁止拉起组件")
+    state = read_state()
     with open(comp.log_path, "ab") as log:
-        proc = subprocess.Popen(
-            comp.cmd,
-            cwd=ROOT,
-            env=_component_env(),
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+        proc = subprocess.Popen(comp.cmd, cwd=ROOT, env=_component_env(), stdin=subprocess.DEVNULL,
+                                stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    record = None
+    try:
+        time.sleep(0.2)
+        if proc.poll() is not None:
+            raise StartupError(f"{comp.name} 启动即退出，见组件日志")
+        record = process_identity(proc.pid)
+        if record is None or record["cwd"] != str(ROOT) or record["uid"] != os.getuid():
+            raise StartupError("新进程身份无法验证")
+        state["processes"][comp.name] = record
+        save_state(state)
+    except BaseException:
+        # Popen 所有权仍在本进程，仅终止这个刚启动的子进程，不扫描其他进程。
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            set_maintenance("新组件退出未确认")
+        raise
     return proc.pid
 
 
 class RestartGuard:
-    """崩溃风暴保护：滑动窗口内重启次数达到上限即进入冷却，冷却期满自动解除并清零历史。"""
-
-    def __init__(
-        self, window_s: float = 900.0, max_restarts: int = 5, cooldown_s: float = 600.0
-    ) -> None:
-        self._window_s = window_s
-        self._max = max_restarts
-        self._cooldown_s = cooldown_s
-        self._history: dict[str, list[float]] = {}
-        self._cooldown_until: dict[str, float] = {}
+    """滑动窗口内崩溃风暴冷却，各组件独立计数。"""
+    def __init__(self, window_s=900.0, max_restarts=5, cooldown_s=600.0):
+        self._window_s, self._max, self._cooldown_s = window_s, max_restarts, cooldown_s
+        self._history, self._cooldown_until = {}, {}
 
     def allow(self, name: str, now: float) -> bool:
         until = self._cooldown_until.get(name)
@@ -291,182 +484,381 @@ class RestartGuard:
         return max(0.0, self._cooldown_until.get(name, 0.0) - now)
 
 
-def check_once(
-    components: tuple[Component, ...],
-    guard: RestartGuard,
-    now: float,
-    logger: logging.Logger,
-    dry_run: bool = False,
-    running_fn=is_running,
-    start_fn=start_component,
-) -> int:
-    """单轮巡检：缺失的组件按守卫策略拉起，返回本轮拉起数（running_fn/start_fn 可注入，供单测）。"""
-    restarted = 0
-    for comp in components:
-        if running_fn(comp.pattern):
-            continue
-        if not guard.allow(comp.name, now):
-            logger.warning(
-                "%s 缺失，但处于崩溃冷却中（剩余 %.0fs），本轮跳过",
-                comp.name,
-                guard.cooldown_remaining(comp.name, now),
-            )
-            continue
-        if dry_run:
-            logger.info("%s 缺失（dry-run，未拉起）", comp.name)
-            continue
-        pid = start_fn(comp)
-        guard.record(comp.name, now)
-        restarted += 1
-        logger.warning("%s 未在运行，已自动拉起（pid %d），日志 %s", comp.name, pid, comp.log_path)
-    return restarted
-
-
-def check_memory_once(
-    components: tuple[Component, ...],
-    guard: RestartGuard,
-    now: float,
-    logger: logging.Logger,
-    limit_mb: float,
-    dry_run: bool = False,
-    pids_fn=_pids_for,
-    rss_fn=_rss_kb,
-    kill_fn=_terminate_pids,
-    start_fn=start_component,
-) -> int:
-    """单轮内存巡检：RSS 超限的组件按重启守卫策略就地重启，返回本轮因超限重启数。
-
-    limit_mb<=0 表示关闭；组件缺失由存活巡检负责（本函数仅处置「在跑但超限」）。
-    与存活巡检共用 RestartGuard，防内存失控-重启风暴。
-    """
-    if limit_mb <= 0:
+def check_once(components, guard, now, logger, dry_run=False, running_fn=is_running, start_fn=start_component) -> int:
+    if maintenance_active():
         return 0
-    limit_kb = limit_mb * 1024
+    started = []
+    try:
+        for comp in components:
+            if running_fn(comp.pattern) or not guard.allow(comp.name, now) or dry_run:
+                continue
+            started.append(start_fn(comp))
+            guard.record(comp.name, now)
+    except Exception:
+        set_maintenance("组件启动失败")
+        if started:
+            _terminate_pids(started)
+        raise
+    return len(started)
+
+
+def check_memory_once(components, guard, now, logger, limit_mb, dry_run=False,
+                      pids_fn=_pids_for, rss_fn=_rss_kb, kill_fn=_terminate_pids, start_fn=start_component) -> int:
+    if limit_mb <= 0 or maintenance_active():
+        return 0
     restarted = 0
     for comp in components:
         pids = pids_fn(comp.pattern)
-        if not pids:
-            continue
         readings = [v for v in (rss_fn(pid) for pid in pids) if v is not None]
-        if not readings:
+        if not readings or max(readings) <= limit_mb * 1024 or dry_run or not guard.allow(comp.name, now):
             continue
-        peak_mb = max(readings) / 1024
-        if peak_mb <= limit_mb:
-            continue
-        if dry_run:
-            logger.warning(
-                "%s 内存超限（%.0fMB > %.0fMB，dry-run 未处置）", comp.name, peak_mb, limit_mb
-            )
-            continue
-        if not guard.allow(comp.name, now):
-            logger.warning(
-                "%s 内存超限（%.0fMB > %.0fMB），但处于崩溃冷却中（剩余 %.0fs），本轮跳过",
-                comp.name,
-                peak_mb,
-                limit_mb,
-                guard.cooldown_remaining(comp.name, now),
-            )
-            continue
-        stuck = kill_fn(pids)
-        pid = start_fn(comp)
+        if kill_fn(pids):
+            raise StartupError("旧进程退出未确认，禁止重启")
+        start_fn(comp)
         guard.record(comp.name, now)
         restarted += 1
-        note = f"，其中 {len(stuck)} 个升级 SIGKILL" if stuck else ""
-        logger.warning(
-            "%s 内存超限（%.0fMB > %.0fMB），已重启（旧 pid %s → 新 pid %d%s），日志 %s",
-            comp.name,
-            peak_mb,
-            limit_mb,
-            ",".join(str(p) for p in pids),
-            pid,
-            note,
-            comp.log_path,
-        )
     return restarted
 
 
-def run_status(components: tuple[Component, ...], logger: logging.Logger) -> int:
-    """输出各组件存活状态；有缺失返回 1。"""
-    missing = 0
-    for comp in components:
-        if is_running(comp.pattern):
-            logger.info("[运行中] %s", comp.name)
-        else:
-            logger.warning("[已停止] %s", comp.name)
-            missing += 1
-    return 1 if missing else 0
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="AIOps 组件守护：巡检 6 个常驻组件，异常自动拉起（P0-3）"
-    )
-    parser.add_argument(
-        "--interval",
-        type=float,
-        default=float(os.environ.get("AIOPS_WATCHDOG_INTERVAL", DEFAULT_INTERVAL)),
-        help="巡检周期秒（默认 30，或环境变量 AIOPS_WATCHDOG_INTERVAL）",
-    )
-    parser.add_argument(
-        "--rss-mb",
-        type=float,
-        default=float(os.environ.get("AIOPS_WATCHDOG_RSS_MB", DEFAULT_RSS_LIMIT_MB)),
-        help="组件内存上限 MB，超限自动重启（默认 1024，或环境变量 AIOPS_WATCHDOG_RSS_MB；0=关闭）",
-    )
-    parser.add_argument("--once", action="store_true", help="单轮巡检后退出（排查/CI 用）")
-    parser.add_argument("--dry-run", action="store_true", help="只报告不拉起（配合 --once）")
-    parser.add_argument("--status", action="store_true", help="只输出各组件存活状态（有缺失退出码 1）")
-    args = parser.parse_args()
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
-    logger = logging.getLogger("aiops.watchdog")
-    components = build_components()
-
-    if args.status:
-        sys.exit(run_status(components, logger))
-
-    guard = RestartGuard()
-    rss_note = "已关闭" if args.rss_mb <= 0 else f"{args.rss_mb:.0f}MB"
-    logger.info(
-        "组件守护已启动：周期 %.0fs，监控 %d 个组件（%s），内存阈值 %s",
-        args.interval,
-        len(components),
-        "、".join(c.name for c in components),
-        rss_note,
-    )
-    if args.once:
-        now = time.monotonic()
-        restarted = check_once(components, guard, now, logger, dry_run=args.dry_run)
-        restarted += check_memory_once(
-            components, guard, now, logger, args.rss_mb, dry_run=args.dry_run
-        )
-        logger.info("单轮巡检完成：拉起 %d 个组件", restarted)
+def reconcile(snapshot: dict, components: tuple[Component, ...], guard: RestartGuard, rss_mb: float) -> None:
+    if maintenance_active():
         return
-    # 常驻模式：单实例锁 + 档位锁定（P1/P2）
-    lock = acquire_lock(logger)
-    if lock is None:
-        logger.warning("已有组件守护在运行（%s 被占用），本进程退出（组件保持现状）", LOCK_PATH)
-        return
-    mode, source = _effective_mode()
-    logger.info("档位锁定：%s（来源 %s）——后续拉起的组件统一使用该档位", mode, source)
-    file_mode = _read_env_mode()
-    if file_mode and file_mode != mode:
-        logger.warning(
-            "档位不一致：生效 %s（%s）≠ .env %s —— 拉起的组件将使用生效档位（有意覆盖可忽略）",
-            mode, source, file_mode,
-        )
+    state = read_state()
+    live = [r for r in state["processes"].values() if verify_identity(r)]
+    if state.get("watchdog") and verify_identity(state["watchdog"]):
+        live.append(state["watchdog"])
+    if live and state.get("fingerprint") != snapshot["fingerprint"]:
+        raise StartupError("运行进程档位/策略/配置不一致；请受控 restart，拒绝接管")
+    reject_unregistered(state, components)
+    # 所有依赖与端口在第一条 Popen 之前检查，守护重拉也不得绕过。
+    check_dependencies(snapshot)
+    check_ports(snapshot, state)
+    state.update(snapshot=snapshot, fingerprint=snapshot["fingerprint"])
+    save_state(state)
+    now = time.monotonic()
     try:
-        while True:
+        check_once(components, guard, now, LOGGER)
+        check_memory_once(components, guard, now, LOGGER, rss_mb)
+        if any(not is_running(comp.pattern) for comp in components):
+            raise StartupError("组件退出或仍处于冷却中，未完整启动")
+    except Exception:
+        # 回收本轮新增进程，不因后来组件失败留下半套新实例。
+        new = read_state()
+        pids = [r["pid"] for name, r in new["processes"].items() if r != state["processes"].get(name)]
+        if pids:
+            set_maintenance("组件巡检失败")
+            _terminate_pids(pids)
+        raise
+
+
+def run_status(components, logger) -> int:
+    state = read_state()
+    missing = sum(not is_running(c.pattern) for c in components)
+    watchdog = state.get("watchdog")
+    logger.info("维护=%s；缺失组件=%d；守护=%s", maintenance_active(), missing,
+                bool(watchdog and verify_identity(watchdog)))
+    if state.get("snapshot"):
+        logger.info("启动快照：%s", json.dumps(state["snapshot"], ensure_ascii=False))
+    return int(bool(missing) or maintenance_active() or not watchdog or not verify_identity(watchdog))
+
+
+def plist_path() -> Path:
+    return Path.home() / "Library/LaunchAgents" / (LABEL + ".plist")
+
+
+def validate_plist() -> dict | None:
+    path = plist_path()
+    _safe_path(path)
+    if not path.exists():
+        return None
+    config = plistlib.loads(path.read_bytes())
+    if (config.get("Label") != LABEL or config.get("WorkingDirectory") != str(ROOT)
+            or config.get("ProgramArguments", [])[:2] != [str(ROOT / ".venv/bin/python"), str(ROOT / "scripts/aiops-watchdog.py")]):
+        raise StartupError("launchd 注册属于其他仓库/解释器；拒绝操作")
+    return config
+
+
+def launchctl(*args: str, required=True) -> bool:
+    if args and args[0] in ("bootout", "kickstart"):
+        live = _run(["launchctl", "print", launch_target()])
+        expected = {"program": str(ROOT / ".venv/bin/python"), "working directory": str(ROOT)}
+        fields = dict(line.strip().split(" = ", 1) for line in live.stdout.splitlines() if " = " in line)
+        if live.returncode or any(fields.get(key) != value for key, value in expected.items()):
+            raise StartupError("运行中的 launchd 任务身份不符；拒绝操作其他项目")
+    result = _run(["launchctl", *args])
+    if required and result.returncode:
+        raise StartupError("launchd 操作失败；维护状态保留")
+    return result.returncode == 0
+
+
+def launch_target() -> str:
+    return f"gui/{os.getuid()}/{LABEL}"
+
+
+def start_supervisor(snapshot: dict) -> None:
+    state = read_state()
+    existing = state.get("watchdog")
+    if existing and verify_identity(existing):
+        if state.get("fingerprint") != snapshot["fingerprint"]:
+            raise StartupError("已有守护配置不符；请受控 restart")
+        return
+    state.pop("supervisor_ready", None)
+    save_state(state)
+    config = validate_plist() if sys.platform == "darwin" else None
+    if config:
+        pinned = config.get("EnvironmentVariables", {}).get("AIOPS_LAUNCH_FINGERPRINT")
+        if pinned != snapshot["fingerprint"]:
+            raise StartupError("launchd 快照与当前配置不符；先显式 install 更新注册")
+        if not launchctl("print", launch_target(), required=False):
+            launchctl("bootstrap", f"gui/{os.getuid()}", str(plist_path()))
+        launchctl("kickstart", launch_target())
+    else:
+        # 守护同样使用统一组件启动器记录启动身份，但不加入业务组件表。
+        comp = Component("watchdog", "aiops-watchdog.py", (str(ROOT / ".venv/bin/python"),
+                         str(ROOT / "scripts/aiops-watchdog.py")), ROOT / "aiops_watchdog.log")
+        start_component(comp)
+        state = read_state()
+        state["watchdog"] = state["processes"].pop("watchdog")
+        save_state(state)
+
+
+def stop_services() -> None:
+    if not maintenance_active():
+        set_maintenance("stop")
+    with control_lock():
+        state = read_state()
+        reject_unregistered(state, build_components())
+        records = [*state["processes"].values(), *([state["watchdog"]] if state.get("watchdog") else [])]
+        # 先验证全体，任何一个身份异常均不向其他 PID 发送信号。
+        for record in records:
+            verify_identity(record)
+        for record in reversed(records):
+            if _terminate_pids([record["pid"]]):
+                raise StartupError("进程未优雅退出；维护标志保留，禁止半套重启")
+        state["processes"] = {}
+        state.pop("watchdog", None)
+        state.pop("supervisor_ready", None)
+        save_state(state)
+
+
+def install_launchd(snapshot: dict) -> None:
+    if sys.platform != "darwin":
+        raise StartupError("仅支持 macOS 用户级 launchd")
+    validate_plist()
+    check_dependencies(snapshot)
+    state = read_state()
+    reject_unregistered(state, build_components())
+    check_ports(snapshot, state)
+    if any(verify_identity(r) for r in state["processes"].values()) and state.get("fingerprint") != snapshot["fingerprint"]:
+        raise StartupError("运行档位不一致；先受控 stop，禁止 install 接管")
+    set_maintenance("install")
+    if launchctl("print", launch_target(), required=False):
+        launchctl("bootout", launch_target())
+    with control_lock():
+        state = read_state()
+        if state.get("watchdog") and _terminate_pids([state["watchdog"]["pid"]]):
+            raise StartupError("旧守护未退出，禁止接管")
+        template = plistlib.loads((ROOT / "deploy/launchd/com.aiops.watchdog.plist").read_bytes())
+        template.update(ProgramArguments=[str(ROOT / ".venv/bin/python"), str(ROOT / "scripts/aiops-watchdog.py")],
+                        WorkingDirectory=str(ROOT), StandardOutPath=str(ROOT / "aiops_watchdog.log"),
+                        StandardErrorPath=str(ROOT / "aiops_watchdog.log"))
+        write_plist(snapshot, template)
+        clear_maintenance()
+    try:
+        launchctl("bootstrap", f"gui/{os.getuid()}", str(plist_path()))
+        await_supervisor(snapshot)
+    except Exception:
+        set_maintenance("launchd 安装启动失败")
+        raise
+
+
+def write_plist(snapshot: dict, template: dict) -> None:
+    # 只固化非敏感运行参数；凭证仍从已有 .env/受控环境取，不写入 plist。
+    keys = ["AIOPS_MODE", "AIOPS_POLICY_PATH", "AIOPS_DATA_ROOT", "TEMPORAL_NAMESPACE", "TEMPORAL_TASK_QUEUE"]
+    keys += [f"AIOPS_{name}_{kind}" for name in ("BFF", "WEBHOOK", "METRICS") for kind in ("HOST", "PORT")]
+    template["EnvironmentVariables"] = {key: os.environ[key] for key in keys}
+    template["EnvironmentVariables"].update(PATH=str(ROOT / ".venv/bin") + ":" + CONTROLLED_PATH,
+                                            AIOPS_LAUNCH_FINGERPRINT=snapshot["fingerprint"])
+    path = plist_path()
+    _safe_path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".aiops-plist-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            plistlib.dump(template, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def await_supervisor(snapshot: dict, timeout: float = 45) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        state = read_state()
+        record = state.get("watchdog")
+        if (state.get("supervisor_ready") == snapshot["fingerprint"] and record
+                and verify_identity(record)):
+            return
+        time.sleep(0.2)
+    raise StartupError("守护未确认启动；请检查日志，不能视为完整启动")
+
+
+def demo_seed() -> None:
+    from aiops_agent.mode import is_demo
+    if not is_demo():
+        raise StartupError("production 禁止演示播种；不会自动覆盖 AIOPS_MODE")
+    if maintenance_active():
+        raise StartupError("维护中禁止演示播种")
+    service = os.environ.get("AIOPS_DEMO_SERVICE", "order")
+    for mode, count in (("surge", "800"), ("normal", "60")):
+        subprocess.run([str(ROOT / ".venv/bin/python"), str(ROOT / "demo_log_generator.py"),
+                        "--service", service, "--mode", mode, "--count", count], cwd=ROOT, env=_component_env(), check=True)
+    subprocess.run([str(ROOT / ".venv/bin/python"), str(ROOT / "demo_cli.py"), "start", "--service", service,
+                    "--alert-id", f"demo-{time.time_ns()}", "--description", "显式演示"], cwd=ROOT, env=_component_env(), check=True)
+
+
+def control(action: str) -> int:
+    if action in ("down", "stop"):
+        stop_services()
+        return 0
+    if action == "uninstall":
+        validate_plist()
+        stop_services()
+        if launchctl("print", launch_target(), required=False):
+            launchctl("bootout", launch_target())
+        plist_path().unlink(missing_ok=True)
+        return 0
+    if action == "maintenance":
+        set_maintenance("operator")
+        return 0
+    if action == "status":
+        return run_status(build_components(), LOGGER)
+    if action == "down-all":
+        raise StartupError("不自动停止共享依赖；请在已批准维护窗口使用 E 批次显式项目/卷配置")
+    snapshot = prepare_snapshot()
+    LOGGER.info("有效启动配置：%s", json.dumps(snapshot, ensure_ascii=False))
+    if action in ("preflight", "env"):
+        check_dependencies(snapshot)
+        check_ports(snapshot, read_state())
+        return 0
+    if action == "install":
+        install_launchd(snapshot)
+        return 0
+    if action == "demo" and snapshot["mode"] != "demo":
+        raise StartupError("production 禁止演示播种")
+    registered = validate_plist() if sys.platform == "darwin" else None
+    if action == "restart":
+        # 配置/依赖先验证，失败不停止现有业务；停止后的失败保持维护。
+        check_dependencies(snapshot)
+        stop_services()
+        if registered:
+            if launchctl("print", launch_target(), required=False):
+                launchctl("bootout", launch_target())
+            write_plist(snapshot, registered)
+    elif registered and registered.get("EnvironmentVariables", {}).get("AIOPS_LAUNCH_FINGERPRINT") != snapshot["fingerprint"]:
+        raise StartupError("托管配置与当前配置不符；请受控 restart")
+    with control_lock():
+        state = read_state()
+        # 手工 maintenance 必须显式 resume；普通 up 只能恢复 stop 状态。
+        if maintenance_active() and action not in ("resume", "restart"):
             try:
-                now = time.monotonic()
-                check_once(components, guard, now, logger)
-                check_memory_once(components, guard, now, logger, args.rss_mb)
-            except Exception:  # noqa: BLE001 - 单轮故障不中断守护循环（与 ship/surge 同款语义）
-                logger.exception("本轮巡检异常，等待下一轮")
-            time.sleep(args.interval)
-    except KeyboardInterrupt:
-        logger.info("组件守护已退出（组件保持运行）")
+                reason = json.loads(maintenance_path().read_text()).get("reason")
+            except (OSError, ValueError, AttributeError):
+                reason = "unknown"
+            if reason != "stop":
+                raise StartupError("维护标志有效；确认维护完成后显式 resume")
+        try:
+            # 维护期也先检查全部依赖，确认后才允许任何组件拉起。
+            check_dependencies(snapshot)
+            check_ports(snapshot, state)
+            clear_maintenance()
+            reconcile(snapshot, build_components(), RestartGuard(), DEFAULT_RSS_LIMIT_MB)
+            start_supervisor(snapshot)
+        except Exception:
+            set_maintenance("启动失败")
+            # 仅回收本次新启动组件，保留此前健康实例。
+            new = read_state()
+            pids = [r["pid"] for name, r in new["processes"].items()
+                    if r != state["processes"].get(name)]
+            if pids:
+                _terminate_pids(pids)
+            raise
+    try:
+        await_supervisor(snapshot)
+    except Exception:
+        set_maintenance("守护未确认启动")
+        new = read_state()
+        pids = [r["pid"] for name, r in new["processes"].items() if r != state["processes"].get(name)]
+        if pids:
+            _terminate_pids(pids)
+        raise
+    if action == "demo":
+        demo_seed()
+    LOGGER.info("组件已启动（非业务 readiness 证明）；生产验收仍需 G2/G3")
+    return 0
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", nargs="?", choices=["up", "down", "stop", "restart", "status", "env", "preflight",
+                        "demo", "maintenance", "resume", "install", "uninstall", "down-all"])
+    parser.add_argument("--interval", type=float, default=float(os.environ.get("AIOPS_WATCHDOG_INTERVAL", DEFAULT_INTERVAL)))
+    parser.add_argument("--rss-mb", type=float, default=float(os.environ.get("AIOPS_WATCHDOG_RSS_MB", DEFAULT_RSS_LIMIT_MB)))
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--status", action="store_true")
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+    load_environment()
+    from aiops_agent.mode import ModeConfigError
+    try:
+        if args.action or args.status:
+            return control(args.action or "status")
+        if maintenance_active():
+            LOGGER.warning("维护标志有效，守护不拉起任何组件")
+            return 0
+        if args.interval <= 0 or args.rss_mb < 0:
+            raise StartupError("守护周期/内存阈值非法")
+        snapshot = prepare_snapshot()
+        components = build_components()
+        lock = acquire_lock(LOGGER)
+        if lock is None:
+            state = read_state()
+            if (state.get("fingerprint") != snapshot["fingerprint"] or not state.get("watchdog")
+                    or not verify_identity(state["watchdog"])):
+                raise StartupError("锁已占用但守护身份/档位不可确认；要求受控 restart")
+            return 0
+        try:
+            guard = RestartGuard()
+            while True:
+                if maintenance_active():
+                    return 0
+                try:
+                    with control_lock():
+                        if not args.dry_run:
+                            reconcile(snapshot, components, guard, args.rss_mb)
+                            state = read_state()
+                            state["watchdog"] = process_identity(os.getpid())
+                            state["supervisor_ready"] = snapshot["fingerprint"]
+                            save_state(state)
+                except StartupError:
+                    if args.once:
+                        raise
+                    LOGGER.error("巡检被安全门禁阻断；等待下一轮（未启动新组件）")
+                    time.sleep(min(args.interval, 1))
+                    continue
+                if args.once:
+                    return 0
+                time.sleep(args.interval)
+        finally:
+            lock.close()
+    except (Exception, KeyboardInterrupt) as exc:
+        LOGGER.error("操作失败：%s", str(exc) if isinstance(exc, (StartupError, ModeConfigError)) else type(exc).__name__)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

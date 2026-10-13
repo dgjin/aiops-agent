@@ -1,0 +1,5 @@
+# Test/security-only direct inputs, resolved with the application and MCP.
+-r requirements.in
+-r requirements-mcp.in
+httpx==0.28.1
+pip-audit==2.9.0

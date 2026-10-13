@@ -15,7 +15,7 @@ import time
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from aiops_agent import kill_switch, metrics
+from aiops_agent import kill_switch, metrics, mode as runtime_mode
 
 from . import ratelimit
 from . import auth as auth_store
@@ -56,14 +56,25 @@ _SERVICE_ROLE = "viewer"
 _SERVICE_USER = "service:nl2sql"
 
 # IM 通道旁路（ChatOps）：(精确路径, 环境变量名)。IM 网桥（飞书/钉钉机器人出口）
-# 把群消息 POST 到 /api/im/command——与 _SERVICE_ENDPOINTS 同构：精确路径 + 令牌
-# 常数时间比较；env 未配置＝通道关闭（fail-closed 到常规鉴权）。通道身份固定
+# 把群消息 POST 到 /api/im/command——**专用通道，任何失败都不回落常规鉴权**：
+# 未配置（含 production 未接入可信网桥）＝通道关闭（503）；凭证缺失/无效＝认证
+# 失败（401）；普通会话/静态/服务令牌一律不能进入该通道。通道凭证也不得与控制台
+# 或服务令牌复用（防止宽权限凭证借道 ChatOps 绕过命令级权限）。通道身份固定
 # viewer，发送者角色（AIOPS_IM_USERS）与命令级权限在路由内判定。
 _IM_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("/api/im/command", "AIOPS_IM_TOKEN"),
 )
 _IM_ROLE = "viewer"
 _IM_USER = "im:gateway"
+
+
+class ImChannelError(RuntimeError):
+    """IM 通道关闭 / 认证失败：携带 HTTP 状态码，绝不回落常规鉴权。"""
+
+    def __init__(self, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.message = message
 
 # kill switch 激活时仍可调用的写端点（否则激活后无法关闭/登出；角色校验仍生效）
 # /api/im/command：单端点承载读+写命令（middleware 无法区分），写命令在路由内做
@@ -76,12 +87,33 @@ _KILL_SWITCH_EXEMPT = {
 }
 
 
+# 受信代理（默认仅本机回环：TLS 终结代理 Caddy 经 loopback 转发）。只有来自这些
+# 直连对端的请求才采信 X-Forwarded-For / X-Forwarded-Proto；可用
+# AIOPS_TRUSTED_PROXIES（逗号分隔）显式覆盖。
+_TRUSTED_PROXIES = frozenset(
+    item.strip()
+    for item in (os.environ.get("AIOPS_TRUSTED_PROXIES") or "127.0.0.1,::1").split(",")
+    if item.strip()
+)
+
+
+def _trusted_proxy_peer(request: Request) -> bool:
+    """直连对端是否为受信本机代理（进程启动时读取一次的成员集）。"""
+    return bool(request.client) and request.client.host in _TRUSTED_PROXIES
+
+
 def _client_ip(request: Request) -> str:
-    """客户端 IP：优先 X-Forwarded-For 首段（Ingress 场景），否则直连地址。"""
-    forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded:
-        return forwarded.split(",")[0].strip() or "unknown"
-    return request.client.host if request.client else "unknown"
+    """客户端 IP：仅受信代理可提供 X-Forwarded-For，且取**末段**（最近一跳写入的真实来源）。
+
+    Caddy 覆盖 XFF 时单值即真实客户端；追加模式时客户端伪造值在前、真实值在末段。
+    非受信对端的 XFF 一律忽略，防止伪造头绕过限速与审计归因。
+    """
+    peer = request.client.host if request.client else "unknown"
+    if peer in _TRUSTED_PROXIES:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            return forwarded.split(",")[-1].strip() or peer
+    return peer
 
 
 def _service_identity(request: Request) -> "auth_store.Identity | None":
@@ -109,29 +141,39 @@ def _service_identity(request: Request) -> "auth_store.Identity | None":
     return auth_store.Identity(user=_SERVICE_USER, role=_SERVICE_ROLE)
 
 
-def _im_identity(request: Request) -> "auth_store.Identity | None":
-    """IM 通道旁路判定（ChatOps）：精确路径 + POST + 令牌常数时间比较。
+def _im_channel(request: Request, tokens: dict | None) -> "auth_store.Identity | None":
+    """IM 通道专用认证（fail-closed）：非 IM 路径返回 None；IM 路径失败即抛错。
 
-    - 仅 POST，且路径必须在 ``_IM_ENDPOINTS`` 白名单中；
-    - 环境变量未配置、无 Bearer 或令牌不符 → None（走常规鉴权，fail-closed）；
+    - 仅 POST；路径必须精确命中 ``_IM_ENDPOINTS``；
+    - production 在未接入可信网桥（平台签名 / 消息时效 / 防重放）前保持关闭；
+    - 未配置通道环境变量＝通道关闭（503）；凭证缺失/不符＝认证失败（401）；
+    - 通道凭证与控制台令牌（明文或指纹键）或服务令牌复用＝通道关闭（503）；
     - 本函数仅通道级（viewer）；命令级权限由路由按 AIOPS_IM_USERS 判定。
     """
-    if request.method.upper() != "POST":
-        return None
     env_name = next(
         (name for endpoint, name in _IM_ENDPOINTS if endpoint == request.url.path), None
     )
     if env_name is None:
         return None
+    if request.method.upper() != "POST":
+        raise ImChannelError(405, "IM 通道仅接受 POST")
+    if runtime_mode.is_production():
+        raise ImChannelError(503, "IM 通道在 production 未接入可信网桥，通道关闭")
     expected = (os.environ.get(env_name) or "").strip()
     if not expected:
-        return None
+        raise ImChannelError(503, f"IM 通道未配置（{env_name}=空），通道关闭")
     authorization = request.headers.get("authorization") or ""
     if not authorization.lower().startswith("bearer "):
-        return None
+        raise ImChannelError(401, "IM 通道认证失败：缺少通道 Bearer 凭证")
     token = authorization.split(" ", 1)[1].strip()
     if not hmac.compare_digest(token, expected):
-        return None
+        raise ImChannelError(401, "IM 通道认证失败：通道凭证无效")
+    fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    if tokens and (token in tokens or fingerprint in tokens):
+        raise ImChannelError(503, "IM 通道凭证与控制台令牌复用，通道关闭（请更换专用凭证）")
+    service_token = (os.environ.get("AIOPS_TRACK_SERVICE_TOKEN") or "").strip()
+    if service_token and hmac.compare_digest(token, service_token):
+        raise ImChannelError(503, "IM 通道凭证与服务令牌复用，通道关闭（请更换专用凭证）")
     return auth_store.Identity(user=_IM_USER, role=_IM_ROLE)
 
 
@@ -200,8 +242,12 @@ async def _auth_guard(request: Request, call_next):
 
     # 通道 0a+0b：服务令牌 / IM 通道旁路（只读集成 / ChatOps；命中后仍走限速与角色检查，
     # 独立于注册表状态）
-    im_identity = _im_identity(request)
     service_identity = _service_identity(request)
+    try:
+        im_identity = _im_channel(request, tokens)
+    except ImChannelError as exc:
+        # IM 专用通道：关闭/认证失败在此终结，普通凭证一律不能回退进入该通道
+        return JSONResponse(status_code=exc.status_code, content=ok({"error": exc.message}))
     if im_identity is not None:
         identity, token_record = im_identity, {"source": "im"}
     elif service_identity is not None:
@@ -330,7 +376,10 @@ async def _security_headers(request: Request, call_next):
     if request.url.path in _DIAGRAM_CSP_PATHS:
         response.headers["Content-Security-Policy"] = _DIAGRAM_CSP
         response.headers["X-Frame-Options"] = "SAMEORIGIN"
-    if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[-1].strip()
+    if request.url.scheme == "https" or (
+        forwarded_proto == "https" and _trusted_proxy_peer(request)
+    ):
         response.headers.setdefault(
             "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
         )

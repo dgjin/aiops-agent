@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import random
 
-from aiops_agent import logs
+from aiops_agent import logs, mode
 
 _NORMAL_TEMPLATES = [
     "INFO  [trace_id={trace}] request completed endpoint=/query status=SUCCESS duration_ms={num}",
@@ -48,6 +48,8 @@ def generate(service: str, mode: str, count: int, seed: int | None = None) -> li
 
 
 def main() -> None:
+    if mode.is_production():
+        raise mode.ModeConfigError("production 禁止演示日志播种；请接入真实采集链路（Filebeat/Fluent Bit）")
     parser = argparse.ArgumentParser(description="演示日志生成器（推送至 Loki）")
     parser.add_argument("--service", default="nl2sql", help="服务名（默认 nl2sql）")
     parser.add_argument("--mode", choices=["normal", "surge"], default="normal")

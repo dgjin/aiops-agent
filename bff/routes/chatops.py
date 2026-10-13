@@ -1,7 +1,10 @@
 """IM 通道（ChatOps，P2-3）：POST /api/im/command——群内查询与审批指令。
 
 链路：IM 网桥（飞书/钉钉机器人出口）把群消息 POST 到本端点，携带 AIOPS_IM_TOKEN
-由 middleware ``_im_identity`` 做通道令牌旁路（未配置令牌＝通道关闭 fail-closed）。
+由 middleware ``_im_channel`` 做**专用通道认证**（未配置＝通道关闭、凭证不符＝认证
+失败——两者都不回落常规鉴权；production 未接入可信网桥前通道整体关闭）。本路由在
+解析 sender 前再次核对 ``request.state.token_record['source'] == 'im'``，请求体
+不得指定认证来源。
 回复契约 ``{"ok": bool, "reply": 文本}``：命令级失败（权限不足 / 未找到流程 /
 前置校验不过）也返回 200，由网桥把 reply 直接转发回群；仅「入站无法解析 = 400」
 与「系统级故障 = 5xx（KillSwitchError / Temporal 不可达）」走错误状态码。
@@ -20,7 +23,7 @@ from __future__ import annotations
 import json
 import os
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from temporalio.service import RPCError
 
 from aiops_agent import chatops, kill_switch, metrics
@@ -71,8 +74,15 @@ def _reply(*, success: bool, text: str) -> dict:
 
 
 @router.post("/api/im/command")
-async def api_im_command(payload: dict) -> dict:
-    """IM 群消息入口：规范化 → 角色解析 → 命令分发（help/pending/status/决策）。"""
+async def api_im_command(request: Request, payload: dict) -> dict:
+    """IM 群消息入口：仅接受 IM 专用通道认证（middleware 写入 source=im）。
+
+    普通 viewer/operator/admin 会话或静态令牌即使在 middleware 被误配置，也无法
+    携带 ``source=im`` 到达此处；请求体不得指定认证来源。
+    """
+    record = getattr(request.state, "token_record", None)
+    if not isinstance(record, dict) or record.get("source") != "im":
+        raise ApiError(403, "IM 通道要求专用通道认证；普通控制台凭证不可用于该通道")
     inbound = chatops.normalize_inbound(payload)
     if inbound is None:
         raise ApiError(400, "无法解析入站消息（需 sender + text；兼容通用/飞书/钉钉结构）")

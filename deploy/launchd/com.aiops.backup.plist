@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 仅供人工审阅替换绝对路径的模板；不安装、不注册、不创建凭证。 -->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.aiops.backup</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__ROOT__/.venv/bin/python</string>
+        <string>__ROOT__/scripts/backup-data.py</string>
+        <string>--config</string><string>__BACKUP_CONFIG__</string>
+        <string>--keep</string><string>7</string>
+    </array>
+    <key>WorkingDirectory</key><string>__ROOT__</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin</string>
+        <key>AIOPS_MODE</key><string>production</string>
+        <key>AIOPS_DATA_ROOT</key><string>__DATA_ROOT__</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
+    <!-- 十进制63等于八进制077；日志父目录须人工预置为700。 -->
+    <key>Umask</key><integer>63</integer>
+    <key>RunAtLoad</key><false/>
+    <key>KeepAlive</key><false/>
+    <key>StandardOutPath</key><string>__BACKUP_DIR__/backup.log</string>
+    <key>StandardErrorPath</key><string>__BACKUP_DIR__/backup.log</string>
+</dict>
+</plist>

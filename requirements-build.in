@@ -1,0 +1,4 @@
+# Isolated sdist build tools. Install this hash lock before the runtime lock.
+# No hidden PEP517 build-environment installs in CI.
+setuptools>=80.9
+wheel>=0.45

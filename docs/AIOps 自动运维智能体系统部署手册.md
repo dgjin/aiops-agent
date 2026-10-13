@@ -466,7 +466,7 @@ export AIOPS_MCP_TOKEN=<控制台令牌>                 # 透传 BFF 鉴权；�
 | `AIOPS_REDIS_URL` | 空（退化为进程内限速窗口） | BFF | 限速窗口存储（多副本共享配额）；本机 compose 映射 6380 |
 | `AIOPS_RATE_LIMIT_ENABLED` | 按模式（production=1 / demo=0） | BFF | 限速总开关（1/0 显式覆盖） |
 | `AIOPS_RATE_LIMIT_READ_PER_MIN` / `_WRITE_PER_MIN` / `_AUTH_FAIL_PER_MIN` | `240` / `20` / `10` | BFF | 已认证读 / 已认证写 / 认证失败（按 IP）配额 |
-| `AIOPS_METRICS_PORT` | `9090` | worker | worker 独立指标服务端口（0 关闭）；BFF 指标固定 `:8600/metrics` |
+| `AIOPS_METRICS_PORT` | `9091`（production）/ `9090`（demo） | worker | worker 独立指标服务端口（默认仅 loopback，0 关闭）；BFF 指标固定 `127.0.0.1:8600/metrics`（仅回环） |
 | `AIOPS_OTEL_ENDPOINT` | 空（no-op） | worker / BFF | OpenTelemetry OTLP HTTP 端点（如 `http://localhost:4318`） |
 | `AIOPS_GIT_TOKEN` | 空（MR 返回 recorded 桩） | worker | Git 平台令牌（配合策略 `git:` 段；未配置/失败自动降级不中断流程） |
 | `AIOPS_CONSOLE_TOKEN_FILE` | `data/console_tokens.json`（demo） | BFF | 运行期令牌注册表（权限 600，含明文令牌，勿提交） |
@@ -595,9 +595,9 @@ kubectl -n aiops-system get pods -w
 | 入口 | ingress | `aiops.example.com` + cert-manager TLS（`aiops-bff-tls`）；TLS 在 Ingress 终结，BFF 按 `X-Forwarded-Proto` 下发 HSTS |
 | 网络 | networkpolicy（8 条） | default-deny 起步 + DNS + 同命名空间互访 + ingress-nginx→BFF + monitoring→webhook/指标 + egress 80/443 + observability 3100/4318 |
 | 定时 | cronjob `aiops-cleanup` | `0 3 * * *` 执行 `python -m aiops_agent.cleanup`；错误以非零退出码暴露在 Job 状态 |
-| 监控 | servicemonitor + prometheusrule | 抓取 worker `:9090` / BFF `:8600` 指标；6 条告警与 `deploy/prometheus/aiops-alerts.yml` 同步（有测试校验名称集合一致） |
+| 监控 | servicemonitor + prometheusrule | worker 指标已收敛为容器内 loopback `:9091`，ServiceMonitor 旧直抓模板**未接线**（需另行设计同 Pod 私有 collector）；6 条告警与 `deploy/prometheus/aiops-alerts.yml` 同步（有测试校验名称集合一致） |
 
-> **探针口径（重要）**：BFF `/api` 前缀全量要求 Bearer 凭证，httpGet 探针无法携带令牌——因此 BFF 探针走**无鉴权的 `/metrics`（8600）**，worker 走 `:9090/metrics`，webhook 用 tcpSocket 8099。生产环境以 NetworkPolicy / Ingress 白名单限制 `/metrics` 暴露面。
+> **探针口径（批次 I 修订）**：`/metrics`、`/readyz`、`/livez` 只接受 loopback 对端，kubelet httpGet（非回环来源）会被拒——worker / BFF 探针已全部改为 **exec**：worker readiness 调用 `aiops_agent.readiness.check`（校验共享任务队列活跃 pollers）、liveness 仅检主进程存活；BFF readiness 容器内请求 `127.0.0.1:8600/readyz`、liveness `/livez`；webhook 保持 tcpSocket 8099。指标若需被抓取，只能通过同 Pod 私有 collector/代理，不能为抓取改回公开监听。**本轮未部署集群，探针契约仅经清单静态测试校验，未在集群实测。**
 
 升级：`kubectl -n aiops-system set image deployment/aiops-worker worker=aiops-agent:<新版本>`（bff/webhook 同理），滚动更新由 PDB 保障可用性；回滚 `kubectl rollout undo`。
 
@@ -771,7 +771,207 @@ bash scripts/launchd-install.sh uninstall  # 卸载（常驻组件保持运行�
 | 控制台写操作返回 429 | BFF 限速触发（已认证写 20/min、认证失败 10/min）；稍后重试或按容量调 `AIOPS_RATE_LIMIT_*` |
 | `apply_alertmanager_route.py` 报「模板结构与预期不符」 | 目标 `alertmanager.yml` 非预期结构；脚本拒绝盲改；人工核对锚点后修改脚本常量再执行 |
 | 突增检测器报连接错误 | Loki（3101）或 Alertmanager（9093）不可达；确认监控栈在运行 |
-| 端口冲突 | 7233（Temporal）/ 11434（Ollama）/ 8600（BFF）/ 9090（worker 指标）/ 8099（webhook）/ 18080（stable）/ 3101（Loki）/ 9093（Alertmanager）/ 3316（MySQL）/ 6380（Redis）；用 `lsof -i :<port>` 定位 |
+| 端口冲突 | 7233（Temporal）/ 11434（Ollama）/ 8600（BFF）/ 9091（worker 指标，production；demo 为 9090）/ 8099（webhook）/ 8643（生产 Caddy HTTPS 入口）/ 18080（stable）/ 3101（Loki）/ 9093（Alertmanager）/ 3316（MySQL）/ 6380（Redis）；用 `lsof -i :<port>` 定位 |
+
+---
+
+## 9 单机受控生产：正式 Temporal 与本机 HTTPS（E/F 产物）
+
+> 本章是批准的单机生产化整改计划 E/F 对应实现，覆盖原始部署说明中的单机切换步骤。**代码/隔离测试完成不等于生产验收通过**。第 2–8 章的演示口令、`start-dev`、全网卡 HTTP、旧生产冒烟及 K8s 历史结论，不作为本次切换操作依据。本轮未启动服务、未创建真实凭证、未安装软件、未拉取镜像、未改 launchd 或外部监控栈。
+
+### 9.1 交付边界与版本证据
+
+| 产物 | 用途 |
+| --- | --- |
+| `docker-compose.production.yml` | 第二层覆盖，精确替换端口、复用现有卷，增加正式 Server 和显式维护作业 |
+| `deploy/temporal/production.yaml` | 正式 Server 静态配置模板；仅 runtime 凭证，禁用归档、不提供 UI |
+| `deploy/temporal/bootstrap.sql`、`schema.sh` | 两库授权参考及独立官方 schema/namespace 工具入口 |
+| `deploy/caddy/Caddyfile`、`deploy/launchd/com.aiops.caddy.plist` | 本机静态 TLS、精确路由与独立用户级 Caddy 托管模板 |
+| `scripts/production_deploy.py` | 受限配置渲染、真实 Compose 合并检查、可选只读挂载/digest 预检；不启动服务 |
+| `scripts/production_tls.py` | 本地 CA、90 天 leaf、到期检查、提前 30 天续签及失败恢复 |
+| `tests/test_production_deploy.py` | 临时目录隔离测试；不导入应用、不读取仓库 `.env` |
+
+2026-10-13 官方资料核对：
+
+- [Temporal v1.32.1 官方稳定发布](https://github.com/temporalio/temporal/releases/tag/v1.32.1)，发布页显示为稳定 Latest，而不是使用 `latest` 镜像标签。
+- [Server 1.32.1 镜像元数据](https://hub.docker.com/v2/repositories/temporalio/server/tags/1.32.1)：锁定索引 digest `sha256:acecbab5b0b8ae9cf4012b508866ca97feda3709577bf157b537239f40029049`。
+- [Admin Tools 1.32.1 镜像元数据](https://hub.docker.com/v2/repositories/temporalio/admin-tools/tags/1.32.1)：锁定索引 digest `sha256:9ef0dc5b063bf4ffd5c1512de72e0e73e225bd2c7006a18ce69bd592a8862a83`。两镜像索引均含 Linux arm64/amd64；当前既有基础镜像为 arm64。
+- [官方 MySQL Visibility 支持与 schema 命令](https://docs.temporal.io/self-hosted-guide/visibility/mysql)：Advanced Visibility 要求 MySQL ≥8.0.17、Server ≥1.20，使用 `mysql8` 插件、`schema/mysql/v8/{temporal,visibility}/versioned`。运行前仍须用获准的只读连接核实实际 MySQL patch 版本。
+- [1.32.1 Server CLI 源码](https://github.com/temporalio/temporal/blob/v1.32.1/cmd/server/main.go)核对使用 `--config-file`；[SQL 工具源码](https://github.com/temporalio/temporal/blob/v1.32.1/tools/sql/main.go)核对 `SQL_PASSWORD`。schema 工具与 Server 同版本，禁止套用旧 K8s 版本。
+- 本机 Python SDK 包元数据为 `temporalio 1.33.0`，**已于 2026-10-13 维护窗口与新 Server 联调**（影子 workflow 实际执行成功，见 10.6）；SDK/Workflow 重放兼容性的完整门禁尚未逐项验收，不宣称已通过。固定版本只是候选部署清单；镜像漏洞扫描、隔离 Workflow/查询/信号/计时器/待审批重启恢复均是放行前门禁。后续升级重新核实官方支持与 digest，不移除 digest、不回退 `latest`。
+
+现有 MySQL/Loki/Redis 只读镜像及挂载盘点用于保持原版本：
+
+| 组件 | 固定 digest | 保留要求 |
+| --- | --- | --- |
+| MySQL | `sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b` | 原 `aiops-agent_mysql-data`，不重建、不自动执行初始化 SQL |
+| Loki | `sha256:1107dd5274e0ada47e42472b7a7e71f3b2a2fe878878108f3e2f9e51528f0193` | 原 `aiops-agent_loki-data` |
+| Redis | `sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99` | 当前 `/data` 为匿名卷，必须填入其原始完整卷名，不新建同名替代卷 |
+| 旧 Temporal | `sha256:ad4c82c97bd12b417d1ea942610dbcd511afb250c4d5ed26c694009533df447e` | 原 `aiops-agent_temporal-data`，保留 SQLite 与旧 Workflow，不自动迁移或取消 |
+
+上述本机基础镜像 digest 是当前 arm64 基线，不应直接当作其他架构的可移植清单。可选 Prometheus/Grafana 不在生产服务列表，默认使用不可启动的 `requires-approved-digest` 标记；若以后启用，必须另行锁定镜像并治理其旧凭证，不使用本轮默认值上线。
+
+### 9.2 配置准备与无副作用预检
+
+要求已安装 Compose ≥2.24.4（支持 `!override`）、OpenSSL、仓库 `.venv`；Caddy 要求支持 `basic_auth` 的 2.8+，安装路径须显式指定。本轮发现独立 `docker-compose 5.5.1` 可用，但 `docker compose` 插件和 Caddy 不可用，未执行安装（2026-10-13 维护窗口增补：Caddy 已安装并纳入 launchd 托管运行、8643 生产入口已投用，见 10.6）。
+
+**先单独确认**：局域网 IP/8643 端口、旧流程处置、一致性备份及恢复演练、凭证创建/轮换、客户端 CA 分发、实际 Prometheus/Alertmanager 接线。未确认外部接线时不要先应用 loopback 覆盖而造成告警中断。
+
+用户确认后，在权限为 700 的 `data/production-deploy-input/` 准备以下非敏感 `settings.json`（值必须人工填实；不要从 `.env` 自动抽取）：
+
+```json
+{
+  "project": "aiops-agent",
+  "lan_ip": "<已确认的局域网IPv4>",
+  "dns_names": ["host.docker.internal"],
+  "volumes": {
+    "mysql": "aiops-agent_mysql-data",
+    "redis": "<inspect得到的原Redis完整卷名>",
+    "loki": "aiops-agent_loki-data",
+    "temporal_dev": "aiops-agent_temporal-data"
+  },
+  "caddy_binary": "/opt/homebrew/bin/caddy"
+}
+```
+
+`dns_names` 只填写实际容器访问名称，自动补入 `localhost`；不允许通配域名。SAN 还固定包含确认的 LAN IP、127.0.0.1、::1。每个卷必须不同且已存在；不允许用新空卷通过门禁。项目名必须与旧容器的 `com.docker.compose.project` 标签一致。
+
+同一受限输入目录还需三个当前用户拥有的 600 单行文件：
+
+- `runtime-password`：DBA 已创建的 `temporal_runtime` 密码。
+- `migration-password`：独立 `temporal_migration` 密码，必须与 runtime 不同。
+- `metrics-bcrypt`：专用指标服务账号 `aiops_metrics` 的 bcrypt 哈希（成本 10–16；可在授权后用 Caddy 的交互式 `hash-password` 工具获得）。不使用控制台、IM、webhook 或数据库口令；Prometheus 使用对应的独立原始服务密码文件。
+
+渲染器**不创建账号、不修改已有数据库密码、不生成服务令牌**。只读取明确提供的受限文件，拒绝 `.env`、符号链接、宽松权限、换行注入、复用数据库密码及覆盖已有输出目录。真实账号是否具有继承角色/全局权限、跨系统凭证是否复用仍需用户审计，工具不会为此读取现有秘密。
+
+以下命令均是**用户授权后的操作参考，本轮未对真实目录执行**：
+
+```bash
+DEPLOY="$PWD/data/production-deploy-config"
+INPUT="$PWD/data/production-deploy-input"
+.venv/bin/python scripts/production_deploy.py render --output "$DEPLOY" \
+  --settings "$INPUT/settings.json" \
+  --runtime-password-file "$INPUT/runtime-password" \
+  --migration-password-file "$INPUT/migration-password" \
+  --metrics-hash-file "$INPUT/metrics-bcrypt" --approved-credential-use
+
+# 只读配置合并；不启动容器、不检查业务就绪。
+.venv/bin/python scripts/production_deploy.py preflight --output "$DEPLOY"
+# 增加只读 Docker 挂载、项目标签及镜像 digest 对照；不会读取容器 Env。
+.venv/bin/python scripts/production_deploy.py preflight --output "$DEPLOY" --inspect-existing
+```
+
+输出整体原子发布，文件 600、目录 700，仅允许 Git 已忽略的 `data/production-deploy*` 路径；无需修改 `.gitignore`。产物包括 Server 配置、迁移密码文件、Caddyfile、未安装的 plist、非秘密 `compose.env`、配置快照及两个监控配置片段。`compose.env` 只含项目名、路径、UID/GID、卷名，不含数据库/指标密码。Server 容器显式用非 root 的宿主文件所有者 UID/GID 读取 600 配置，Colima 挂载权限仍需隔离验收。
+
+预检固定显式 `--env-file` 并清除继承的 Compose 文件/profile/自动 env 设置，不会加载仓库 `.env`。它验证真实 Compose 合并后仅有 `mysql redis loki temporal-prod` 四个默认服务、原卷 external 映射、精确 loopback 端口及镜像 digest；退出 0 **仅代表所选预检通过，不代表 G2/G3 或 readyz 已通过**。
+
+### 9.3 正式 Temporal：两库、独立迁移身份、生产 namespace
+
+- 数据库固定为 `temporal_prod` / `temporal_visibility_prod`；AIOps 原库不变。runtime 仅具有两库的 SELECT/INSERT/UPDATE/DELETE；migration 仅额外具有这两库所需 DDL 权限，无全局权限、无 `GRANT OPTION`。SQL 文件不创建账号、不含口令，必须由 DBA 审计新账号及既有库后人工执行。
+- `mysql` 的 overlay 清除了原演示初始化凭证。已存在卷不会因此轮换原账户密码；外部卷缺失直接失败。`mysqladmin ping` 仅为进程存活检查，不能替代带权限/schema 校验的 readiness。
+- `temporal-prod` 直接启动 `temporal-server --config-file ... start`，不使用 `auto-setup`，不挂载 migration 密码，不在重启时执行 DDL。
+- `temporal-schema` 是 `maintenance` profile 的显式作业，必须 `AIOPS_SCHEMA_APPROVED=YES` 才执行。官方工具按版本表初始化/升级，不使用 `--overwrite`，任何步骤失败立即停止。DDL 非整套事务，失败时保留现场，不假设可自动回滚；排障日志仅在该作业受限 `/tmp` 中，不回显原始连接错误。
+- `temporal-namespace` 单独维护 `aiops-production`、retention `720h`（30 天）。已存在时先核对，再显式执行 `namespace-update`；不会把网络失败误判成需要覆盖 namespace。
+- 生产任务队列约定 `aiops-production-tasks`，由 worker/client 的统一应用配置使用；队列不是 Server 的建表项。BFF、worker、webhook、CLI 的配置统一由应用启动整改接入，本产物不修改应用或既有启动脚本。
+
+**仅在 G1/G2、维护备份、凭证及旧流程处置确认完成后**，按下面次序在窗口内执行。现有 start-dev 必须先由主启动控制器受控停止并备份；profile 只控制选择，**不会停止一个已经运行的旧容器**。不要启动带旧 profile 的全量栈，也不要使用 `down -v`、`--renew-anon-volumes` 或 `--remove-orphans`。
+
+```bash
+# 在仓库根运行；此函数只用于已经授权的维护窗口。
+unset COMPOSE_FILE COMPOSE_PROFILES COMPOSE_ENV_FILES
+DEPLOY="$PWD/data/production-deploy-config"
+dc() {
+  COMPOSE_DISABLE_ENV_FILE=1 docker-compose --project-name aiops-agent \
+    --env-file "$DEPLOY/compose.env" -f docker-compose.yml \
+    -f docker-compose.production.yml "$@"
+}
+
+# 镜像必须已在另行授权的准备阶段下载、扫描与隔离验证；这里禁止自动拉取。
+dc up -d --pull never mysql redis loki
+# DBA 已独立创建账号、审计并执行 deploy/temporal/bootstrap.sql 后：
+AIOPS_SCHEMA_APPROVED=YES dc --profile maintenance run --rm --no-deps --pull never temporal-schema
+# schema 成功后才启动正式 Server。
+dc up -d --pull never temporal-prod
+AIOPS_NAMESPACE_APPROVED=YES dc --profile maintenance run --rm --no-deps --pull never temporal-namespace
+# 已存在且人工确认需要校准保留期时，单独选择：
+# AIOPS_NAMESPACE_APPROVED=YES dc --profile maintenance run --rm --no-deps --pull never temporal-namespace namespace-update
+```
+
+新库、新服务不修改旧 SQLite。不得将旧 Workflow 自动复制、取消或重新标记为 production。新 Server 接收流程之后不得无条件切回旧 start-dev 写入。部署是同主机单节点、无 HA；Temporal 内网 gRPC 依赖可信本机/Compose 网络边界，不代表多租户鉴权或跨主机 TLS 已实现。
+
+### 9.4 本机 Caddy、专用指标凭证与监控接线
+
+| 入口 | 行为 |
+| --- | --- |
+| `https://<已确认LAN IP>:8643` | 本机 Caddy；仅绑定确认的 LAN IP、127.0.0.1 和 ::1，无额外 HTTP 重定向监听 |
+| 控制台页面、资源及 `/api/*` | 转发到 `127.0.0.1:8600`；保留 BFF 自身鉴权 |
+| 精确 `POST /webhook` | 转发到 `127.0.0.1:8099/webhook`；专用 Bearer/HMAC 仍由 webhook 服务验证 |
+| 精确 `GET /internal-metrics/bff` | Caddy 专用 `aiops_metrics` Basic 认证后，改写为 BFF `/metrics` |
+| 精确 `GET /internal-metrics/worker` | 同样认证后，改写为 `127.0.0.1:9091/metrics` |
+| `/metrics`、`/readyz`、`/livez`、`/docs`、`/openapi.json` 及对应子路径 | 拒绝；额外拒绝 redoc/debug、错误方法及带额外后缀的 webhook/指标专用路径 |
+| 其他未列入控制台路径白名单的 URL | 404；不反代 Temporal UI、数据库或内部管理端口 |
+
+指标服务密码仅在 HTTPS 使用，Caddy 配置只存 bcrypt；认证成功后剥离 Authorization，不把监控密码发送到 BFF/worker。新前端页面路由若不在白名单，应评审后扩展，不能改为任意上游转发。
+
+Caddy 清除客户端 `Forwarded`、`X-Forwarded-*`、`X-Real-IP`、`X-Original-*`，只用真实 TCP 对端重建转发身份。不配置全网可信代理。应用侧必须由主代理同步收敛 BFF 8600、webhook 8099、worker 9091 为 loopback，且只信任本机代理；本配置不能代替应用信任边界整改。应用对同一头是否二次解析、伪造头不能绕过限速/审计，仍需端到端验证。
+
+渲染器生成 `prometheus.fragment.yml` 与 `alertmanager.fragment.yml`（JSON 语法的合法 YAML）：
+
+- 两个 Prometheus job 使用 HTTPS 8643、精确指标路径、`basic_auth.password_file=/run/secrets/aiops_metrics_password`。
+- Alertmanager receiver 使用 HTTPS `/webhook`、独立 `authorization.credentials_file=/run/secrets/aiops_webhook_token`，不生成未知业务的匹配规则或改写原 route。
+- 两者显式使用 `tls_config.ca_file=/etc/aiops-tls/ca.crt`，不设置跳过 TLS 校验。需在实际容器中只读挂载 CA 公共证书和各自的凭证文件，并确认访问 `LAN IP:8643` 可达。
+- **只生成片段，不编辑或重启现有监控栈。** 用户确认后人工审阅 diff、合并 receiver/job 和业务路由、分发 CA/凭证；从实际 Colima 容器验证抓取和告警链路，再收敛旧入口。未接线时 G2 不通过（**2026-10-13 维护窗口增补：接线已完成**——receiver 指向 `https://10.1.112.39:8643/webhook` 并挂载 ca_file/credentials_file，Prometheus 双 job 接入，容器内实测投递链路与抓取双 UP，见 10.6）。
+
+### 9.5 本地 CA、原子续签与 launchd 边界
+
+下列命令会创建真实密钥或 reload，**每项执行前必须取得用户明确授权**；本轮仅在测试临时目录调用签发逻辑。
+
+```bash
+.venv/bin/python scripts/production_tls.py init-ca --deploy-dir "$DEPLOY" --approved-credentials-and-reload
+.venv/bin/python scripts/production_tls.py issue --deploy-dir "$DEPLOY" --approved-credentials-and-reload
+# 仅检查；不生成文件、不修改信任库。0=尚未到续签窗口，2=剩余不超过30天，1=异常。
+.venv/bin/python scripts/production_tls.py check --deploy-dir "$DEPLOY"
+# 下列校验不启动服务；端口检查只在旧服务已受控停止、新服务尚未启动的阶段使用。
+.venv/bin/python scripts/production_deploy.py preflight --output "$DEPLOY" --validate-caddy
+# 可在启动正式 Temporal/BFF/Caddy 前单独运行，冲突即停止，不抢占端口：
+# .venv/bin/python scripts/production_deploy.py preflight --output "$DEPLOY" --check-ports
+# 获准后可交由每日调度调用；本产物不安装任何调度任务。
+.venv/bin/python scripts/production_tls.py renew --deploy-dir "$DEPLOY" --approved-credentials-and-reload
+```
+
+证书流程使用 OpenSSL RSA-3072/SHA-256：CA 3650 天、pathlen=0；leaf 90 天，仅 serverAuth，SAN 必须精确匹配已确认 IP/域名。CA 剩余不足 91 天时停止签发，要求人工轮换；IP/SAN 改变即触发受控重签，不沿用错误证书。所有私钥和证书文件 600，目录 700，拒绝路径逃逸和符号链接输入；只有工具维护的 `tls/current` 是指向同目录版本的受控链接。
+
+- CA 在 `tls/ca/`；leaf 写入独立版本目录，校验链、用途、SAN、有效期及公私钥匹配后，原子替换 `tls/current`，不先覆盖活动密钥。
+- 剩余 ≤30 天才续签（SAN 变化除外），续签串行加锁。执行 Caddy validate 后，经受限 Unix 管理套接字 `caddy-admin.sock` **强制 reload**，确保静态路径没变时仍重读证书。
+- reload 失败或超时，恢复原链接并尝试重新加载旧证书，失败时非零退出且 stderr 告警；原证书/私钥始终保留。不把“磁盘已恢复”当作“进程已恢复”。
+- 中断或二次 reload 失败留下 `tls/transition.json`，后续检查失败关闭。人工核对后运行 `production_tls.py recover --deploy-dir "$DEPLOY" --approved-credentials-and-reload`，只恢复记录中的旧版本并重试加载；仍失败则保持维护状态排障。
+- 每日 `check/renew` 调度和退出码告警接入需另行授权安装；本次未运行定时续签、未接入外部告警，不宣称已经自动运维。旧版本清理也不自动执行。
+
+**信任分发**：只分发 `tls/ca/ca.crt` 公共证书；`check` 输出 SHA-256 指纹供另一条可信通道核对，绝不分发 `ca.key` 或 leaf 私钥。客户端可先用 `curl --cacert <CA公共证书> https://<IP>:8643/` 做局部信任测试；未导入 CA 的客户端应明确失败，禁止使用 `-k`。浏览器如需系统信任，由用户核对指纹后人工导入。撤销时从各客户端信任库/容器挂载中删除该 CA 并替换证书；CA 私钥泄露必须另行轮换 CA、重新分发且撤销旧信任，静态本地 CA 没有自动在线吊销能力。本工具不调用系统信任安装命令。
+
+`com.aiops.caddy.plist` 只由渲染器输出到受限目录：固定绝对二进制路径、WorkingDirectory、受控 PATH、私有 XDG 目录、日志和 Umask 077；正常停止不自行恢复，异常退出有 30 秒节流。Caddy 使用静态证书、关闭 `auto_https`/配置持久化，Unix 管理接口仅本机同用户可用。安装/注册/停止须与主启动控制器协调并单独授权，本工具不修改 `~/Library/LaunchAgents`。用户级代理只承诺登录后托管，不承诺无人登录可用。
+
+### 9.6 本轮证据与待验收清单
+
+定向测试必须先导入 `tests`，并保留 `-t .`：
+
+```bash
+.venv/bin/python -c 'import tests, unittest; unittest.main(module=None, argv=["unittest", "discover", "-s", "tests", "-t", ".", "-p", "test_production_deploy.py", "-v"])'
+```
+
+本轮实际结果：32 项定向测试，31 项通过、1 项因未安装 Caddy 跳过。已覆盖真实 Compose 配置合并（含错误端口追加、start-dev 混入、缺失 digest 拒绝）、身份/凭证隔离、输出权限、路径及 `.env` 门禁、真实 OpenSSL 临时 CA/leaf、精确 SAN、90/30 天边界、IP 变化、证书校验失败不切换、reload 成功/失败/二次失败恢复、并发锁、schema 审批门禁与 shell 语法，以及 Caddy/监控片段静态断言。Caddy 官方适配器用例明确跳过，不能据此声称真实 HTTPS/认证路由通过（2026-10-13 维护窗口增补：Caddy 已安装托管、8643 真实 HTTPS 入口与认证路由已投用，该跳过用例已可运行；最近全量复跑 unittest `OK(skipped=6)`、pytest `1261 passed, 6 skipped`）。
+
+另已执行 `sh -n deploy/temporal/schema.sh`、`plutil -lint deploy/launchd/com.aiops.caddy.plist`、`git diff --check`，均通过。对两个新 Python 工具及新测试运行 Bandit：HIGH=0；两项 Medium 均为负向测试中的 `0.0.0.0` 输入（B104），用于断言全网卡绑定被拒绝，不是运行监听配置。未运行会导入应用/环境配置的全量测试，不沿用旧测试数量作为本轮结论。
+
+上线前仍须逐项提供运行证据：
+
+1. 备份可恢复、旧流程清单及处置确认，原四卷与存量数据不变；实际 MySQL 版本、runtime 无 DDL、migration 无全局权限并在维护后回收。
+2. 同版本官方 schema/Server 启动、生产 namespace 30 天、worker 只消费生产队列；SDK 联调、查询/信号、重启后的历史/计时器/待审批恢复；镜像漏洞门禁。
+3. Caddy 官方解析及实际 TLS 校验、正确/错误/缺失指标凭证、错误方法/近似路径/编码路径拒绝、控制台鉴权、伪造转发头不能改变限速/审计来源。
+4. 从另一台客户端与实际 Colima 监控容器验证 CA、采集和 webhook；LAN 无法直连 MySQL/Redis/Loki/Temporal/BFF/webhook/worker 指标及可选 UI 的宿主端口。
+5. Caddy/业务启动器联动、受控重启、每日续签/告警调度、真实 reload 回滚、两个 watchdog 周期及后续 24 小时观察。
+
+上述任何项未完成，结论必须保留为“产物/隔离验证完成，G2/G3 待确认或待运行验收”，不得称为生产已部署、HA、异地容灾或真实自动发布准入。
 
 ---
 
@@ -823,7 +1023,8 @@ aiops-agent/
 | 8233 | Temporal Web UI | Temporal 服务端参数 |
 | 11434 | Ollama | Ollama 服务端参数 / `AIOPS_OLLAMA_URL` |
 | 8600 | BFF 控制台（SPA + `/api` + `/metrics`） | uvicorn `--port`（demo-up.sh 固定 8600） |
-| 9090 | worker 指标服务 | `AIOPS_METRICS_PORT`（0 关闭） |
+| 8643 | 生产 HTTPS 入口（本机 Caddy 反代 8600 / 8099 / 指标通道） | `scripts/production_deploy.py` 渲染（E/F 产物，未运行验收） |
+| 9090 / 9091 | worker 指标服务（demo / production 默认；production 仅 loopback） | `AIOPS_METRICS_PORT`（0 关闭） |
 | 8099 | 告警接入服务 | `--port` / `AIOPS_WEBHOOK_PORT` |
 | 18080 | 稳定容器（宿主映射） | `AIOPS_STABLE_PORT` |
 | 8000 | demo-app 容器内端口 | demo-app 的 `PORT` 环境变量 |
@@ -844,3 +1045,132 @@ aiops-agent/
 | 修复模型 | Ollama 提供者默认随 triage（27b-mlx 实测沙箱通过率 1.0 vs 8b 的 0.0）；Qoder 提供者默认 `DeepSeek-Flash`（100 轮 / 720s） |
 | 沙箱镜像 | `python:3.12-slim`（`AIOPS_SANDBOX_IMAGE`） |
 | 金丝雀 SLO | 错误率 ≤ 5%、P99 ≤ 500ms（观测窗口内实测判定） |
+
+## 10 批次 H：加密备份与受限恢复实施（2026-10-13）
+
+本章追加在既有内容之后，第 9 章和历史记录保持原样。本章取代旧备份工具的操作方法：**不再支持无配置备份、未加密 tar.gz 恢复、默认 `aiops-mysql` 容器、root 通道或固定 `aiops_restore_drill` 库**。历史归档保留，不自动删除、转换或灌入生产库。
+
+### 10.1 已实现范围与一致性边界
+
+入口仍为 `scripts/backup-data.py`，核心为 `aiops_agent/backup.py`；仅导入无副作用的 `mode` 模块，不加载应用配置，不自动读取 `.env`。必须提供 600 权限 JSON 配置，`mode` 与进程 `AIOPS_MODE` 一致，`data_root` 与 `mode.data_root()` 的实际结果完全一致。production 缺三库、关键来源、独立密钥或安全门禁即失败，不降级为文件备份；demo 不连接任何 MySQL。
+
+- 收集整个模式数据根，而非旧 JSON 白名单；demo 默认 `data/` 明确排除 `data/prod/`。production 另外自动纳入尚在旧位置的 `data/notify`、`data/argocd`、`data/log_ship_positions.json`（存在时），避免模式迁移前漏掉通知、发布与采集位点。新的独立外置目录必须在 `sources` 中明确列出。
+- production 必填来源包括策略、部署配置、受保护环境文件、TLS、通知、审计、发布记录、补丁恢复材料、采集位点。空目录在 manifest 中记录；缺目录不静默跳过。审计数据库内容随业务库导出，文件留痕随数据根/审计来源收集。备份配置和 MySQL 专用客户端配置也进入加密归档；**备份加密密钥不进入归档**。
+- 同一个专用 MySQL8 连接先取得 `LOCK INSTANCE FOR BACKUP`，核对三库的基础表全部为 InnoDB；随后仅运行一次 `mysqldump --single-transaction --databases <业务库> temporal_prod temporal_visibility_prod`。DDL 备份锁保持至导出和统计完成，失败释放连接；非事务表、视图、缺库、权限不足均阻断。本版不声称支持任意存储引擎或视图恢复。
+- MySQL 凭证只从明确的 600 客户端文件读取；`[client]` 必须显式配置非 root 的 `user`、`password`、loopback `host`（127.0.0.1 或 ::1）和 `port`，禁止隐式 socket。客户端禁止读取登录路径文件，密码不进入参数、状态或日志。需同版本客户端支持这些参数（**2026-10-13 维护窗口增补：mysqldump 9.6 客户端 vs MySQL 8.0 服务器已实测**，保护备份成功产出已认证归档，见 10.6）。为该专用账户审定三库 SELECT、导出 routines/events/triggers 所需权限及 `BACKUP_ADMIN`，不要直接授予生产 root。
+- 文件复制前后检查设备/inode/大小/纳秒时间戳，复制结束再次核对整个文件清单；新增、删除、替换或写入变化导致本次失败。production 还要求有效的写入暂停/发布空闲租约，并持有既有公共发布锁。不自动暂停写入或停止服务，不声称应用 DB、Temporal 与文件天然构成全局事务；manifest 明确标记为**组件级一致性**。
+- 日常 Loki 持久卷不属于本工具已经完成的日志备份；旧 Temporal SQLite 和 Loki 卷的维护窗口冷备尚须单独实施与验证。可在受控冷备完成后把冷备产物作为额外 `sources` 一起加密，并用 `--protected` 永久保留，但添加文件或使用该开关**不能证明冷备一致性**。
+
+### 10.2 配置、密钥与发布协调门禁
+
+以下仅为字段示例，所有路径必须人工替换为绝对真实路径；本轮没有生成真实配置、口令或密钥。
+
+```json
+{
+  "mode": "production",
+  "data_root": "/ABS/aiops-agent/data/prod",
+  "backup_dir": "/ABS/aiops-archives",
+  "key_file": "/ABS/private-offline-key/backup.key",
+  "quiescence_file": "/ABS/backup-control/quiescence.json",
+  "release_lock": "/ABS/SHARED_RELEASE_LOCK",
+  "mysql": {
+    "defaults_file": "/ABS/backup-control/mysql.cnf",
+    "dump_binary": "/ABS/mysql-client/bin/mysqldump",
+    "databases": ["aiops", "temporal_prod", "temporal_visibility_prod"]
+  },
+  "sources": {
+    "policy": "/ABS/aiops-agent/release-gate-policy.yaml",
+    "deployment": "/ABS/aiops-agent/data/production-deploy",
+    "environment": "/ABS/protected-runtime-environment",
+    "tls": "/ABS/aiops-agent/data/production-deploy/tls",
+    "notifications": "/ABS/ACTUAL_NOTIFICATIONS",
+    "audit": "/ABS/ACTUAL_AUDIT_FILES",
+    "release_records": "/ABS/ACTUAL_RELEASE_RECORDS",
+    "release_recovery": "/ABS/ACTUAL_PATCH_RECOVERY_MATERIALS",
+    "positions": "/ABS/ACTUAL_LOG_POSITIONS"
+  },
+  "offsite": {"enabled": false}
+}
+```
+
+`mysql.databases` 是实际同实例三库的显式清单，第一项必须由操作者核对为既有业务库，不创建新库冒充原数据。`AIOPS_POLICY_PATH` 已设置时必须与 `sources.policy` 一致。环境文件只是经批准执行真实备份时的加密输入，dry-run 不读取其正文；不要把包含备份密钥的父目录作为来源。
+
+密钥由用户另行批准后安全提供，长度必须为 **32 个原始字节**，不是 64 字符十六进制字符串。密钥文件属于当前用户、权限 600，父目录 700，必须在仓库、备份目录和所有来源之外；不自动生成、不进入 Git、日志或归档。操作者必须另行登记密钥版本与适用归档，并在独立离机介质保管可恢复副本。密钥遗失无法解密；轮换期间保留旧密钥，新旧密钥归档宜分目录管理，当前密钥无法认证旧归档时保留策略会停止，不盲删文件。本机数据、归档、密钥同时丢失时不保证恢复。
+
+production 的 `quiescence_file` 必须是当前用户的 600 JSON，字段如下：
+
+```json
+{"mode":"production","data_root":"/ABS/aiops-agent/data/prod","writers_paused":true,"releases_idle":true,"expires_at":0}
+```
+
+示例的 `expires_at=0` 故意不可用：协调方确认写入已暂停、发布无跨阶段占用后，才能填入当前时间之后、不超过一小时的 Unix 秒时间戳。备份前后均检查租约。`release_lock` 必须是**发布执行方和备份共同遵守的同一个已有 600 文件**；不得随便创建无关空锁冒充协调完成。
+
+**接线状态（2026-10-13 增补，H 收尾）**：备份与发布共享锁及占用记录的接线**已完成**——`release_lock`、`sources.release_records`、`sources.release_recovery` 三项必须与 `aiops_agent/release_journal.py` 的 `coordination_paths()`（发布控制目录 `data/release-control/`）逐字一致，否则 `load_config` 直接拒绝；备份取得发布锁后立即调用 `assert_idle_locked()`，日志存在非终态发布记录（如崩溃残留）时拒绝拍快照，不再可能用无关空锁冒充“发布空闲”。该约束由 2 项隔离测试守护（`tests/test_backup.py`）。仍待：租约签发/解除自动化、无人值守协调。**真实环境运行验证已于 2026-10-13 维护窗口完成**（首个生产保护归档 `--verify` 认证通过）；调度 plist 已完成占位符替换并以禁用态注册（启用前仍须人工确认租约可正常签发），见 10.6。**每日任务启用前必须人工确认 plist 已替换真实路径且租约可正常签发，不能仅凭模板存在宣称日备份已上线。**
+
+### 10.3 归档格式、权限与状态
+
+受控输出目录及临时目录均为 700，新文件为 600；现存不安全权限直接拒绝，不擅自 chmod 生产材料。拒绝路径穿越、符号链接和硬链接别名。唯一特例为已配置 TLS 根的 `current`：必须指向该 TLS 根内部的真实版本目录，归档中物化为普通文件，同时记录链接目标；要求 CA 证书/私钥以及 current 的 leaf 证书/私钥齐全。恢复到正式部署时需人工核对并重建版本链接，不把物化目录原样覆盖正在使用的 `current`。部署目录中的 Caddy 管理 socket 记为运行期排除项。
+
+SQL stdout 直接写入 600 暂存文件，不捕获到整块内存；逐行 SQL 统计，单条 INSERT 一行，BLOB 使用十六进制。tar/gzip 输出直接流入 `cryptography` 的 AES-256-GCM 增量加密器，随机 96 位 nonce、128 位认证标签，格式头作为附加认证数据。加密后先完整解密认证，再检查 manifest 和每个成员，成功后同文件系统原子改名并 fsync；失败不会发布成功归档。工作目录需要足够空间保存 SQL、文件快照和校验用压缩包；这些临时明文受 700/600 权限保护，正常返回会清理，异常断电遗留需受控核查，不能宣称磁盘取证级安全擦除。
+
+加密内的 `manifest.json` 包含格式/工具版本、模式、实际数据根、来源、创建时间、daily/protected 类型、组件一致性声明、逐文件字节数与 SHA-256，以及三库逐表 schema SHA-256、INSERT 行数和行内容 SHA-256 的模 2²⁵⁶ 求和指纹。内容指纹可发现行数相同但值被改变的情况，不靠表数判断恢复成功。归档成员只允许登记的普通文件，拒绝重复、缺失、链接、绝对路径和 `..`。
+
+- 日备份默认保留最近 **7 份已认证成功**的当前模式归档，按加密 manifest 创建时间排序；同秒执行也保留最新一份。清理仅匹配自有命名，验证身份和 inode 后通过目录句柄删除，`keep<1` 直接拒绝。
+- `--protected` 使用独立 protected 命名，不进入日常清理集合。未知旧格式、未完成文件、另一模式和受保护归档不删除；损坏/无法认证的同模式日备份触发失败，不拿它凑成功份数。
+- `backup.lock` 防止备份、验证和恢复测试并发重入。状态原子写入 `status-production.json` 或 `status-demo.json`，包含最后成功时间、大小、SHA-256、校验结果以及脱敏失败原因；后续失败保留上一成功时间。
+- `--status` 超过 **26 小时**无成功备份、时间倒退、状态损坏或最近失败时非零；`stale` 用于超过时限，`last_failure` 用于最近失败。状态仅证明最近记录，不代替周期性 `--verify`。监控接入方需定期调用并告警，目前未接线到外部监控（2026-10-13 增补：BFF/worker 指标抓取已接入 Prometheus 双 job `health=up`；本项备份状态告警仍未接线）。
+
+### 10.4 命令与独立恢复约束
+
+先设置与实际运行一致的模式/数据根，再使用仓库 `.venv`。下列仅为说明，**本轮只运行第 10.5 节的临时目录测试，没有执行这些真实操作**。
+
+```bash
+# 配置结构和路径元数据预检，不读取数据/密钥/环境文件正文，不连接MySQL或Docker。
+.venv/bin/python scripts/backup-data.py --config /ABS/backup.json --dry-run
+# 输出未完成门禁；运行验收未证实时始终退出2，不报通过。
+.venv/bin/python scripts/backup-data.py --config /ABS/backup.json --readiness
+# 以下实际备份必须在凭证、协调门禁与风险确认完成之后才能执行。
+.venv/bin/python scripts/backup-data.py --config /ABS/backup.json --keep 7
+.venv/bin/python scripts/backup-data.py --config /ABS/backup.json --protected
+.venv/bin/python scripts/backup-data.py --config /ABS/backup.json --status
+.venv/bin/python scripts/backup-data.py --config /ABS/recovery.json --verify /ABS/ARCHIVE.aes
+# 只导入人工预先准备的空白独立测试实例，保留实例，不自动删库/容器/卷。
+.venv/bin/python scripts/backup-data.py --config /ABS/recovery.json --restore-test /ABS/ARCHIVE.aes --test-target /ABS/test-target.json --approve-test-import
+```
+
+灾后 `recovery.json` 只需 `mode`、`backup_dir`、`key_file`；`--verify`、`--restore-test`、`--list`、`--status` 不要求原数据根或源数据库仍存在。运行模式仍须显式一致。`--verify` 的退出 0 **仅表示加密认证及文件校验通过**。`--restore-test` 即使内容对比通过也返回 2，因为业务/Temporal 运行验收未实现自动放行。
+
+测试目标 JSON 字段为 `container`、完整 `container_id`、`volume`、`port`、`test_marker`。必须同时满足：
+
+1. 容器、卷、网络名均匹配 `aiops-backup-test-*`；容器与卷及网络的 `io.aiops.backup-test` 标签等于指定的 32 位十六进制测试标记。标记是隔离身份，不是生产凭证。
+2. inspect 返回的名称和完整 ID 完全一致；仅挂载一个命名卷到 `/var/lib/mysql`，不接受任何宿主 bind。该卷只能被此容器引用，包括已停止容器也不能共享。
+3. MySQL 只发布 `127.0.0.1:<显式20000以上端口>`；不能使用原 3316 或 3306。网络必须是带相同标签的 internal 网络且没有其他容器，拒绝 host/共享网络、额外网络和 privileged 容器。工具不创建或启动测试设施。
+4. 容器本层须由用户预置 `/run/secrets/aiops-backup-test.cnf`，只允许 `aiops_restore_test` 用户，不回退 root。所有客户端命令强制容器内 `127.0.0.1:3306` TCP，不能被 cnf 的 host/socket 改向其他实例。账户需有全局 `SHOW DATABASES` 权限以证明没有隐藏的既有库，以及仅在这个独立实例导入/再导出的权限。实例除 MySQL 系统库外必须完全空白，否则导入前拒绝，不做 DROP DATABASE。
+5. 解密认证在解析之前完成；临时解包逐文件校验，SQL 通过文件 stdin 流入已核实容器 ID。随后在同一测试容器重新导出，比较归档 manifest 的每张表结构、行数与内容指纹，不查询原生产库来凑验收结果。测试实例和卷保留供人工调查，本工具不清理它们。
+
+恢复报告写入 `restore-status.json`，只报告实际完成的文件/SQL内容校验。**正式 Temporal Server 的隔离恢复（历史读取、预置等待流程恢复与业务 API 验证）尚未执行，运行验收保持 blocked**（2026-10-13 维护窗口增补：正式 Server 已运行并联调、影子 workflow 已实际执行，见 10.6）；恢复数据到 MySQL 不等于 Temporal 已恢复。下一阶段需另建隔离正式 Server、测试 namespace/worker，验证历史、审批/计时器继续及业务关键行/API，并记录真实耗时；不得将这些模拟单测当成该证据。
+
+### 10.5 调度模板、定向证据与待办
+
+`deploy/launchd/com.aiops.backup.plist` 为独立任务模板：每日本地时间 **03:00**，固定 `__ROOT__/.venv/bin/python`、WorkingDirectory、受控 PATH、production 模式/数据根、`--keep 7`、Umask 077 和固定日志路径。不随登录立即执行，不配置失败无限重启。`__ROOT__`、`__BACKUP_CONFIG__`、`__DATA_ROOT__`、`__BACKUP_DIR__` 须人工替换并检查 XML 转义；日志父目录预置为 700。没有模板渲染/安装副作用，未修改实际 LaunchAgents（**2026-10-13 后续执行：占位符已替换真实路径并以禁用态注册**，见 10.6）。用户级 launchd 只承诺登录后的调度能力，不能据此保证无人登录、主机睡眠或关机时按时备份。
+
+本轮实际运行（工作目录仓库，先由 `tests/__init__.py` 隔离，再加载测试模块）：
+
+```bash
+.venv/bin/python -m unittest tests.test_backup -v
+```
+
+**40 项定向测试全部通过，无跳过**（含 H 收尾新增 2 项：发布记录非终态时拒绝快照、无关 decoy 锁被配置校验拒绝）。临时目录真实执行 AES-GCM 加解密、tar/gzip、文件校验、权限、互斥和保留清理；MySQL、Docker、导入与再导出均为显式替身，默认禁止任何真实子进程。覆盖三库单次导出参数和 DDL 锁、非事务表/缺配置拒绝、状态 26 小时边界、源变化、TLS/目录/硬链接逃逸、认证篡改、恶意归档成员、7 份与 protected、真实源丢失后的离线校验、错误恢复目标、隐藏库权限、相同行数内容不同拒绝及 Temporal 未证实阻断。`git diff --check` 通过；语言服务器未就绪，未把 IDE 静态诊断称为通过。
+
+本轮**没有**读取真实 `.env` secrets、运行真实备份、启动容器、停止服务、恢复真实数据库、生成真实凭证、安装 launchd、提交或推送。仍待完成：租约签发/解除与无人值守协调（共享锁与占用记录接线已完成并校验，见 10.2）、真实 MySQL8/客户端一致性备份及隔离灌入、正式 Temporal/业务 API 验收、SQLite/Loki 冷备及恢复、实际 03:00 调度与 26 小时告警、RPO≤24h / RTO≤60min 的实测。异地入口只接受 `{"enabled":false}`，输出“未配置”，不提供上传能力；G2/G3、全天日志灾备、异地容灾均未通过。（上述为 H 批次边界；2026-10-13 维护窗口已执行的内容与残余待办见 10.6。）
+
+### 10.6 维护窗口执行结果（2026-10-13 增补）
+
+用户批准的维护窗口（2026-10-13 17:45–18:30）已执行单机切换与运行验收，执行清单与回填证据见 `data/maintenance-window/维护窗口执行清单.md`（含第 5 节证据链）。要点：
+
+- **正式栈投用（影子模式）**：`temporal-prod`（独立 runtime/migration 账户、生产 namespace）、MySQL/Redis/Loki 与 BFF/worker 等组件在 production 档运行，`/readyz` 返回 ok；组件监听收敛 loopback（8600/8099/9091），8643 为本机 Caddy 三向入口（10.1.112.39 / 127.0.0.1 / ::1）。
+- **launchd 托管**：`com.aiops.caddy`、`com.aiops.watchdog` 已安装并 running；`com.aiops.backup` 已完成占位符替换（`plutil -lint` 通过）并以**禁用态**注册（`launchctl print-disabled` 确认 disabled）——启用前置=10.2 条款“租约可正常签发”，启用命令 `launchctl enable gui/$(id -u)/com.aiops.backup`。
+- **真实备份与冷备**：首个生产保护归档 `aiops-production-protected-20261013T095148-…aes`（112094B，`--verify` 已认证）产出；W1 完成旧 Temporal SQLite 与 Loki 卷冷备（`~/aiops-archives/maintenance-20261013-1749/`，含 `SHA256SUMS`）。`--dry-run` 复核：`configuration=valid`、`last_failure=null`、`stale=false`。
+- **监控接线（G2 前置）**：Alertmanager receiver 指向 `https://10.1.112.39:8643/webhook`（`ca_file` + `credentials_file`），投放验证经 Caddy 到达接入层并实际开出 workflow；Prometheus `aiops-production-bff` / `aiops-production-worker` 双 job `health=up`、无 lastError。
+- **影子冒烟（W5）**：webhook 告警开出 workflow，链路 evidence（Loki）→ Drain3 聚类 → LLM triage（confidence=0.30）→ 闸门 1 转人工（投递=recorded），未触真实仓库/MR/发布路径。
+- **残余待办**：租约签发/解除与无人值守协调（备份调度启用前置）、03:00 实际调度与 26 小时告警接线、真实归档的隔离恢复灌入、SQLite/Loki 恢复演练、RPO≤24h / RTO≤60min 实测。异地容灾与全天日志灾备仍未通过。

@@ -13,10 +13,11 @@ Alertmanager 侧接入点（本机 nl2sql-monitoring 栈 deploy/alertmanager.yml
       （resolved 后再次 firing）startsAt 刷新，避免 REJECT_DUPLICATE 永久拒绝新流程；
     - 幂等：workflow id = aiops-fix-{service}-{alert_id}，REJECT_DUPLICATE + FAIL，
       重复投递仅返回 duplicates，不产生第二个流程实例；
-    - 事件聚合（P2-1 修复风暴防护）：同故障域（service）告警在窗口内（默认 90s，
-      AIOPS_WEBHOOK_AGGREGATE_WINDOW 可配）聚合为单事件——仅事件首发告警开流程，
-      窗口内后续告警归并计数（响应 aggregated 字段 + aiops_alert_aggregated_total
-      指标 + 日志），防止一个故障域短时多告警并发开出多条修复流程；
+    - 事件聚合（P2-1 / C 批次）：同故障域（service）告警在窗口内（默认 90s，
+      AIOPS_WEBHOOK_AGGREGATE_WINDOW 可配）聚合为单事件，仅事件首发告警开代表流程；
+      - production：聚合状态持久化到 MySQL（alert_domains / alert_events / alert_members），
+        跨实例成员去重 + 租约认领 + 到期补偿重试（同一代表 id），启动失败返回 5xx 交重投；
+      - demo：进程内 AggregateWindow（零外部依赖），失败整域回滚保证不吞告警；
     - kill switch：启动前检查，激活时返回 503 拒绝新流程；状态不可读时 fail-closed；
     - 鉴权（P0-1）：来源 IP 白名单 + 共享密钥（Authorization: Bearer / X-AIOps-Token）+
       可选 HMAC 签名（X-AIOps-Signature）+ 限速；production 档未配置密钥时 fail-closed（503），
@@ -37,7 +38,7 @@ import os
 import threading
 import time
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -45,12 +46,11 @@ from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
-from aiops_agent import kill_switch, metrics
+from aiops_agent import alert_store, db, kill_switch, metrics, mode
 from aiops_agent.config import load_policy, snapshot_for_workflow
 from aiops_agent.models import Alert
 from aiops_agent.workflows import AIOpsFixWorkflow
 
-TASK_QUEUE = "aiops-tasks"
 WEBHOOK_PATH = "/webhook"
 
 logger = logging.getLogger("aiops.webhook")
@@ -72,7 +72,10 @@ MAX_BODY_BYTES = 1_048_576  # 1 MiB：Alertmanager 载荷远小于此，超出�
 
 # ---- 事件聚合窗口（P2-1 修复风暴防护）----
 AGGREGATE_WINDOW_ENV = "AIOPS_WEBHOOK_AGGREGATE_WINDOW"
-DEFAULT_AGGREGATE_WINDOW = 90.0  # 秒；0 = 关闭聚合（保持旧行为）
+DEFAULT_AGGREGATE_WINDOW = 90.0  # 秒；0 = 关闭聚合（production 退化为每告警一事件）
+
+# ---- 事件补偿线程（C 批次）：到期未启动事件的周期重试 ----
+COMPENSATE_INTERVAL_SECONDS = 15.0
 
 
 @dataclass(frozen=True)
@@ -290,16 +293,24 @@ class AggregateWindow:
                 state.wf_id = wf_id
 
     def discard(self, services: Iterable[str]) -> None:
-        """启动失败时回滚本批新建的事件（仅无归并、无流程 id 的干净状态）。"""
+        """启动失败回滚：移除未见流程 id 的事件状态（含已归并计数）。
+
+        旧实现只回滚 count==1 的“干净”状态：同批多告警归并后代表启动失败，
+        会残留 ``wf_id=None`` 的僵死事件——重投被判为“归并中”而不再开流程（吞告警）。
+        """
         with self._lock:
             for service in services:
                 state = self._state.get(service)
-                if state is not None and state.count == 1 and state.wf_id is None:
+                if state is not None and state.wf_id is None:
                     del self._state[service]
 
 
-# 进程内聚合窗口（main 启动时按 env 重建；此处默认值供直接调用 handler 的场合兜底）
+# 进程内聚合窗口（demo；main 启动时按 env 重建；默认值供直接调用 handler 兜底）
 _AGGREGATE_WINDOW = AggregateWindow(DEFAULT_AGGREGATE_WINDOW)
+# 聚合窗口秒数（production 持久化路径使用；main 启动时按 env 重建）
+_AGGREGATE_SECONDS = DEFAULT_AGGREGATE_WINDOW
+# 补偿线程停止信号（测试与优雅停机使用；进程退出即失效）
+_COMPENSATE_STOP = threading.Event()
 
 
 def check_kill_switch() -> dict | None:
@@ -313,11 +324,24 @@ def check_kill_switch() -> dict | None:
     return None
 
 
-async def _start_workflows(alerts: list[Alert], snapshot: dict) -> tuple[list[str], list[str]]:
-    """逐条启动 workflow，返回 (started, duplicates)。幂等冲突不算失败。"""
-    client = await Client.connect(os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))
+async def _start_workflows(
+    alerts: list[Alert], snapshot: dict
+) -> tuple[list[str], list[str], list[tuple[Alert, Exception]]]:
+    """逐条启动 workflow（demo / 无认领路径），返回 (started, duplicates, failures)。
+
+    单条失败不阻断其余告警：部分成功保留（已开流程不回滚），失败者由 Alertmanager
+    重投补齐；幂等冲突（REJECT_DUPLICATE + FAIL）不算失败。
+    """
+    try:
+        client = await Client.connect(
+            os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"),
+            namespace=mode.temporal_namespace(),
+        )
+    except Exception as exc:  # noqa: BLE001 - 连接失败=整批未启动，交重投
+        return [], [], [(alert, exc) for alert in alerts]
     started: list[str] = []
     duplicates: list[str] = []
+    failures: list[tuple[Alert, Exception]] = []
     for alert in alerts:
         wf_id = workflow_id_for(alert)
         try:
@@ -325,7 +349,7 @@ async def _start_workflows(alerts: list[Alert], snapshot: dict) -> tuple[list[st
                 AIOpsFixWorkflow.run,
                 args=[alert, snapshot],
                 id=wf_id,
-                task_queue=TASK_QUEUE,
+                task_queue=mode.temporal_task_queue(),
                 id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
                 id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
             )
@@ -333,7 +357,192 @@ async def _start_workflows(alerts: list[Alert], snapshot: dict) -> tuple[list[st
             metrics.observe_workflow_started(alert.service)
         except WorkflowAlreadyStartedError:
             duplicates.append(wf_id)
-    return started, duplicates
+        except Exception as exc:  # noqa: BLE001 - 单条失败留给重投
+            failures.append((alert, exc))
+    return started, duplicates, failures
+
+
+async def _start_claimed_events(
+    engine, events: list[alert_store.EventView]
+) -> tuple[list[str], list[str], list[tuple[alert_store.EventView, Exception]]]:
+    """启动已认领事件的代表流程（绝不变更代表 id），并回报 mark_started / mark_failed。
+
+    幂等冲突（同一代表 id 已被启动，如崩溃接管后重试）视为成功；
+    全部 DB 回报都在 Temporal 调用之外进行，不在事务内做 RPC。
+    """
+    try:
+        client = await Client.connect(
+            os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"),
+            namespace=mode.temporal_namespace(),
+        )
+    except Exception as exc:  # noqa: BLE001 - 连接失败=全部未启动，保留 pending 等重投/补偿
+        for event in events:
+            alert_store.mark_failed(
+                engine, event.event_id, event.claim_token, f"Temporal 连接失败: {exc}"
+            )
+        return [], [], [(event, exc) for event in events]
+    started: list[str] = []
+    duplicates: list[str] = []
+    failures: list[tuple[alert_store.EventView, Exception]] = []
+    for event in events:
+        try:
+            await client.start_workflow(
+                AIOpsFixWorkflow.run,
+                args=[Alert(**event.representative_alert), event.policy_snapshot],
+                id=event.wf_id,
+                task_queue=mode.temporal_task_queue(),
+                id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+                id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
+            )
+            started.append(event.wf_id)
+            metrics.observe_workflow_started(event.service)
+        except WorkflowAlreadyStartedError:
+            duplicates.append(event.wf_id)  # 已启动即成功（崩溃恢复重试同一代表 id）
+        except Exception as exc:  # noqa: BLE001 - 失败释放租约等重投/补偿
+            failures.append((event, exc))
+            alert_store.mark_failed(engine, event.event_id, event.claim_token, str(exc))
+            continue
+        alert_store.mark_started(engine, event.event_id, event.claim_token)
+    return started, duplicates, failures
+
+
+def _handle_production(alerts: list[Alert], resolved: int) -> tuple[int, dict]:
+    """production：持久化聚合（跨实例去重 + 租约认领）；失败/占用返回 5xx 交重投。"""
+    engine = db.get_engine()
+    outcome = alert_store.ingest(engine, alerts, _POLICY_SNAPSHOT, _AGGREGATE_SECONDS)
+    for event in outcome.events:
+        if not event.is_new:
+            metrics.observe_alert_aggregated(event.service)
+    started: list[str] = []
+    duplicates: list[str] = []
+    failures: list[tuple[alert_store.EventView, Exception]] = []
+    if outcome.to_start:
+        started, duplicates, failures = asyncio.run(
+            _start_claimed_events(engine, outcome.to_start)
+        )
+    body = {
+        "started": started,
+        "duplicates": duplicates,
+        "aggregated": [event.as_aggregated() for event in outcome.events],
+        "ignored_resolved": resolved,
+    }
+    for wf_id in started:
+        logger.info("已启动 workflow: %s", wf_id)
+    for wf_id in duplicates:
+        logger.info("重复告警（幂等拒绝，不重复开流程）: %s", wf_id)
+    for event in outcome.events:
+        if not event.is_new:
+            logger.info(
+                "故障域聚合：service=%s 归入事件 %s（当前 %d 条，代表流程 %s）",
+                event.service, event.event_id, event.count, event.wf_id,
+            )
+    if failures:
+        body["error"] = "部分代表流程启动失败，等待 Alertmanager 重投: " + "; ".join(
+            f"{event.wf_id}: {exc}" for event, exc in failures
+        )[:800]
+        body["failed"] = [event.wf_id for event, _ in failures]
+        return 500, body
+    if outcome.busy:
+        body["error"] = "事件代表流程正由其他实例启动，请稍后重投确认"
+        body["busy"] = [event.event_id for event in outcome.busy]
+        return 503, body
+    return 200, body
+
+
+def _handle_demo(alerts: list[Alert], resolved: int) -> tuple[int, dict]:
+    """demo：进程内聚合（零外部依赖）；语义与 production 对齐——失败必重投、不吞告警。"""
+    to_start, merged = _AGGREGATE_WINDOW.route(alerts)
+    started: list[str] = []
+    duplicates: list[str] = []
+    failures: list[tuple[Alert, Exception]] = []
+    if to_start:
+        started, duplicates, failures = asyncio.run(_start_workflows(to_start, _POLICY_SNAPSHOT))
+    failed_alerts = [alert for alert, _ in failures]
+    for alert in to_start:  # 回填事件代表流程 id（started / duplicates 同一幂等键）
+        if alert not in failed_alerts:
+            _AGGREGATE_WINDOW.attach_wf(alert.service, workflow_id_for(alert))
+    if failed_alerts:  # 失败服务整体回滚（含已归并计数）：重投后重新开事件，绝不吞告警
+        _AGGREGATE_WINDOW.discard(alert.service for alert in failed_alerts)
+    aggregated = [
+        {
+            "event_key": state.event_key,
+            "service": state.service,
+            "count": state.count,
+            "wf_id": state.wf_id,
+            "alert_ids": state.alert_ids[:8],  # 展示截断（窗口内可能持续追加）
+        }
+        for state in merged
+    ]
+    for wf_id in started:
+        logger.info("已启动 workflow: %s", wf_id)
+    for wf_id in duplicates:
+        logger.info("重复告警（幂等拒绝，不重复开流程）: %s", wf_id)
+    for item in aggregated:
+        logger.info(
+            "故障域聚合（修复风暴防护）：service=%s 归入事件 %s（窗口内第 %d 条，代表流程 %s）",
+            item["service"], item["event_key"], item["count"], item["wf_id"],
+        )
+    body = {
+        "started": started,
+        "duplicates": duplicates,
+        "aggregated": aggregated,
+        "ignored_resolved": resolved,
+    }
+    if failures:
+        body["error"] = "部分告警启动失败，等待 Alertmanager 重投: " + "; ".join(
+            f"{alert.alert_id}: {exc}" for alert, exc in failures
+        )[:800]
+        body["failed"] = [alert.alert_id for alert in failed_alerts]
+        return 500, body
+    return 200, body
+
+
+def _handle_alerts(alerts: list[Alert], resolved: int) -> tuple[int, dict]:
+    """firing 告警主处理：kill switch →（production 持久化聚合 / demo 进程内聚合）。"""
+    if not alerts:
+        logger.info("收到载荷：0 条 firing（忽略 resolved=%d）", resolved)
+        return 200, {
+            "started": [], "duplicates": [], "aggregated": [], "ignored_resolved": resolved,
+        }
+    # kill switch：激活时拒绝启动新流程；状态不可读 fail-closed（503）
+    blocked = check_kill_switch()
+    if blocked:
+        logger.warning("kill switch 拦截告警启动：%s", blocked["error"])
+        return 503, blocked
+    if mode.is_production():
+        return _handle_production(alerts, resolved)
+    return _handle_demo(alerts, resolved)
+
+
+def _compensate_once(engine) -> int:
+    """到期未启动事件的一轮补偿：同一代表 id 重试启动，绝不开新流程；返回认领数。"""
+    if check_kill_switch():  # 每次补偿前检查 kill switch（激活时冻结补偿）
+        logger.warning("kill switch 激活，跳过本轮事件补偿")
+        return 0
+    events = alert_store.due_events(engine)
+    claimed: list[alert_store.EventView] = []
+    for event in events:
+        token = alert_store.claim_event(engine, event.event_id)
+        if token is None:
+            continue  # 已被其他实例认领
+        claimed.append(replace(event, claim_token=token))
+    if not claimed:
+        return 0
+    started, duplicates, failures = asyncio.run(_start_claimed_events(engine, claimed))
+    logger.info(
+        "事件补偿一轮：到期=%d 认领=%d 启动=%d 已存在=%d 失败=%d",
+        len(events), len(claimed), len(started), len(duplicates), len(failures),
+    )
+    return len(claimed)
+
+
+def _compensate_loop(engine) -> None:
+    """补偿线程主体：周期扫描；单轮异常只记录，绝不退出线程。"""
+    while not _COMPENSATE_STOP.wait(COMPENSATE_INTERVAL_SECONDS):
+        try:
+            _compensate_once(engine)
+        except Exception:  # noqa: BLE001 - 下一轮重试
+            logger.exception("事件补偿扫描失败（下一轮重试）")
 
 
 class _WebhookHandler(BaseHTTPRequestHandler):
@@ -379,63 +588,13 @@ class _WebhookHandler(BaseHTTPRequestHandler):
             return
 
         alerts, resolved = parse_alertmanager_payload(payload)
-        if not alerts:
-            logger.info("收到载荷：0 条 firing（忽略 resolved=%d）", resolved)
-            self._respond(
-                200,
-                {"started": [], "duplicates": [], "aggregated": [], "ignored_resolved": resolved},
-            )
-            return
-
-        # kill switch：激活时拒绝启动新流程；状态不可读 fail-closed（503）
-        blocked = check_kill_switch()
-        if blocked:
-            logger.warning(
-                "kill switch 拦截告警启动（%d 条 firing）：%s", len(alerts), blocked["error"]
-            )
-            self._respond(503, blocked)
-            return
-
-        # 事件聚合（P2-1）：同故障域窗口内的后续告警归并为单事件，仅首发启动流程
-        to_start, merged = _AGGREGATE_WINDOW.route(alerts)
         try:
-            started, duplicates = asyncio.run(_start_workflows(to_start, _POLICY_SNAPSHOT))
-        except Exception as exc:  # noqa: BLE001 - 返回 5xx 让 Alertmanager 重试投递
-            _AGGREGATE_WINDOW.discard(alert.service for alert in to_start)
-            logger.exception("启动 workflow 失败: %s", exc)
+            status, body = _handle_alerts(alerts, resolved)
+        except Exception as exc:  # noqa: BLE001 - 5xx 让 Alertmanager 重试投递（DB/Temporal 断连）
+            logger.exception("处理告警失败: %s", exc)
             self._respond(500, {"error": str(exc)})
             return
-        for alert in to_start:  # 回填事件代表流程 id（started / duplicates 同一幂等键）
-            _AGGREGATE_WINDOW.attach_wf(alert.service, workflow_id_for(alert))
-
-        for wf_id in started:
-            logger.info("已启动 workflow: %s", wf_id)
-        for wf_id in duplicates:
-            logger.info("重复告警（幂等拒绝，不重复开流程）: %s", wf_id)
-        aggregated = [
-            {
-                "event_key": state.event_key,
-                "service": state.service,
-                "count": state.count,
-                "wf_id": state.wf_id,
-                "alert_ids": state.alert_ids[:8],  # 展示截断（窗口内可能持续追加）
-            }
-            for state in merged
-        ]
-        for item in aggregated:
-            logger.info(
-                "故障域聚合（修复风暴防护）：service=%s 归入事件 %s（窗口内第 %d 条，代表流程 %s）",
-                item["service"], item["event_key"], item["count"], item["wf_id"],
-            )
-        self._respond(
-            200,
-            {
-                "started": started,
-                "duplicates": duplicates,
-                "aggregated": aggregated,
-                "ignored_resolved": resolved,
-            },
-        )
+        self._respond(status, body)
 
     def _respond(self, status: int, body: dict) -> None:
         data = json.dumps(body, ensure_ascii=False).encode()
@@ -470,7 +629,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    global _POLICY_SNAPSHOT, _AUTH_CONFIG, _RATE_LIMITER, _AGGREGATE_WINDOW
+    global _POLICY_SNAPSHOT, _AUTH_CONFIG, _RATE_LIMITER, _AGGREGATE_WINDOW, _AGGREGATE_SECONDS
     policy = load_policy()
     _POLICY_SNAPSHOT = snapshot_for_workflow(policy)
     logger.info(
@@ -502,11 +661,27 @@ def main() -> None:
     except ValueError:
         window_seconds = DEFAULT_AGGREGATE_WINDOW
     _AGGREGATE_WINDOW = AggregateWindow(window_seconds)
+    _AGGREGATE_SECONDS = window_seconds
     logger.info(
         "事件聚合姿态: 窗口=%.0fs%s",
         window_seconds,
-        "（已关闭）" if window_seconds <= 0 else "（同故障域聚合，P2-1 修复风暴防护）",
+        "（已关闭）" if window_seconds <= 0 else (
+            "（持久化聚合 + 租约补偿，C 批次）" if mode.is_production() else "（demo 进程内聚合）"
+        ),
     )
+
+    if mode.is_production():
+        engine = db.get_engine()  # fail-fast：建表/补列 + 连接探活；失败=启动失败
+        logger.info(
+            "聚合存储就绪（跨实例去重 + 租约补偿）：补偿线程每 %.0fs 一轮",
+            COMPENSATE_INTERVAL_SECONDS,
+        )
+        threading.Thread(
+            target=_compensate_loop,
+            args=(engine,),
+            name="aiops-webhook-compensate",
+            daemon=True,
+        ).start()
 
     server = ThreadingHTTPServer((args.host, args.port), _WebhookHandler)
     logger.info("告警接入服务已启动: http://%s:%d%s", args.host, args.port, WEBHOOK_PATH)

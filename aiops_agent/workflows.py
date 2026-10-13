@@ -24,6 +24,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
     from . import activities
@@ -379,21 +380,34 @@ class AIOpsFixWorkflow:
         # ---------- CANARY → ROLLING_OUT：金丝雀与发布终态 ----------
         self.stage = "CANARY"
         self._deadline = None
-        canary: CanaryResult = await self._call(
-            activities.deploy_canary,
-            alert,
-            patch,
-            canary_cfg["traffic_percent"],
-            canary_cfg["observe_seconds"],
-            timeout=_CANARY_ACTIVITY_TIMEOUT,
-        )
-        self.stage = "ROLLING_OUT"
-        release: ReleaseResult = await self._call(
-            activities.finalize_release,
-            canary,
-            canary_cfg["auto_rollback"],
-            timeout=_CANARY_ACTIVITY_TIMEOUT,
-        )
+        release_safety = workflow.patched("release-safety-g1")
+        options = {"release_safety": True} if release_safety else {}
+        try:
+            canary: CanaryResult = await self._call(
+                activities.deploy_canary,
+                alert,
+                patch,
+                canary_cfg["traffic_percent"],
+                canary_cfg["observe_seconds"],
+                timeout=_CANARY_ACTIVITY_TIMEOUT,
+                **options,
+            )
+            self.stage = "ROLLING_OUT"
+            release: ReleaseResult = await self._call(
+                activities.finalize_release,
+                canary,
+                canary_cfg["auto_rollback"],
+                timeout=_CANARY_ACTIVITY_TIMEOUT,
+                **options,
+            )
+        except ActivityError:
+            if not release_safety and not workflow.patched("release-safety-failure-g1"):
+                raise
+            self.stage = "ESCALATED"
+            self._gate_events.append("release:safety-stop->manual")
+            await self._call(activities.escalate_to_human, alert,
+                             "发布安全拒绝/执行状态未知；保留目标占用，须核对发布日志及恢复材料，禁止自动重试")
+            return self._final(alert, root_cause, patch, None, started)
 
         if release.rolled_back:
             self.stage = "ESCALATED"
@@ -408,12 +422,18 @@ class AIOpsFixWorkflow:
         await self._start_next_cycle()
         return self._final(alert, root_cause, patch, release, started)
 
-    async def _call(self, activity_fn, *args, timeout: timedelta = _ACTIVITY_TIMEOUT):
+    async def _call(self, activity_fn, *args, timeout: timedelta = _ACTIVITY_TIMEOUT,
+                    release_safety: bool = False):
+        options = {}
+        if release_safety:
+            options = {"heartbeat_timeout": timedelta(seconds=15),
+                       "cancellation_type": workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED}
         return await workflow.execute_activity(
             activity_fn,
             args=list(args),
             start_to_close_timeout=timeout,
             retry_policy=_RETRY_POLICY,
+            **options,
         )
 
     @staticmethod

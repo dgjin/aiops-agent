@@ -51,29 +51,38 @@ def get_state() -> dict:
                 ).scalar()
         except Exception as exc:  # noqa: BLE001 - DB 故障一律 fail-closed
             raise KillSwitchError(f"kill switch 状态不可读（数据库）：{exc}") from exc
-        if not raw:
+        if raw is None:
             return _default_state()
         try:
             loaded = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise KillSwitchError(f"kill switch 状态非法（数据库）：{exc}") from exc
-        if not isinstance(loaded, dict):
-            raise KillSwitchError("kill switch 状态非法（数据库）：非对象")
+        except (ValueError, TypeError) as exc:
+            raise KillSwitchError("kill switch 状态非法（数据库）") from exc
+        if not isinstance(loaded, dict) or type(loaded.get("active")) is not bool:
+            raise KillSwitchError("kill switch 状态非法（数据库）：缺少布尔active")
         return {**_default_state(), **loaded}
 
-    if not DATA_PATH.is_file():
-        return _default_state()
     try:
+        if DATA_PATH.is_symlink():
+            raise KillSwitchError("kill switch 拒绝符号链接")
         loaded = json.loads(DATA_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return _default_state()
     except (OSError, json.JSONDecodeError) as exc:
         raise KillSwitchError(f"kill switch 状态不可读或非法（{DATA_PATH}）：{exc}") from exc
-    if not isinstance(loaded, dict):
-        raise KillSwitchError(f"kill switch 状态非法（{DATA_PATH}）：非对象")
+    if not isinstance(loaded, dict) or type(loaded.get("active")) is not bool:
+        raise KillSwitchError(f"kill switch 状态非法（{DATA_PATH}）：缺少布尔active")
     return {**_default_state(), **loaded}
 
 
 def is_active() -> bool:
     return bool(get_state().get("active"))
+
+
+def require_release_allowed() -> None:
+    """仅供副作用/观测/晋级检查点；恢复路径不得调用此闸门。"""
+    state = get_state()
+    if type(state.get("active")) is not bool or state["active"]:
+        raise KillSwitchError("kill switch 激活或状态不明确，禁止推进发布")
 
 
 def set_state(*, active: bool, actor: str, reason: str = "") -> dict:

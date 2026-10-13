@@ -9,4 +9,6 @@ demo 文件后端；此处**强制覆盖**（而非 setdefault），防止开发
 import os
 
 os.environ["AIOPS_MODE"] = "demo"
-os.environ.pop("AIOPS_DATABASE_URL", None)
+# 置空而非移除：pytest 下 tests/__init__.py 先于本文件执行并置 ""（test_production_safety
+# 断言空串），pop 会破坏该契约；空串与缺失同样阻断对真实库的连接，语义等价。
+os.environ["AIOPS_DATABASE_URL"] = ""

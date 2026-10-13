@@ -10,9 +10,15 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import unittest
+from unittest import mock
 
 import demo_cli
+from sqlalchemy import create_engine, func, select
+
+import alert_webhook
+from aiops_agent import alert_store, db
 from aiops_agent.models import Alert
 from alert_webhook import (
     AggregateWindow,
@@ -46,6 +52,10 @@ def _item(
 
 def _payload(*items: dict) -> dict:
     return {"version": "4", "status": "firing", "alerts": list(items)}
+
+
+def _alert(alert_id: str, service: str = "nl2sql") -> Alert:
+    return Alert(alert_id=alert_id, service=service)
 
 
 class TestParseAlertmanagerPayload(unittest.TestCase):
@@ -307,19 +317,25 @@ class TestAggregateWindow(unittest.TestCase):
         _, merged = window.route([self._alert("a-2")], now=110.0)
         self.assertEqual(merged[0].wf_id, "aiops-fix-nl2sql-a-1")
 
-    def test_discard_only_removes_clean_new_events(self) -> None:
+    def test_discard_rolls_back_unstarted_events_even_merged(self) -> None:
         window = AggregateWindow(90.0)
         window.route([self._alert("a-1")], now=100.0)  # 干净新事件
         window.discard(["nl2sql"])
         # 回滚后同 service 再投递：仍视为首发（启动失败不吞告警）
         to_start, _ = window.route([self._alert("a-2")], now=105.0)
         self.assertEqual([a.alert_id for a in to_start], ["a-2"])
-        # 已有归并（count>1）的事件不回滚
+        # 已归并（count>1）但未启动的事件同样整体回滚：重投后必须能重新开流程
         window.route([self._alert("a-3")], now=106.0)
         window.discard(["nl2sql"])
         to_start, merged = window.route([self._alert("a-4")], now=107.0)
+        self.assertEqual([a.alert_id for a in to_start], ["a-4"])
+        self.assertEqual(merged, [])
+        # 已绑定流程 id 的事件不回滚（重复投递仅归并）
+        window.attach_wf("nl2sql", "aiops-fix-nl2sql-a-4")
+        window.discard(["nl2sql"])
+        to_start, merged = window.route([self._alert("a-5")], now=108.0)
         self.assertEqual(to_start, [])
-        self.assertEqual(merged[0].count, 3)
+        self.assertEqual(merged[0].count, 2)
 
     def test_state_boundary_cleanup_drops_expired(self) -> None:
         window = AggregateWindow(90.0)
@@ -331,6 +347,196 @@ class TestAggregateWindow(unittest.TestCase):
         # svc0 已被清理：再投递视为新事件（开新流程，不被误吞）
         to_start, _ = window.route([self._alert("s0-2", service="svc0")], now=201.0)
         self.assertEqual(len(to_start), 1)
+
+
+class DemoHandlerTest(unittest.TestCase):
+    """demo 主处理：失败必 5xx 重投、部分成功保留、同批归并失败不吞告警。"""
+
+    def setUp(self) -> None:
+        self._orig_window = alert_webhook._AGGREGATE_WINDOW
+        alert_webhook._AGGREGATE_WINDOW = alert_webhook.AggregateWindow(90.0)
+        self.addCleanup(self._restore_window)
+
+    def _restore_window(self) -> None:
+        alert_webhook._AGGREGATE_WINDOW = self._orig_window
+
+    def test_partial_failure_keeps_success_and_retries_failure(self) -> None:
+        async def fake(alerts, snapshot):
+            ok = [a for a in alerts if a.service == "nl2sql"]
+            bad = [a for a in alerts if a.service == "order"]
+            return (
+                [alert_webhook.workflow_id_for(a) for a in ok],
+                [],
+                [(a, RuntimeError("boom")) for a in bad],
+            )
+
+        with mock.patch.object(alert_webhook, "_start_workflows", side_effect=fake):
+            status, body = alert_webhook._handle_alerts(
+                [_alert("a-1"), _alert("b-1", service="order")], 0
+            )
+        self.assertEqual(status, 500)
+        self.assertEqual(body["started"], ["aiops-fix-nl2sql-a-1"])
+        self.assertEqual(body["failed"], ["b-1"])
+
+        async def fake_ok(alerts, snapshot):
+            return [alert_webhook.workflow_id_for(a) for a in alerts], [], []
+
+        # 重投整批：nl2sql 已绑定流程（仅归并），order 补启动
+        with mock.patch.object(alert_webhook, "_start_workflows", side_effect=fake_ok):
+            status, body = alert_webhook._handle_alerts(
+                [_alert("a-1"), _alert("b-1", service="order")], 0
+            )
+        self.assertEqual(status, 200)
+        self.assertIn("aiops-fix-order-b-1", body["started"])
+
+    def test_same_batch_merge_failure_does_not_swallow_alerts(self) -> None:
+        """回归（旧 bug）：同批 [a-1, a-2] 归并后代表启动失败——重投必须重新开流程。"""
+
+        async def fail(alerts, snapshot):
+            return [], [], [(a, RuntimeError("temporal down")) for a in alerts]
+
+        with mock.patch.object(alert_webhook, "_start_workflows", side_effect=fail):
+            status, _ = alert_webhook._handle_alerts([_alert("a-1"), _alert("a-2")], 0)
+        self.assertEqual(status, 500)
+
+        async def ok(alerts, snapshot):
+            return [alert_webhook.workflow_id_for(a) for a in alerts], [], []
+
+        with mock.patch.object(alert_webhook, "_start_workflows", side_effect=ok):
+            status, body = alert_webhook._handle_alerts([_alert("a-1"), _alert("a-2")], 0)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["started"], ["aiops-fix-nl2sql-a-1"])
+
+
+async def _confirm_all(engine, events):
+    """测试替身：模拟启动成功并如实落库（不触 Temporal）。"""
+    for event in events:
+        alert_store.mark_started(engine, event.event_id, event.claim_token)
+    return [event.wf_id for event in events], [], []
+
+
+async def _fail_all(engine, events):
+    """测试替身：模拟 Temporal 故障（释放租约等重投）。"""
+    failures = []
+    for event in events:
+        alert_store.mark_failed(engine, event.event_id, event.claim_token, "temporal down")
+        failures.append((event, RuntimeError("temporal down")))
+    return [], [], failures
+
+
+async def _noop_start(engine, events):
+    """测试替身：认领但不回报（模拟启动仍在进行）。"""
+    return [], [], []
+
+
+class ProductionHandlerTest(unittest.TestCase):
+    """production 主处理：SQLite 夹具覆盖持久化聚合、busy 重投、失败重投与补偿。"""
+
+    def setUp(self) -> None:
+        db.reset_engine()
+        self.addCleanup(db.reset_engine)
+        self.engine = create_engine("sqlite://")
+        db.metadata.create_all(self.engine)
+        env = mock.patch.dict(
+            os.environ, {"AIOPS_MODE": "production", "AIOPS_DATABASE_URL": "sqlite://"}
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        engine_patch = mock.patch.object(alert_webhook.db, "get_engine", return_value=self.engine)
+        engine_patch.start()
+        self.addCleanup(engine_patch.stop)
+        kill_patch = mock.patch.object(alert_webhook, "check_kill_switch", return_value=None)
+        kill_patch.start()
+        self.addCleanup(kill_patch.stop)
+
+    def _counts(self) -> tuple[int, int]:
+        with self.engine.connect() as conn:
+            events = conn.execute(select(func.count()).select_from(db.alert_events)).scalar_one()
+            members = conn.execute(
+                select(func.count()).select_from(db.alert_members)
+            ).scalar_one()
+        return int(events), int(members)
+
+    def _event_row(self):
+        with self.engine.connect() as conn:
+            return conn.execute(select(db.alert_events)).mappings().one()
+
+    def test_batch_aggregates_and_starts_representative(self) -> None:
+        with mock.patch.object(
+            alert_webhook, "_start_claimed_events", side_effect=_confirm_all
+        ):
+            status, body = alert_webhook._handle_alerts([_alert("a-1"), _alert("a-2")], 0)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["started"], ["aiops-fix-nl2sql-a-1"])
+        self.assertEqual(body["aggregated"][0]["count"], 2)
+        self.assertEqual(self._counts(), (1, 2))
+
+    def test_start_failure_500_then_retry_starts_same_wf(self) -> None:
+        with mock.patch.object(alert_webhook, "_start_claimed_events", side_effect=_fail_all):
+            status, body = alert_webhook._handle_alerts([_alert("a-1"), _alert("a-2")], 0)
+        self.assertEqual(status, 500)
+        self.assertEqual(body["failed"], ["aiops-fix-nl2sql-a-1"])
+        row = self._event_row()
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(row["claim_token"], "")
+        # Alertmanager 重投：同一事件、同一代表 id，成员不重复计数
+        with mock.patch.object(
+            alert_webhook, "_start_claimed_events", side_effect=_confirm_all
+        ):
+            status, body = alert_webhook._handle_alerts([_alert("a-1"), _alert("a-2")], 0)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["started"], ["aiops-fix-nl2sql-a-1"])
+        self.assertEqual(self._counts(), (1, 2))
+
+    def test_live_claim_from_other_instance_returns_503(self) -> None:
+        # 第一次只认领不回报（模拟另一实例仍在启动）
+        with mock.patch.object(alert_webhook, "_start_claimed_events", side_effect=_noop_start):
+            status, _ = alert_webhook._handle_alerts([_alert("a-1")], 0)
+        self.assertEqual(status, 200)
+        status, body = alert_webhook._handle_alerts([_alert("a-2")], 0)
+        self.assertEqual(status, 503)
+        self.assertTrue(body["busy"])
+        # 成员仍然计入（去重后 2 条），代表 id 不变
+        self.assertEqual(self._counts(), (1, 2))
+
+    def test_kill_switch_blocks_before_store(self) -> None:
+        with mock.patch.object(
+            alert_webhook, "check_kill_switch", return_value={"error": "kill switch 已激活"}
+        ):
+            status, _ = alert_webhook._handle_alerts([_alert("a-1")], 0)
+        self.assertEqual(status, 503)
+        self.assertEqual(self._counts(), (0, 0))
+
+    def test_compensate_respects_backoff_then_retries_same_wf(self) -> None:
+        outcome = alert_store.ingest(self.engine, [_alert("a-1")], {}, 90.0)
+        event = outcome.to_start[0]
+        alert_store.mark_failed(self.engine, event.event_id, event.claim_token, "boom")
+        with mock.patch.object(
+            alert_webhook, "_start_claimed_events", side_effect=_confirm_all
+        ) as fake:
+            self.assertEqual(alert_webhook._compensate_once(self.engine), 0)  # 退避未到期
+            fake.assert_not_called()
+        with self.engine.begin() as conn:  # 让退避到期
+            conn.execute(db.alert_events.update().values(retry_at=None))
+        with mock.patch.object(
+            alert_webhook, "_start_claimed_events", side_effect=_confirm_all
+        ):
+            self.assertEqual(alert_webhook._compensate_once(self.engine), 1)
+        self.assertEqual(self._event_row()["status"], "started")
+        with mock.patch.object(
+            alert_webhook, "_start_claimed_events", side_effect=_confirm_all
+        ) as fake:
+            self.assertEqual(alert_webhook._compensate_once(self.engine), 0)  # 已启动不重复
+            fake.assert_not_called()
+
+    def test_compensate_skips_on_kill_switch(self) -> None:
+        with mock.patch.object(
+            alert_webhook, "check_kill_switch", return_value={"error": "active"}
+        ), mock.patch.object(
+            alert_webhook, "_start_claimed_events", side_effect=_confirm_all
+        ) as fake:
+            self.assertEqual(alert_webhook._compensate_once(self.engine), 0)
+            fake.assert_not_called()
 
 
 if __name__ == "__main__":

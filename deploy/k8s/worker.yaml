@@ -4,7 +4,10 @@
 #   - Temporal 任务队列天然支持多 worker 竞争消费，replicas: 2 起；
 #   - 共享数据卷 aiops-data（沙箱工作区 / Qoder 工作区跨 activity 复用，需 RWX 存储类；
 #     演示集群仅支持 RWO 时，请将 replicas 降为 1）；
-#   - 指标端口 9090 由 Service aiops-worker 暴露（ServiceMonitor / Prometheus 抓取）。
+#   - 批次 I 仅同步健康契约，未在集群实测，不可直接用于生产验收。
+#   - metrics 仅容器内 127.0.0.1:9091；下方 Service 为待接线占位，不能直抓 loopback。
+#     需另行设计同 Pod collector，不能为抓取改回公开监听。
+#   - readiness 验证共享队列活跃 pollers，不代表此副本已完成业务 Workflow。
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -34,8 +37,8 @@ spec:
   type: ClusterIP
   ports:
     - name: metrics
-      port: 9090
-      targetPort: 9090
+      port: 9091
+      targetPort: 9091
   selector:
     app: aiops-worker
 ---
@@ -69,7 +72,7 @@ spec:
           command: ["python", "-m", "aiops_agent.worker"]
           ports:
             - name: metrics
-              containerPort: 9090
+              containerPort: 9091
           envFrom:
             - configMapRef:
                 name: aiops-config
@@ -81,11 +84,16 @@ spec:
             - name: tmp
               mountPath: /tmp
           readinessProbe:
-            httpGet: { path: /metrics, port: 9090 }
+            exec:
+              command: [python, -c, "import asyncio,sys; from aiops_agent.readiness import check; from bff.temporal_gateway import TemporalGateway; sys.exit(0 if asyncio.run(check(TemporalGateway()))['ok'] else 1)"]
+            timeoutSeconds: 20
             initialDelaySeconds: 10
-            periodSeconds: 10
+            periodSeconds: 30
           livenessProbe:
-            httpGet: { path: /metrics, port: 9090 }
+            # 仅检查主进程存在；不因数据库或 Temporal 故障触发无限重启。
+            exec:
+              command: [python, -c, "import os; os.kill(1, 0)"]
+            timeoutSeconds: 3
             initialDelaySeconds: 30
             periodSeconds: 30
           resources:

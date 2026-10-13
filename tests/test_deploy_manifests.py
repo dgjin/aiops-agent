@@ -135,12 +135,17 @@ class K8sWorkloadsTest(unittest.TestCase):
                 self.assertEqual(metric["resource"]["target"]["averageUtilization"], 70)
 
     def test_probes(self):
+        # 指标/就绪端点仅 loopback 可达：探针必须走 exec（kubelet httpGet 非回环对端会 404/拒连）
         worker = _container_of(_find_doc("Deployment", "aiops-worker"))
-        self.assertEqual(worker["readinessProbe"]["httpGet"], {"path": "/metrics", "port": 9090})
+        self.assertNotIn("httpGet", worker["readinessProbe"])
+        self.assertIn("readiness", str(worker["readinessProbe"]["exec"]["command"]))
+        self.assertIn("exec", worker["livenessProbe"])
         bff = _container_of(_find_doc("Deployment", "aiops-bff"))
-        # /api 前缀全部要求 Bearer 凭证（bff/middleware.py），httpGet 探针无法携带，
-        # 必须使用无鉴权的 /metrics（Prometheus 抓取约定）
-        self.assertEqual(bff["readinessProbe"]["httpGet"], {"path": "/metrics", "port": 8600})
+        # /api 前缀全部要求 Bearer 凭证（bff/middleware.py），httpGet 探针无法携带；
+        # /readyz 依赖失败返回 503、/livez 仅进程存活——均在容器内回环 exec 探测
+        self.assertIn("exec", bff["readinessProbe"])
+        self.assertIn("/readyz", str(bff["readinessProbe"]["exec"]["command"]))
+        self.assertIn("/livez", str(bff["livenessProbe"]["exec"]["command"]))
         webhook = _container_of(_find_doc("Deployment", "aiops-webhook"))
         self.assertEqual(webhook["readinessProbe"]["tcpSocket"], {"port": 8099})
         for doc in [_find_doc("Deployment", k) for k in self.BUSINESS]:
@@ -195,7 +200,7 @@ class K8sConfigTest(unittest.TestCase):
         data = _find_doc("ConfigMap", "aiops-config")["data"]
         self.assertEqual(data["AIOPS_MODE"], "production")
         self.assertEqual(data["TEMPORAL_ADDRESS"], "aiops-temporal:7233")
-        self.assertEqual(data["AIOPS_METRICS_PORT"], "9090")
+        self.assertEqual(data["AIOPS_METRICS_PORT"], "9091")
         self.assertEqual(data["AIOPS_WEBHOOK_PORT"], "8099")
         self.assertEqual(data["AIOPS_DATA_ROOT"], "/var/lib/aiops")
 

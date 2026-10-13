@@ -1,35 +1,7 @@
-# AIOps 后端依赖（一次安装：.venv/bin/pip install -r requirements.txt）
-# 说明：本文件为完整依赖集合，含核心 + BFF 控制台 + 向量后端 + 可选工具。
-
-# --- 核心（工作流 / 策略 / 日志聚类） ---
-temporalio>=1.7.0
-pydantic>=2.5.0
-PyYAML>=6.0.1
-drain3>=0.9.11
-
-# --- BFF 运维控制台 ---
-fastapi>=0.115
-uvicorn[standard]>=0.30
-
-# --- 向量检索后端（Code RAG，FAISS 加速） ---
-faiss-cpu>=1.7.4
-numpy>=1.26
-
-# --- 可选：.env 自动加载（未安装也能运行，见 config.py） ---
-python-dotenv>=1.0
-
-# --- 生产持久化（AIOPS_MODE=production：MySQL 8.0；见 aiops_agent/db.py） ---
-sqlalchemy>=2.0
-pymysql>=1.1
-cryptography>=42.0          # PyMySQL 连接 caching_sha2_password 认证依赖
-
-# --- 可观测与安全（生产） ---
-prometheus-client>=0.20     # /metrics 指标暴露（批次 5）
-redis>=5.0                  # 可选：多副本速率限制后端（未配置 AIOPS_REDIS_URL 时用内存滑动窗口）
-bandit>=1.7                 # 可选：SAST 扫描（scripts/security-scan.sh；未安装则脚本提示）
-
-# --- OpenTelemetry（可选：配置 AIOPS_OTEL_ENDPOINT 后启用链路追踪） ---
-opentelemetry-api>=1.25
-opentelemetry-sdk>=1.25
-opentelemetry-instrumentation-fastapi>=0.46b0
-opentelemetry-exporter-otlp-proto-http>=1.25
+# Legacy development entrypoint; direct versions have one source of truth.
+# NOT a reproducible production install: transitive dependencies here are unlocked.
+# Reproducible CI environment (application + optional MCP + audit/test tools):
+#   python -m pip install --require-hashes -r requirements-build.lock
+#   python -m pip install --require-hashes --no-build-isolation -r requirements-ci.lock
+# Python 3.12 macOS arm64 / Linux x86_64; Linux native CI remains required.
+-r requirements.in

@@ -10,8 +10,10 @@
   阻塞代价可忽略；
 - **连接池**：``pool_recycle=3600`` + ``pool_pre_ping=True``（防 MySQL
   ``wait_timeout`` 断连后使用死连接）；
-- **建表**：``create_all(checkfirst=True)`` 幂等（首次连接自动建表）；
-  schema 稳定后再引入 Alembic 版本化迁移，避免双套建表机制漂移。
+- **建表**：:func:`ensure_schema`（``create_all(checkfirst=True)`` + 显式补缺失列）
+  幂等（首次连接自动执行）；schema 稳定后再引入 Alembic 版本化迁移，
+  避免双套建表机制漂移。老库升级必须走 ``ensure_schema``：``create_all`` 只建
+  缺失表、不补列（如 ``monitored_apps.depends_on``）。
 
 表一览：
 
@@ -25,6 +27,9 @@ escalations     转人工处置待办（production 替代 ``data/escalations.jso
 requirement_analyses  需求智能分析会话（production 替代 ``data/requirement_analyses.json``）
 audit_events    控制台操作审计（production 替代 JSONL，支持跨实例聚合查询）
 workflow_runs   流程执行速查（BFF 汇总时 upsert，供报表与历史检索）
+alert_domains   告警故障域（C 批次）：当前聚合事件指针与窗口起点（跨实例唯一）
+alert_events    告警聚合事件（C 批次）：代表告警/流程 + pending/started + 租约认领
+alert_members   事件成员（C 批次）：(domain_key, alert_id) 唯一去重，跨实例幂等计数
 =============== ============================================================
 """
 
@@ -46,11 +51,14 @@ from sqlalchemy import (
     String,
     Table,
     Text,
+    UniqueConstraint,
     create_engine,
+    inspect,
     text,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
+from sqlalchemy.schema import CreateColumn
 
 from aiops_agent import mode
 
@@ -239,6 +247,65 @@ console_sessions = Table(
     Index("idx_sessions_expires", "expires_at"),
 )
 
+# ---- C 批次：告警事件聚合（跨实例持久化，语义见 aiops_agent/alert_store.py）----
+
+# 故障域：domain_key = {mode}:{namespace}:{service}；current_event_id 指向当前聚合事件
+# （未启动的 pending 事件保持指向，保证同域不会顶出第二条代表流程）
+alert_domains = Table(
+    "alert_domains",
+    metadata,
+    Column("domain_key", String(255), primary_key=True),
+    Column("service", String(128), nullable=False),
+    Column("runtime_mode", String(16), nullable=False, server_default="production"),
+    Column("temporal_namespace", String(128), nullable=False, server_default=""),
+    Column("current_event_id", String(160)),
+    Column("window_started_at", DateTime),
+    Column("updated_at", DateTime, nullable=False),
+)
+
+alert_events = Table(
+    "alert_events",
+    metadata,
+    Column("event_id", String(160), primary_key=True),  # evt-{service}-{uuid8}
+    Column("domain_key", String(255), nullable=False),
+    Column("service", String(128), nullable=False),
+    # 代表告警 / 策略快照：启动代表流程的原样入参；事件创建后不可变
+    Column("representative_alert", JSON, nullable=False),
+    Column("representative_wf_id", String(255), nullable=False),
+    Column("policy_snapshot", JSON, nullable=False),
+    Column("first_received_at", DateTime, nullable=False),
+    Column(
+        "status",
+        Enum("pending", "started", name="alert_event_status"),
+        nullable=False,
+        server_default="pending",
+    ),
+    # 租约认领：claim_token 非空表示被某实例持有；lease 过期可被任意实例接管重试
+    Column("claim_token", String(64), nullable=False, server_default=""),
+    Column("lease_expires_at", DateTime),
+    Column("retry_at", DateTime),  # 补偿退避：启动失败后的最早重试时间
+    Column("attempts", Integer, nullable=False, server_default=text("0")),
+    Column("error_summary", Text),
+    Column("started_at", DateTime),
+    Column("updated_at", DateTime, nullable=False),
+    Index("idx_alert_events_status", "status", "retry_at"),
+    Index("idx_alert_events_domain", "domain_key"),
+)
+
+alert_members = Table(
+    "alert_members",
+    metadata,
+    Column("id", _BIGINT, primary_key=True, autoincrement=True),
+    Column("event_id", String(160), nullable=False),
+    Column("domain_key", String(255), nullable=False),
+    Column("alert_id", String(255), nullable=False),
+    Column("service", String(128), nullable=False),
+    Column("received_at", DateTime, nullable=False),
+    # 成员去重键：同故障域内 alert_id 只计一次（重复投递 / 多实例并发幂等）
+    UniqueConstraint("domain_key", "alert_id", name="uq_alert_members_domain_alert"),
+    Index("idx_alert_members_event", "event_id"),
+)
+
 _engine: Engine | None = None
 _engine_url: str | None = None
 _schema_ready = False
@@ -270,9 +337,34 @@ def get_engine() -> Engine:
         _engine_url = url
         _schema_ready = False
     if not _schema_ready:
-        metadata.create_all(_engine, checkfirst=True)
+        ensure_schema(_engine)
         _schema_ready = True
     return _engine
+
+
+def ensure_schema(engine: Engine) -> list[str]:
+    """显式 schema 升级入口（幂等）：建缺失表 + 补缺失列，返回执行的补列 DDL。
+
+    ``create_all(checkfirst=True)`` 只建缺失表、不补列：老库升级路径必须显式补列
+    （如 ``monitored_apps.depends_on``）；readiness 以 metadata 为契约做校验。
+    复合主键/主键列缺失直接跳过（无法 ALTER ADD），交由 readiness 暴露真实缺口。
+    """
+    metadata.create_all(engine, checkfirst=True)
+    inspector = inspect(engine)
+    existing = set(inspector.get_table_names())
+    statements: list[str] = []
+    for name, table in metadata.tables.items():
+        if name not in existing:
+            continue
+        actual = {col["name"] for col in inspector.get_columns(name)}
+        for column in table.columns:
+            if column.name in actual or column.primary_key:
+                continue
+            ddl = f"ALTER TABLE {name} ADD COLUMN {CreateColumn(column).compile(dialect=engine.dialect)}"
+            with engine.begin() as conn:
+                conn.execute(text(ddl))
+            statements.append(ddl)
+    return statements
 
 
 def reset_engine() -> None:

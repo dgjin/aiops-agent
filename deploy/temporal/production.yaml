@@ -1,0 +1,78 @@
+# 由生产渲染器替换口令占位符；此模板本身不可用于启动。
+# 单主机四角色同进程，固定分片数后不得对已有库随意修改。
+log:
+  stdout: true
+  level: info
+persistence:
+  defaultStore: primary
+  visibilityStore: visibility
+  numHistoryShards: 4
+  datastores:
+    primary:
+      sql:
+        pluginName: mysql8
+        databaseName: temporal_prod
+        connectAddr: mysql:3306
+        connectProtocol: tcp
+        user: temporal_runtime
+        password: __RUNTIME_PASSWORD_JSON__
+        maxConns: 20
+        maxIdleConns: 10
+        maxConnLifetime: 1h
+    visibility:
+      sql:
+        pluginName: mysql8
+        databaseName: temporal_visibility_prod
+        connectAddr: mysql:3306
+        connectProtocol: tcp
+        user: temporal_runtime
+        password: __RUNTIME_PASSWORD_JSON__
+        maxConns: 5
+        maxIdleConns: 2
+        maxConnLifetime: 1h
+global:
+  membership:
+    maxJoinDuration: 30s
+    # 单进程所有成员均在容器内，不把环回地址用于跨容器集群。
+    broadcastAddress: 127.0.0.1
+services:
+  frontend:
+    rpc:
+      grpcPort: 7233
+      membershipPort: 6933
+      bindOnIP: 0.0.0.0
+  matching:
+    rpc:
+      grpcPort: 7235
+      membershipPort: 6935
+      bindOnIP: 127.0.0.1
+  history:
+    rpc:
+      grpcPort: 7234
+      membershipPort: 6934
+      bindOnIP: 127.0.0.1
+  worker:
+    rpc:
+      grpcPort: 7239
+      membershipPort: 6939
+      bindOnIP: 127.0.0.1
+clusterMetadata:
+  enableGlobalNamespace: false
+  failoverVersionIncrement: 10
+  masterClusterName: active
+  currentClusterName: active
+  clusterInformation:
+    active:
+      enabled: true
+      initialFailoverVersion: 1
+      rpcName: frontend
+      rpcAddress: 127.0.0.1:7233
+dcRedirectionPolicy:
+  policy: noop
+archival:
+  history:
+    state: disabled
+    enableRead: false
+  visibility:
+    state: disabled
+    enableRead: false

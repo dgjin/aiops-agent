@@ -5,4 +5,5 @@
 # 仅 build_server() 惰性导入）。
 #
 # 安装：.venv/bin/pip install -r requirements-mcp.txt
-mcp>=2.3,<3
+# 完整 hash 安装见 requirements.txt 注释；本入口仅供开发解析。
+-r requirements-mcp.in

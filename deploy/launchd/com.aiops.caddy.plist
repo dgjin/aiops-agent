@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 仅模板；渲染器写入受限数据目录，不安装、不注册、不修改现有 launchd。 -->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.aiops.caddy</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__CADDY__</string>
+        <string>run</string><string>--config</string>
+        <string>__DEPLOY_DIR__/Caddyfile</string>
+        <string>--adapter</string><string>caddyfile</string>
+    </array>
+    <key>WorkingDirectory</key><string>__ROOT__</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>XDG_DATA_HOME</key><string>__DEPLOY_DIR__/caddy-data</string>
+        <key>XDG_CONFIG_HOME</key><string>__DEPLOY_DIR__/caddy-config</string>
+    </dict>
+    <!-- 十进制 63 即八进制 077；包括管理套接字在内仅当前用户可访问。 -->
+    <key>Umask</key><integer>63</integer>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+    <key>ThrottleInterval</key><integer>30</integer>
+    <key>StandardOutPath</key><string>__DEPLOY_DIR__/caddy.log</string>
+    <key>StandardErrorPath</key><string>__DEPLOY_DIR__/caddy.log</string>
+</dict>
+</plist>

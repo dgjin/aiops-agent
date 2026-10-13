@@ -2,6 +2,8 @@
 
 > 版本：v1.0 | 日期：2026-10-03 | 定位：从高质量演示参考实现 → 企业级生产就绪系统
 > 前置文档：《AIOps 自动运维智能体系统设计方案》《实施计划》《部署手册》
+>
+> 更新提示（2026-10-13）：本方案为四期基线设计文档，保留 2026-10-03 时点的评估与规划框架；其中指标端口与配置模板已同步为单机生产化整改（批次 A–I）后的现行口径（worker 指标 production 默认 9091 / demo 9090，均仅 loopback）；整改落实现状见《实施计划》第 13 节与《设计说明书》10.10。
 
 ---
 
@@ -360,7 +362,7 @@ gate_events = Counter("aiops_gate_events_total", "闸门事件数", ["gate", "de
 ```
 
 **暴露方式**：
-- Worker：`/metrics` 端点（prometheus_client 独立 HTTP 服务，端口 9090）
+- Worker：`/metrics` 端点（prometheus_client 独立 HTTP 服务，端口 9091（production）/ 9090（demo），默认仅监听 loopback）
 - BFF：FastAPI 中间件自动采集 + `/metrics` 端点
 - K8s：ServiceMonitor / PodMonitor 自动发现
 
@@ -747,8 +749,8 @@ AIOPS_GIT_TOKEN_SECRET=aiops-git-token
 AIOPS_GIT_DEFAULT_BRANCH=main
 
 # ---------- 【生产】可观测 ----------
-# Prometheus 指标端口（worker）
-AIOPS_METRICS_PORT=9090
+# Prometheus 指标端口（worker；production 默认 9091，demo 9090，仅 loopback，置 0 关闭）
+AIOPS_METRICS_PORT=9091
 # OTel 导出端点
 OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
 

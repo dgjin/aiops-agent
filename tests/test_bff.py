@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import os
 import tempfile
@@ -9,6 +11,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
+
+from fastapi.responses import JSONResponse
 
 from bff import aggregator, app, audit, config_items, middleware, temporal_gateway
 from bff.deps import ApiError
@@ -273,8 +277,8 @@ class ServiceTokenTest(unittest.TestCase):
             )
 
 
-class ImTokenTest(unittest.TestCase):
-    """IM 通道旁路（ChatOps）：仅精确路径 + POST + 令牌匹配才生效（群消息入口）。"""
+class ImChannelTest(unittest.TestCase):
+    """IM 通道专用认证（ChatOps）：启动前任何失败都不回落常规鉴权。"""
 
     _PATH = "/api/im/command"
     _ENV = "AIOPS_IM_TOKEN"
@@ -295,24 +299,211 @@ class ImTokenTest(unittest.TestCase):
             }
         )
 
-    def test_disabled_when_env_missing(self):
-        with mock.patch.dict(os.environ, {self._ENV: ""}):
-            self.assertIsNone(middleware._im_identity(self._request(token="tok-im")))
+    def test_non_im_path_returns_none(self):
+        with mock.patch.dict(os.environ, {self._ENV: "tok-im", "AIOPS_MODE": "demo"}):
+            self.assertIsNone(
+                middleware._im_channel(self._request(path="/api/im/other", token="tok-im"), None)
+            )
 
-    def test_matches_only_exact_path_post_and_token(self):
-        with mock.patch.dict(os.environ, {self._ENV: "tok-im"}):
-            identity = middleware._im_identity(self._request(token="tok-im"))
-            self.assertIsNotNone(identity)
-            self.assertEqual(identity.user, "im:gateway")
-            self.assertEqual(identity.role, "viewer")
-            # 错令牌 / 非 POST / 其他路径一律回落到常规鉴权
-            self.assertIsNone(middleware._im_identity(self._request(token="bad")))
-            self.assertIsNone(
-                middleware._im_identity(self._request(method="GET", token="tok-im"))
-            )
-            self.assertIsNone(
-                middleware._im_identity(self._request(path="/api/im/other", token="tok-im"))
-            )
+    def test_closed_when_env_missing(self):
+        with mock.patch.dict(os.environ, {self._ENV: "", "AIOPS_MODE": "demo"}):
+            with self.assertRaises(middleware.ImChannelError) as ctx:
+                middleware._im_channel(self._request(token="tok-im"), None)
+            self.assertEqual(ctx.exception.status_code, 503)
+
+    def test_closed_in_production(self):
+        # 未接入可信网桥（签名/时效/防重放）前，production 通道整体关闭
+        with mock.patch.dict(os.environ, {self._ENV: "tok-im", "AIOPS_MODE": "production"}):
+            with self.assertRaises(middleware.ImChannelError) as ctx:
+                middleware._im_channel(self._request(token="tok-im"), None)
+            self.assertEqual(ctx.exception.status_code, 503)
+
+    def test_wrong_or_missing_token_is_auth_failure(self):
+        with mock.patch.dict(os.environ, {self._ENV: "tok-im", "AIOPS_MODE": "demo"}):
+            for request in (
+                self._request(token="bad"),
+                self._request(token=None),
+                self._request(method="GET", token="tok-im"),
+            ):
+                with self.assertRaises(middleware.ImChannelError) as ctx:
+                    middleware._im_channel(request, None)
+                self.assertIn(ctx.exception.status_code, (401, 405))
+
+    def test_token_reuse_rejected(self):
+        identity = middleware.auth_store.Identity(user="alice", role="operator")
+        with mock.patch.dict(os.environ, {self._ENV: "tok-im", "AIOPS_MODE": "demo"}):
+            with self.assertRaises(middleware.ImChannelError) as ctx:
+                middleware._im_channel(self._request(token="tok-im"), {"tok-im": (identity, {})})
+            self.assertEqual(ctx.exception.status_code, 503)
+            self.assertIn("控制台令牌复用", ctx.exception.message)
+            # production 注册表存 sha256 指纹键，同样拦截
+            fingerprint = hashlib.sha256(b"tok-im").hexdigest()
+            with self.assertRaises(middleware.ImChannelError):
+                middleware._im_channel(self._request(token="tok-im"), {fingerprint: (identity, {})})
+        with mock.patch.dict(
+            os.environ,
+            {self._ENV: "tok-shared", "AIOPS_MODE": "demo", "AIOPS_TRACK_SERVICE_TOKEN": "tok-shared"},
+        ):
+            with self.assertRaises(middleware.ImChannelError) as ctx:
+                middleware._im_channel(self._request(token="tok-shared"), None)
+            self.assertEqual(ctx.exception.status_code, 503)
+            self.assertIn("服务令牌复用", ctx.exception.message)
+
+    def test_positive_demo_identity(self):
+        with mock.patch.dict(os.environ, {self._ENV: "tok-im", "AIOPS_MODE": "demo"}):
+            identity = middleware._im_channel(self._request(token="tok-im"), None)
+        self.assertIsNotNone(identity)
+        self.assertEqual(identity.user, "im:gateway")
+        self.assertEqual(identity.role, "viewer")
+
+
+class ClientIpTrustTest(unittest.TestCase):
+    """限速/审计归因：仅受信代理的 X-Forwarded-For 生效，且取末段（最近一跳真实来源）。"""
+
+    def _request(self, client, forwarded: str | None = None):
+        from starlette.requests import Request
+
+        headers = []
+        if forwarded is not None:
+            headers.append((b"x-forwarded-for", forwarded.encode("utf-8")))
+        return Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/api/x",
+                "headers": headers,
+                "query_string": b"",
+                "client": client,
+            }
+        )
+
+    def test_untrusted_peer_ignores_forwarded(self):
+        request = self._request(("192.168.1.9", 1234), forwarded="6.6.6.6")
+        self.assertEqual(middleware._client_ip(request), "192.168.1.9")
+
+    def test_trusted_proxy_uses_last_hop(self):
+        # 客户端伪造值在前、Caddy 写入的真实来源在末段
+        request = self._request(("127.0.0.1", 1234), forwarded="6.6.6.6, 10.0.0.8")
+        self.assertEqual(middleware._client_ip(request), "10.0.0.8")
+        single = self._request(("127.0.0.1", 1234), forwarded="10.0.0.8")
+        self.assertEqual(middleware._client_ip(single), "10.0.0.8")
+
+    def test_missing_client_returns_unknown(self):
+        request = self._request(None)
+        self.assertEqual(middleware._client_ip(request), "unknown")
+
+
+class ImChannelGuardTest(unittest.IsolatedAsyncioTestCase):
+    """真实 _auth_guard 链路：普通控制台凭证不能进入 IM 通道，也不会触发后续路由。"""
+
+    _IM_TOKEN = "tok-im"
+
+    def _request(self, token: str | None = None, path: str = "/api/im/command"):
+        from starlette.requests import Request
+
+        headers = []
+        if token is not None:
+            headers.append((b"authorization", f"Bearer {token}".encode("utf-8")))
+        return Request(
+            {
+                "type": "http",
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": path,
+                "headers": headers,
+                "query_string": b"",
+                "client": ("127.0.0.1", 40000),
+                "server": ("127.0.0.1", 8600),
+            }
+        )
+
+    @contextlib.contextmanager
+    def _guard_mocks(self, entries=()):
+        identity = middleware.auth_store.Identity(user="alice", role="operator")
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AIOPS_MODE": "demo",
+                "AIOPS_IM_TOKEN": self._IM_TOKEN,
+                "AIOPS_TRACK_SERVICE_TOKEN": "",
+            },
+        ), mock.patch.object(
+            middleware.auth_store, "registry_tokens",
+            return_value={key: (identity, {}) for key in entries},
+        ), mock.patch.object(middleware.auth_store, "resolve_session", return_value=None):
+            yield
+
+    async def test_viewer_static_token_rejected_before_route(self):
+        seen = []
+
+        async def call_next(request):
+            seen.append(request.url.path)
+            return JSONResponse(status_code=200, content={})
+
+        request = self._request(token="viewer-tok")
+        with self._guard_mocks(["viewer-tok"]):
+            response = await middleware._auth_guard(request, call_next)
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(seen, [])
+
+    async def test_unconfigured_channel_closed_without_fallback(self):
+        seen = []
+
+        async def call_next(request):
+            seen.append(True)
+            return JSONResponse(status_code=200, content={})
+
+        request = self._request(token="viewer-tok")
+        with mock.patch.dict(
+            os.environ, {"AIOPS_MODE": "demo", "AIOPS_IM_TOKEN": "", "AIOPS_TRACK_SERVICE_TOKEN": ""}
+        ), mock.patch.object(middleware.auth_store, "registry_tokens", return_value={}), \
+                mock.patch.object(middleware.auth_store, "resolve_session", return_value=None):
+            response = await middleware._auth_guard(request, call_next)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(seen, [])
+
+    async def test_production_channel_closed(self):
+        async def call_next(request):
+            raise AssertionError("路由不应被调用")
+
+        request = self._request(token=self._IM_TOKEN)
+        with mock.patch.dict(
+            os.environ,
+            {"AIOPS_MODE": "production", "AIOPS_IM_TOKEN": self._IM_TOKEN, "AIOPS_TRACK_SERVICE_TOKEN": ""},
+        ), mock.patch.object(middleware.auth_store, "registry_tokens", return_value={}), \
+                mock.patch.object(middleware.auth_store, "resolve_session", return_value=None):
+            response = await middleware._auth_guard(request, call_next)
+        self.assertEqual(response.status_code, 503)
+
+    async def test_im_token_passes_with_im_source(self):
+        captured = {}
+
+        async def call_next(request):
+            captured["record"] = dict(request.state.token_record)
+            captured["identity"] = request.state.identity
+            return JSONResponse(status_code=200, content={"ok": True})
+
+        request = self._request(token=self._IM_TOKEN)
+        with self._guard_mocks():
+            response = await middleware._auth_guard(request, call_next)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured["record"], {"source": "im"})
+        self.assertEqual(captured["identity"].user, "im:gateway")
+
+    async def test_guard_does_not_touch_other_endpoints(self):
+        # 非 IM 路径：普通静态令牌正常通过（不因无 IM 配置受影响）
+        captured = {}
+
+        async def call_next(request):
+            captured["record"] = dict(request.state.token_record)
+            return JSONResponse(status_code=200, content={})
+
+        request = self._request(token="viewer-tok", path="/api/auth/logout")
+        with self._guard_mocks(["viewer-tok"]):
+            response = await middleware._auth_guard(request, call_next)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured["record"].get("source"), "static")
 
 
 class AuditRecordTest(unittest.TestCase):
@@ -1100,9 +1291,30 @@ class ApprovalExtraTest(unittest.TestCase):
 
 
 class ImCommandEndpointTest(unittest.IsolatedAsyncioTestCase):
-    """P4⑫ ChatOps：IM 指令端点（Temporal / kill switch / 审计落盘均打桩或隔离）。"""
+    """P4⑫ ChatOps：IM 指令端点（Temporal / kill switch / 审计落盘均打桩或隔离）。
+
+    请求均携带 middleware 注入的 IM 通道来源（``token_record.source == "im"``）；
+    来源缺失或来自普通凭证时路由直接 403（中间件级拒绝由 ImChannelGuardTest 覆盖）。
+    """
 
     _WF_ID = "aiops-fix-order-a-201"
+
+    def _im_request(self, source: str | None = "im"):
+        """构造路由级 Request：默认模拟真 IM 通道注入（或指定/缺失来源用于负例）。"""
+        from starlette.requests import Request
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/im/command",
+                "headers": [],
+                "query_string": b"",
+            }
+        )
+        if source is not None:
+            request.state.token_record = {"source": source}
+        return request
     _WAIT_ITEM: dict = {
         "wf_id": _WF_ID,
         "exec_status": "RUNNING",
@@ -1138,7 +1350,7 @@ class ImCommandEndpointTest(unittest.IsolatedAsyncioTestCase):
         return base
 
     async def test_help_reply(self):
-        payload = await chatops_routes.api_im_command({"sender": "alice", "text": "帮助"})
+        payload = await chatops_routes.api_im_command(self._im_request(), {"sender": "alice", "text": "帮助"})
         self.assertTrue(payload["ok"])
         self.assertIn("可用命令", payload["reply"])
         self.assertIn("server_time", payload)
@@ -1149,7 +1361,7 @@ class ImCommandEndpointTest(unittest.IsolatedAsyncioTestCase):
             {"wf_id": "wf-done", "exec_status": "COMPLETED", "stage": "DONE"},
         ]
         with mock.patch.object(chatops_routes.gw, "list_flows", mock.AsyncMock(return_value=items)):
-            payload = await chatops_routes.api_im_command({"sender": "alice", "text": "待办"})
+            payload = await chatops_routes.api_im_command(self._im_request(), {"sender": "alice", "text": "待办"})
         self.assertTrue(payload["ok"])
         self.assertIn(self._WF_ID, payload["reply"])
         self.assertNotIn("wf-done", payload["reply"])
@@ -1157,7 +1369,7 @@ class ImCommandEndpointTest(unittest.IsolatedAsyncioTestCase):
     async def test_status_unique_prefix(self):
         items = [dict(self._WAIT_ITEM)]
         with mock.patch.object(chatops_routes.gw, "list_flows", mock.AsyncMock(return_value=items)):
-            payload = await chatops_routes.api_im_command(
+            payload = await chatops_routes.api_im_command(self._im_request(),
                 {"sender": "alice", "text": "状态 aiops-fix-order"}
             )
         self.assertTrue(payload["ok"])
@@ -1165,12 +1377,12 @@ class ImCommandEndpointTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_status_not_found_and_ambiguous(self):
         with mock.patch.object(chatops_routes.gw, "list_flows", mock.AsyncMock(return_value=[])):
-            payload = await chatops_routes.api_im_command({"sender": "alice", "text": "状态 nope"})
+            payload = await chatops_routes.api_im_command(self._im_request(), {"sender": "alice", "text": "状态 nope"})
         self.assertFalse(payload["ok"])
         self.assertIn("未找到流程", payload["reply"])
         items = [dict(self._WAIT_ITEM), {**self._WAIT_ITEM, "wf_id": "aiops-fix-order-a-202"}]
         with mock.patch.object(chatops_routes.gw, "list_flows", mock.AsyncMock(return_value=items)):
-            payload = await chatops_routes.api_im_command(
+            payload = await chatops_routes.api_im_command(self._im_request(),
                 {"sender": "alice", "text": "状态 aiops-fix-order"}
             )
         self.assertFalse(payload["ok"])
@@ -1178,7 +1390,7 @@ class ImCommandEndpointTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_unmapped_sender_cannot_approve(self):
         with mock.patch.dict(os.environ, {"AIOPS_IM_USERS": ""}):
-            payload = await chatops_routes.api_im_command(
+            payload = await chatops_routes.api_im_command(self._im_request(),
                 {"sender": "alice", "text": f"批准 {self._WF_ID}"}
             )
         self.assertFalse(payload["ok"])
@@ -1194,7 +1406,7 @@ class ImCommandEndpointTest(unittest.IsolatedAsyncioTestCase):
                  mock.patch.object(chatops_routes.gw, "invalidate_cache") as invalidate, \
                  mock.patch.object(chatops_routes.kill_switch, "get_state", return_value={"active": False}), \
                  mock.patch.object(chatops_routes.audit, "DATA_DIR", Path(tmp)):
-                payload = await chatops_routes.api_im_command(
+                payload = await chatops_routes.api_im_command(self._im_request(),
                     {"sender": "alice", "text": f"批准 {self._WF_ID}"}
                 )
                 rows = audit.read_audit()
@@ -1220,7 +1432,7 @@ class ImCommandEndpointTest(unittest.IsolatedAsyncioTestCase):
                  mock.patch.object(chatops_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
                  mock.patch.object(chatops_routes.gw, "flow_detail", mock.AsyncMock(return_value=detail)), \
                  mock.patch.object(chatops_routes.kill_switch, "get_state", return_value={"active": False}):
-                payload = await chatops_routes.api_im_command(
+                payload = await chatops_routes.api_im_command(self._im_request(),
                     {"sender": "alice", "text": f"批准 {self._WF_ID}"}
                 )
             self.assertFalse(payload["ok"], expected)
@@ -1233,7 +1445,7 @@ class ImCommandEndpointTest(unittest.IsolatedAsyncioTestCase):
              mock.patch.object(chatops_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
              mock.patch.object(chatops_routes.gw, "flow_detail", mock.AsyncMock(return_value=self._detail())), \
              mock.patch.object(chatops_routes.kill_switch, "get_state", return_value={"active": False}):
-            payload = await chatops_routes.api_im_command(
+            payload = await chatops_routes.api_im_command(self._im_request(),
                 {"sender": "alice", "text": f"二级批准 {self._WF_ID}"}
             )
         self.assertFalse(payload["ok"])
@@ -1246,21 +1458,33 @@ class ImCommandEndpointTest(unittest.IsolatedAsyncioTestCase):
              mock.patch.object(chatops_routes.kill_switch, "get_state", return_value=active), \
              mock.patch.object(chatops_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])):
             with self.assertRaises(ApiError) as ctx:
-                await chatops_routes.api_im_command(
+                await chatops_routes.api_im_command(self._im_request(),
                     {"sender": "alice", "text": f"批准 {self._WF_ID}"}
                 )
             self.assertEqual(ctx.exception.status_code, 503)
             self.assertIn("kill switch", ctx.exception.message)
-            payload = await chatops_routes.api_im_command({"sender": "alice", "text": "待办"})
+            payload = await chatops_routes.api_im_command(self._im_request(), {"sender": "alice", "text": "待办"})
         self.assertTrue(payload["ok"])  # 查询命令保留可用（与控制台 GET 行为对齐）
 
     async def test_unknown_command_and_bad_payload(self):
-        payload = await chatops_routes.api_im_command({"sender": "alice", "text": "部署 abc"})
+        payload = await chatops_routes.api_im_command(self._im_request(), {"sender": "alice", "text": "部署 abc"})
         self.assertFalse(payload["ok"])
         self.assertIn("未识别命令", payload["reply"])
         with self.assertRaises(ApiError) as ctx:
-            await chatops_routes.api_im_command({"foo": "bar"})
+            await chatops_routes.api_im_command(self._im_request(), {"foo": "bar"})
         self.assertEqual(ctx.exception.status_code, 400)
+
+    async def test_route_rejects_non_im_source(self):
+        """认证来源只认 middleware 注入；普通凭证/无来源/请求体伪造字段一律 403。"""
+        for source, payload in (
+            ("static", {"sender": "alice", "text": "帮助"}),
+            (None, {"sender": "alice", "text": "帮助"}),
+            ("service", {"sender": "alice", "text": "帮助"}),
+            ("static", {"sender": "alice", "text": "帮助", "auth_source": "im"}),
+        ):
+            with self.assertRaises(ApiError) as ctx:
+                await chatops_routes.api_im_command(self._im_request(source=source), payload)
+            self.assertEqual(ctx.exception.status_code, 403)
 
 
 if __name__ == "__main__":

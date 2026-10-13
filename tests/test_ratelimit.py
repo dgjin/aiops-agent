@@ -16,7 +16,7 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
-from aiops_agent import kill_switch
+from aiops_agent import kill_switch, readiness
 
 from bff import ratelimit
 
@@ -101,6 +101,15 @@ class RateLimitApiTest(unittest.TestCase):
             },
         )
         self._env.start()
+        # 中间件测试不依赖真实 Temporal：probe 会经 Rust core 真连本机 7233（现为生产栈），必须隔离。
+        self._temporal = mock.patch.object(
+            readiness, "probe_temporal",
+            new=mock.AsyncMock(return_value={
+                "temporal": {"ok": True, "detail": "namespace_rpc_ok", "latency_ms": 0.0},
+                "worker": {"ok": True, "detail": "active_pollers"},
+            }),
+        )
+        self._temporal.start()
         from bff.app import app
 
         self.client = TestClient(app)
@@ -109,6 +118,7 @@ class RateLimitApiTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         ratelimit.reset()
+        self._temporal.stop()
         self._env.stop()
         self._tmp.cleanup()
 
@@ -168,6 +178,8 @@ class SecurityHeadersTest(unittest.TestCase):
         from bff.app import app
 
         self.client = TestClient(app)
+        # B 批次：X-Forwarded-Proto 仅受信本机代理（回环对端）采信，HSTS 用例需要它
+        self.local = TestClient(app, client=("127.0.0.1", 40000))
 
     def tearDown(self) -> None:
         self._env.stop()
@@ -190,7 +202,14 @@ class SecurityHeadersTest(unittest.TestCase):
     def test_hsts_only_behind_tls(self) -> None:
         plain = self.client.get("/api/health")
         self.assertNotIn("Strict-Transport-Security", plain.headers)
-        tls = self.client.get(
+        # 非受信对端伪造 X-Forwarded-Proto 不采信（B 批次信任边界）
+        spoofed = self.client.get(
+            "/api/health",
+            headers={"X-Forwarded-Proto": "https", "Authorization": "Bearer tok-adm"},
+        )
+        self.assertNotIn("Strict-Transport-Security", spoofed.headers)
+        # 受信代理（回环 Caddy）转发 https：下发 HSTS
+        tls = self.local.get(
             "/api/health",
             headers={
                 "X-Forwarded-Proto": "https",

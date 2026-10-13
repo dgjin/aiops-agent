@@ -1,5 +1,6 @@
 # AIOps BFF 控制台（FastAPI：优化方案 P4-04 多副本 + PDB + Ingress TLS）
 #
+# 仅同步健康契约，未在集群实测；本轮不部署 K8s。loopback 探针必须用 exec。
 # 说明：
 #   - 无状态服务（会话走 Bearer Token），replicas: 2 起，滚动更新由 PDB 保底；
 #   - uvicorn --proxy-headers：Ingress 层 TLS 终止后，透传 X-Forwarded-Proto 供安全头
@@ -63,13 +64,17 @@ spec:
                 name: aiops-config
             - secretRef:
                 name: aiops-secrets
-          # 探针用无鉴权的 /metrics（/api 前缀全部要求 Bearer 凭证，httpGet 无法携带）
+          # /readyz 依赖失败为503；/livez仅进程存活。不使用metrics 200证明业务就绪。
           readinessProbe:
-            httpGet: { path: /metrics, port: 8600 }
+            exec:
+              command: [python, -c, "import urllib.request as u; u.build_opener(u.ProxyHandler({})).open('http://127.0.0.1:8600/readyz', timeout=15).close()"]
+            timeoutSeconds: 16
             initialDelaySeconds: 5
-            periodSeconds: 10
+            periodSeconds: 20
           livenessProbe:
-            httpGet: { path: /metrics, port: 8600 }
+            exec:
+              command: [python, -c, "import urllib.request as u; u.build_opener(u.ProxyHandler({})).open('http://127.0.0.1:8600/livez', timeout=2).close()"]
+            timeoutSeconds: 3
             initialDelaySeconds: 20
             periodSeconds: 30
           resources:

@@ -1,0 +1,121 @@
+# 只作第二层覆盖；要求 Compose >= 2.24.4，!override 必须替换而非追加端口。
+# 必须传独立 --env-file，禁止自动读取仓库 .env；不得使用 down -v。
+# 生产常驻服务仅为 mysql redis loki temporal-prod；维护作业须另行确认。
+services:
+  temporal:
+    profiles: !override [demo-history]
+    image: temporalio/temporal@sha256:ad4c82c97bd12b417d1ea942610dbcd511afb250c4d5ed26c694009533df447e
+    ports: !override ["127.0.0.1:7233:7233", "127.0.0.1:8233:8233"]
+
+  mysql:
+    profiles: !override []
+    image: mysql@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
+    ports: !override ["127.0.0.1:3316:3306"]
+    # 已有库不因环境变量变更而轮换口令；禁止把空卷初始化为带演示口令的新库。
+    environment: !override {}
+    healthcheck:
+      # 仅证明进程存活，不代表应用权限、schema 或业务就绪。
+      test: !override ["CMD", "mysqladmin", "ping", "--host=127.0.0.1", "--silent"]
+
+  redis:
+    profiles: !override []
+    image: redis@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    ports: !override ["127.0.0.1:6380:6379"]
+    # 原栈的 /data 可能为匿名卷，必须显式复用 inspect 得到的名称。
+    volumes:
+      - redis-existing:/data
+
+  loki:
+    image: grafana/loki@sha256:1107dd5274e0ada47e42472b7a7e71f3b2a2fe878878108f3e2f9e51528f0193
+    ports: !override ["127.0.0.1:3101:3100"]
+
+  prometheus:
+    profiles: !override [optional-observability]
+    # 未核实的可选镜像没有可启动默认值，启用前须另行固定 digest。
+    image: ${AIOPS_PROMETHEUS_IMAGE:-prom/prometheus:requires-approved-digest}
+    ports: !override ["127.0.0.1:9095:9090"]
+
+  grafana:
+    profiles: !override [optional-observability]
+    image: ${AIOPS_GRAFANA_IMAGE:-grafana/grafana:requires-approved-digest}
+    ports: !override ["127.0.0.1:3200:3000"]
+
+  temporal-prod:
+    image: temporalio/server:1.32.1@sha256:acecbab5b0b8ae9cf4012b508866ca97feda3709577bf157b537239f40029049
+    # 绕过镜像的模板入口；运行期只有正式 Server，不执行自动 DDL。
+    entrypoint: ["temporal-server"]
+    command: ["--config-file", "/etc/aiops-temporal/production.yaml", "start"]
+    # Go 静态二进制（无 cgo）以宿主 UID 运行时 user.Current() 需要 $USER（镜像内无该 UID 的 passwd 条目）。
+    environment:
+      USER: aiops
+    user: "${AIOPS_DEPLOY_UID:?必须指定配置文件所有者UID}:${AIOPS_DEPLOY_GID:?必须指定配置文件所有者GID}"
+    ports: ["127.0.0.1:7233:7233"]
+    volumes:
+      - type: bind
+        source: ${AIOPS_DEPLOY_DIR:?必须先渲染生产配置}/temporal
+        target: /etc/aiops-temporal
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:mode=1777"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+
+  temporal-schema:
+    profiles: [maintenance]
+    image: &temporal_tools temporalio/admin-tools:1.32.1@sha256:9ef0dc5b063bf4ffd5c1512de72e0e73e225bd2c7006a18ce69bd592a8862a83
+    user: "${AIOPS_DEPLOY_UID}:${AIOPS_DEPLOY_GID}"
+    entrypoint: ["/bin/sh", "/opt/aiops/schema.sh"]
+    command: [schema]
+    environment:
+      AIOPS_SCHEMA_APPROVED: ${AIOPS_SCHEMA_APPROVED:-NO}
+    volumes:
+      - ./deploy/temporal/schema.sh:/opt/aiops/schema.sh:ro
+    secrets: [temporal_migration_password]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+    read_only: true
+    tmpfs: ["/tmp:mode=1777"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  temporal-namespace:
+    profiles: [maintenance]
+    image: *temporal_tools
+    entrypoint: ["/bin/sh", "/opt/aiops/schema.sh"]
+    command: [namespace-create]
+    environment:
+      AIOPS_NAMESPACE_APPROVED: ${AIOPS_NAMESPACE_APPROVED:-NO}
+    volumes:
+      - ./deploy/temporal/schema.sh:/opt/aiops/schema.sh:ro
+    restart: "no"
+    read_only: true
+    tmpfs: ["/tmp:mode=1777"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+# 外部卷不存在则失败，不创建空白替代卷；切换前逐一核对旧挂载。
+volumes:
+  mysql-data:
+    external: true
+    name: ${AIOPS_MYSQL_VOLUME:?必须填写原MySQL卷名}
+  loki-data:
+    external: true
+    name: ${AIOPS_LOKI_VOLUME:?必须填写原Loki卷名}
+  temporal-data:
+    external: true
+    name: ${AIOPS_TEMPORAL_DEV_VOLUME:?必须填写旧SQLite卷名}
+  redis-existing:
+    external: true
+    name: ${AIOPS_REDIS_VOLUME:?必须填写原Redis卷名}
+
+secrets:
+  temporal_migration_password:
+    file: ${AIOPS_DEPLOY_DIR}/migration-password

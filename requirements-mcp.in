@@ -1,0 +1,2 @@
+# Optional MCP input; CI resolves this together with requirements.in.
+mcp==2.3.0

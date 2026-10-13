@@ -2,11 +2,11 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 文档版本 | v1.1 |
-| 日期 | 2026-10-01（v1.1 修订 2026-10-12） |
+| 文档版本 | v1.2 |
+| 日期 | 2026-10-01（v1.2 修订 2026-10-13：单机生产化整改后的生产入口与限制说明） |
 | 适用对象 | 运维值班人员、审批人（含二级审批人）、演示人员、联调开发 |
 | 关联文档 | 《系统设计说明书》、《部署手册》 |
-| 修订记录 | v1.1：控制台四级导航（总览/跨系统待办/被监控系统/平台）与局域网访问；一键启动与组件守护指引（demo-up.sh） |
+| 修订记录 | v1.1：控制台四级导航（总览/跨系统待办/被监控系统/平台）与局域网访问；一键启动与组件守护指引（demo-up.sh）。v1.2（2026-10-13）：production 档收敛 loopback、经本机 Caddy HTTPS（8643）进入（见 9.1/9.2/9.3/9.5；产物未运行验收） |
 
 ---
 
@@ -451,9 +451,16 @@ python demo_cli.py status --wf-id aiops-fix-nl2sql-logsurge-<HHMMSS>
 
 > 两档数据互不影响：demo 的历史演示数据原地保留，production 使用全新 MySQL 库；测试永远强制 demo，不会误触生产库。
 
-### 9.2 控制台日常运维（http://<BFF>:8600）
+> 单机生产入口（E/F 产物，2026-10-13；**已于 2026-10-13 维护窗口投用**）：production 档全部组件仅监听 loopback，控制台经本机 Caddy 以 **https://<本机IP>:8643**（或 https://127.0.0.1:8643）进入；直连 `127.0.0.1:8600` 仅限本机受控操作。局域网/IM 网桥等外部访问一律走 8643；监控/凭证接线已完成（见《部署手册》第 9 章与 10.6），外部设备访问仍需先完成 CA 证书分发。
 
-控制台支持**局域网访问**：BFF 监听 `0.0.0.0`——本机 **http://127.0.0.1:8600**，局域网设备 **http://<本机IP>:8600**（IP 以 `bash scripts/demo-up.sh status` 显示或 `ipconfig getifaddr en0` 为准）。首次使用需在登录页填入访问令牌（viewer / operator / admin 角色权限不同）。
+### 9.2 控制台日常运维
+
+控制台访问方式分两档：
+
+- **demo 档**：BFF 监听 `0.0.0.0`——本机 **http://127.0.0.1:8600**，局域网设备 **http://<本机IP>:8600**（IP 以 `bash scripts/demo-up.sh status` 显示或 `ipconfig getifaddr en0` 为准）。
+- **production 档**（见《部署手册》第 9 章）：BFF 收敛为仅 loopback，须经本机 Caddy 入口 **https://<本机IP>:8643** 访问（直连 `127.0.0.1:8600` 仅限本机）。
+
+首次使用需在登录页填入访问令牌（viewer / operator / admin 角色权限不同）。
 
 导航为四级分组（「总览 / 跨系统待办 / 被监控系统 / 平台」，2026-10 控制台重构后）：
 
@@ -490,7 +497,7 @@ curl -X POST http://127.0.0.1:8600/api/system/kill-switch \
 ```
 
 - 激活/关闭均落操作审计（actor + reason + 时间）；
-- 局域网内操作：把上述 URL 的 `127.0.0.1` 换成本机 IP（控制台监听 `0.0.0.0`，见 9.2）；
+- 局域网内操作（demo 档）：把上述 URL 的 `127.0.0.1` 换成本机 IP（控制台监听 `0.0.0.0`，见 9.2）；production 档改为 Caddy 入口 `https://<本机IP>:8643`；
 - 状态不可读时**fail-closed**（宁可拦住，不可放行）；
 - 生产档状态存 MySQL `system_kv`（多副本一致）；demo 档存 `data/kill_switch.json`。
 
@@ -516,6 +523,9 @@ curl -X POST http://127.0.0.1:8600/api/system/kill-switch \
 | 写操作返回 429 | 触发限速（写 20/min）；稍后重试，或按容量调 `AIOPS_RATE_LIMIT_WRITE_PER_MIN` |
 | 认证失败连续 429 | 按 IP 的防爆破限速（10/min）；等待窗口恢复 |
 | 流程列表与 Temporal 不一致 | 生产档由 `workflow_runs` 同步任务周期补齐；检查 BFF 日志同步错误 |
+| 直连 8600 / 9091 返回 404 或无响应 | 正常：production 档指标/健康端点仅接受 loopback 对端；从 Caddy 入口（8643）访问，或确认请求确发自本机 |
+| 运行演示脚本被拒绝（ModeConfigError） | 演示工具在 production 档 fail-closed（如 `demo_cli.py` / `demo_log_generator.py`）；演示请显式 `AIOPS_MODE=demo` |
+| IM 群指令无响应 | production 未配置 `AIOPS_IM_TOKEN` 或未接可信网桥时通道整体关闭（不回落常规鉴权）；如已配置，确认发送者在 `AIOPS_IM_USERS` 映射内 |
 
 ---
 

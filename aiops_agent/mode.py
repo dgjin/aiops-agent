@@ -47,6 +47,24 @@ def mode() -> str:
     raise ModeConfigError(f"{ENV_MODE} 仅支持 {MODE_PRODUCTION} / {MODE_DEMO}：{value!r}")
 
 
+def _temporal_setting(name: str, demo: str, production: str) -> str:
+    expected = demo if is_demo() else production
+    values = [os.environ[key].strip() for key in (name, "AIOPS_" + name) if key in os.environ]
+    if any(value != expected for value in values):
+        raise ModeConfigError(f"{name} 与 {mode()} 不符，要求 {expected}")
+    return expected
+
+
+def temporal_namespace() -> str:
+    """所有 Client 共用；拒绝跨档 namespace，兼容 AIOPS_ 前缀配置名。"""
+    return _temporal_setting("TEMPORAL_NAMESPACE", "default", "aiops-production")
+
+
+def temporal_task_queue() -> str:
+    """生产 worker 不能消费历史 demo 队列。"""
+    return _temporal_setting("TEMPORAL_TASK_QUEUE", "aiops-tasks", "aiops-production-tasks")
+
+
 def is_demo() -> bool:
     return mode() == MODE_DEMO
 

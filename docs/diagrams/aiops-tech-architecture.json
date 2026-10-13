@@ -68,7 +68,7 @@
           "compose",
           "k8s"
         ],
-        "note": "指标 :8600/:9090 被抓取；Grafana 概览面板；Compose 3 profiles 与 K8s 同镜像交付"
+        "note": "指标 :8600/:9091 被抓取（production；仅 loopback）；Grafana 概览面板；Compose 3 profiles 与 K8s 同镜像交付"
       }
     ]
   },
@@ -391,7 +391,7 @@
       "type": "external",
       "label": "Prometheus",
       "sublabel": ":9095 · 指标抓取",
-      "tag": "抓取 :8600 / :9090",
+      "tag": "抓取 :8600 / :9091",
       "brand": "prometheus",
       "sources": [
         {

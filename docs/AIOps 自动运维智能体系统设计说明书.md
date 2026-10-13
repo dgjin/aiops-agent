@@ -46,11 +46,11 @@
 | 自动回滚 | ✅ 真实 | 劣化时回收金丝雀、稳定版本保持不变（留痕文案区自动/等待人工） |
 | 生产持久化 | ✅ 真实 | 双模运行（`mode.py`）：production=MySQL 5 表 + fail-fast；demo 文件后端零迁移（第 10 章） |
 | 安全加固 | ✅ 真实 | 令牌指纹注册表 + 滑动窗口限速（Redis/进程内）+ 安全头 + kill switch（`kill_switch.py`） |
-| 可观测 | ✅ 真实 | Prometheus 指标（BFF :8600 / worker :9090）+ 6 告警 + Grafana 9 面板 + OTel 可选 |
+| 可观测 | ✅ 真实 | Prometheus 指标（BFF `127.0.0.1:8600`、worker production `:9091` / demo `:9090`，均仅 loopback）+ 6 告警 + Grafana 9 面板 + OTel 可选 |
 | 数据生命周期 | ✅ 真实 | TTL 清理（`cleanup.py` + K8s CronJob）；Temporal retention 720h（部署侧） |
 | 可用性巡检 | ✅ 真实 | 主动巡检「被监控应用」清单 → 连续失败注入告警 → 自动修复（`app_prober.py`）；页面级默认通用白屏判据（`page_health.py`） |
 | 日志实时采集 | ✅ 真实 | 清单模式增量采集应用日志 → Loki，扮演 Filebeat 角色（`ship_app_logs.py`，位点持久化重启不重推） |
-| 控制台 | ✅ 真实 | BFF（FastAPI :8600）+ React SPA：看板/审批/发布窗口/审计/被监控应用/需求基线/转人工待办/用户管理；支持局域网访问 |
+| 控制台 | ✅ 真实 | BFF（FastAPI :8600）+ React SPA：看板/审批/发布窗口/审计/被监控应用/需求基线/转人工待办/用户管理；demo 支持局域网访问，production 收敛 loopback 并经本机 Caddy HTTPS（8643）进入 |
 | 需求基线闭环 | ✅ 真实 | 需求导出接口拉取 → LLM 主动分析 → 控制台审批 → 驱动修复（`analyze_requirements.py` 等，见 4.9） |
 | 组件守护 | ✅ 真实 | 6 常驻组件崩溃自动拉起（`scripts/aiops-watchdog.py`，崩溃风暴冷却）；`demo-up.sh` 一键编排 |
 
@@ -143,7 +143,7 @@
 | 生产持久化 | MySQL 8.0 + PyMySQL/SQLAlchemy 2.0 | InnoDB/utf8mb4；`pool_recycle=3600` + `pool_pre_ping`；BIGINT 自增/JSON/ENUM |
 | 多副本限速 | Redis 7（可选） | 滑动窗口存 `aiops:rl:*`；未配置退化为进程内窗口 |
 | 生产编排 | Kubernetes（deploy/k8s/） | 2 副本 + PDB + HPA；Temporal auto-setup（MySQL 后端，retention 720h） |
-| 指标/看板 | Prometheus + Grafana | BFF `:8600/metrics`、worker `:9090/metrics`；6 告警 + 9 面板 |
+| 指标/看板 | Prometheus + Grafana | BFF `127.0.0.1:8600/metrics`、worker production `127.0.0.1:9091`（demo 9090）；6 告警 + 9 面板 |
 | 追踪 | OpenTelemetry（可选） | OTLP HTTP（`AIOPS_OTEL_ENDPOINT`）；未配置完全 no-op |
 | Git 集成 | stdlib urllib（零新依赖） | GitLab MR / GitHub PR / Gitee PR；失败降级不中断 |
 | 运行时 | Python | 3.12 |
@@ -538,7 +538,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 
 ## 8 质量保障与评测体系
 
-### 8.1 单元测试矩阵（37 个测试文件 / 836 用例，全绿）
+### 8.1 单元测试矩阵（836 用例基线；2026-10-13 整改后全量 48 个文件 / 1267 用例通过、7 跳过）
 
 | 测试文件 | 覆盖范围 |
 | --- | --- |
@@ -562,6 +562,8 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 | `tests/test_escalations.py` / `test_auth_users.py` / `test_ops_metrics.py` | 转人工处置闭环（SLA 巡检）、用户与会话（登录/改密/吊销）、运营度量（MTTR/比率） |
 | `tests/test_app_manifest.py` / `test_changes.py` / `test_release_direct.py` / `test_worker_registry.py` | Manifest 校验与探测、变更关联、直连发布、活动注册表防回归 |
 | `tests/test_deploy_manifests.py` | K8s 清单 39 项静态校验（命名空间/镜像/副本/PDB/HPA/探针/PVC/策略/告警名集合对齐）+ compose profiles + Dockerfile |
+
+> 2026-10-13 单机生产化整改后全量回归复核：**Ran 1267 tests — OK（skipped=7）**（48 个测试文件；发现式运行必须带 `-t .`）。整改新增套件包括：`test_production_safety` / `test_chatops` / `test_mcp_server` / `test_alert_store` / `test_release_safety` / `test_release_replay` / `test_backup` / `test_readiness` / `test_startup_mode` / `test_production_deploy` / `test_topology`。
 
 ### 8.2 triage 离线评测（`eval_triage.py`）
 
@@ -662,7 +664,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 ### 10.6 可观测设计
 
 - **指标口径（`aiops_agent/metrics.py`，契约稳定）**：计数标签一律字符串——`stage` 大写（DONE/ESCALATED/CANCELLED）、布尔小写（"true"/"false"）、BFF `status` 为 `str(int)`、闸门 `gate` ∈ approval / second_approval / deploy_command；直方图覆盖 workflow 时长、BFF 请求耗时、金丝雀观测。
-- **暴露面**：BFF `GET /metrics`（:8600，无鉴权，供探针与抓取）；worker 独立指标服务 `:9090`（`AIOPS_METRICS_PORT=0` 关闭）。
+- **暴露面**：BFF `GET /metrics`（`127.0.0.1:8600`，无鉴权但**仅接受 loopback 对端**）；worker 独立指标服务默认仅 loopback（production `:9091` / demo `:9090`，`AIOPS_METRICS_PORT=0` 关闭）；`/readyz`、`/livez` 同为仅回环（探针口径见 10.10）。
 - **告警**：`deploy/prometheus/aiops-alerts.yml` 6 条（成功率、卡单、耗时、BFF 错误率/延迟、限速触发），与 K8s `PrometheusRule` 同步（测试校验名称集合一致）。
 - **看板**：`deploy/grafana/aiops-overview.json` 9 面板，含 `mode` 模板变量区分两档。
 - **追踪**：`AIOPS_OTEL_ENDPOINT` 配置后 BFF HTTP 与 worker workflow/activity 自动生成 span；未配置完全 no-op。
@@ -673,11 +675,22 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 
 ### 10.8 BFF 分层
 
-`bff/routes/`（按域拆分为 11 域：`flows` / `approvals` / `audit` / `health` / `monitored_apps` / `system` / `tokens` / `escalations` / `requirements` / `users` / `ops_metrics`）+ `services` 聚合逻辑（`aggregator` / `temporal_gateway` / `runs_store`）+ `middleware`（鉴权/限速/指标/安全头）+ `deps`（依赖注入）。写操作路由保持 stage 前置校验（不满足 409）与操作审计钩子；前端 SPA（`web/`）由 BFF 同源托管，`--host 0.0.0.0` 时局域网可访问。
+`bff/routes/`（按域拆分为 13 域：`health` / `flows` / `approvals` / `chatops` / `escalations` / `ops_metrics` / `audit` / `tokens` / `system` / `systems` / `monitored_apps` / `requirements` / `users`）+ `services` 聚合逻辑（`aggregator` / `temporal_gateway` / `runs_store`）+ `middleware`（鉴权/限速/指标/安全头）+ `deps`（依赖注入）。写操作路由保持 stage 前置校验（不满足 409）与操作审计钩子；前端 SPA（`web/`）由 BFF 同源托管，`--host 0.0.0.0` 时局域网可访问。
 
 ### 10.9 部署面
 
-`deploy/`：多阶段 `Dockerfile`（非 root / 无密钥）、`k8s/` 平铺 12 文件 38 资源（命名空间 / ConfigMap / Secret 样例 / MySQL / Redis / Temporal / worker / bff / webhook / CronJob / NetworkPolicy / ServiceMonitor+PrometheusRule）、`prometheus/`、`grafana/`；`docker-compose.yml` 以 profiles 增量交付（默认行为与改造前完全一致：仅 temporal + loki；`--profile prod` 加 MySQL/Redis；`--profile obs` 加 Prometheus/Grafana）。
+`deploy/`：多阶段 `Dockerfile`（非 root / 无密钥）、`k8s/` 平铺 12 文件 38 资源（命名空间 / ConfigMap / Secret 样例 / MySQL / Redis / Temporal / worker / bff / webhook / CronJob / NetworkPolicy / ServiceMonitor+PrometheusRule）、`prometheus/`、`grafana/`；单机整改新增 `deploy/caddy/Caddyfile`（本机 HTTPS 反代）、`deploy/temporal/`（生产配置 / bootstrap.sql / schema.sh）、`deploy/launchd/`（watchdog / caddy / backup 三个 plist 模板）、`deploy/ci/compose.yml`（隔离集成环境）——均为 E/F/H/I 产物；**2026-10-13 维护窗口已投用**（Caddy/watchdog launchd 托管、8643 三向入口、监控接线、真实加密备份与 W1 冷备；备份调度 plist 已注册为禁用态待租约协调）；`docker-compose.yml` 以 profiles 增量交付（默认行为与改造前完全一致：仅 temporal + loki；`--profile prod` 加 MySQL/Redis；`--profile obs` 加 Prometheus/Grafana）。
+
+### 10.10 单机生产化整改设计增量（2026-10-13，批次 A–I）
+
+在 v2 双模基础上，按《单机生产化整改实施计划》完成单机受控生产化；批次状态与证据标记见《实施计划》第 13 节，部署操作见《部署手册》第 9/10 章。**维护窗口（2026-10-13）已执行切换与运行验收，状态与残余待办见《部署手册》10.6。**设计增量：
+
+- **事件聚合（C）**：告警事件跨进程持久化与去重（`aiops_agent/alert_store.py`，故障域键 = `{mode}:{namespace}:{service}`，成员唯一约束防重复投递，条件 UPDATE + 租约认领支持崩溃接管，Temporal 调用一律在事务外）；新增 `alert_events` / `alert_event_members` 表与迁移。
+- **ChatOps 信任边界（B）**：`POST /api/im/command` 走 middleware 专用通道认证（`AIOPS_IM_TOKEN`；未配置＝通道关闭、凭证不符＝认证失败，两者都不回落常规鉴权；production 未接可信网桥前整体关闭），路由内二次核对 `token_record.source == 'im'`；发送者角色按 `AIOPS_IM_USERS` 映射，未映射＝viewer。MCP production 仅支持 stdio 且逐调用最小权限凭证。`/metrics`、`/readyz`、`/livez` 收敛为仅 loopback 对端。
+- **发布互斥与急停（G）**：`release_journal.py` 文件锁 + 持久化发布记录锁定真实目标资源；急停与失败恢复沿用 kill switch 与 journal 非终态记录处理。
+- **统一启动（D）**：`config.startup_snapshot` 对 production 强制全组件 loopback、端口不得重复、venv/策略 `shadow_mode` 等 fail-fast 门禁；演示工具在 production 一律拒绝（如 `demo_log_generator`）。
+- **HTTPS 与网络收敛（E/F）**：本机 Caddy（8643）反代 8600 / 8099 / 指标通道，清除客户端转发头、只用真实 TCP 对端重建身份；HSTS 仅在受信代理转发 https 时下发；正式 Temporal Server 使用独立业务库 / visibility 库与生产 namespace。
+- **备份与恢复（H）**：AES-256-GCM 加密归档 + 定向隔离恢复校验；备份与发布共用同一 `release_lock` 并在持锁后执行 `assert_idle_locked()`（见《部署手册》10.2）。K8s 探针契约同步为 exec（I），清单仅静态校验、未集群实测。
 
 ---
 

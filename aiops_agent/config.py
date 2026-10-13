@@ -10,19 +10,25 @@
 
 from __future__ import annotations
 
+import hashlib
+import ipaddress
 import os
 import re
+import sys
 from datetime import timedelta
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+
+from . import mode as runtime_mode
 
 # 可选：自动加载工程根目录 .env（未安装 python-dotenv 时静默跳过，不影响运行）
 try:  # pragma: no cover - 取决于本地是否安装 python-dotenv
     from dotenv import load_dotenv
 
-    load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
+    if "tests" not in sys.modules:
+        load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
 except ImportError:  # pragma: no cover
     pass
 
@@ -229,6 +235,8 @@ class Policy(BaseModel):
 
     release_gate: ReleaseGatePolicy = Field(default_factory=ReleaseGatePolicy)
     git: GitConfig = Field(default_factory=GitConfig)
+    _source: str = PrivateAttr(default="")
+    _sha256: str = PrivateAttr(default="")
 
     def summary(self) -> str:
         gate = self.release_gate
@@ -245,12 +253,13 @@ class Policy(BaseModel):
 
 def resolve_policy_path(path: str | os.PathLike | None = None) -> Path:
     """策略文件定位：显式参数 > 环境变量 AIOPS_POLICY_PATH > 默认路径。"""
-    if path:
-        return Path(path)
-    env_path = os.environ.get("AIOPS_POLICY_PATH")
-    if env_path:
-        return Path(env_path)
-    return DEFAULT_POLICY_PATH
+    selected = path or os.environ.get("AIOPS_POLICY_PATH")
+    if not selected:
+        selected = DEFAULT_POLICY_PATH.with_name("demo-policy.yaml") if runtime_mode.is_demo() else DEFAULT_POLICY_PATH
+    selected = Path(selected).expanduser()
+    if not selected.is_absolute():
+        selected = DEFAULT_POLICY_PATH.parent / selected
+    return selected.resolve()
 
 
 def load_policy(path: str | os.PathLike | None = None) -> Policy:
@@ -258,9 +267,80 @@ def load_policy(path: str | os.PathLike | None = None) -> Policy:
     policy_path = resolve_policy_path(path)
     if not policy_path.exists():
         raise FileNotFoundError(f"策略文件不存在: {policy_path}")
-    with open(policy_path, encoding="utf-8") as fh:
-        raw = yaml.safe_load(fh)
-    return Policy.model_validate(raw)
+    content = policy_path.read_bytes()
+    policy = Policy.model_validate(yaml.safe_load(content))
+    policy._source = str(policy_path)
+    policy._sha256 = hashlib.sha256(content).hexdigest()
+    validate_runtime_policy(policy)
+    expected = os.environ.get("AIOPS_POLICY_SHA256")
+    if expected and expected != policy._sha256:
+        raise runtime_mode.ModeConfigError("策略 hash 与启动快照不符；要求受控 restart")
+    return policy
+
+
+def validate_runtime_policy(policy: Policy) -> None:
+    """首次生产试点只允许影子策略；不更改正在执行的历史流程。"""
+    if runtime_mode.is_production() and not policy.release_gate.shadow_mode:
+        raise runtime_mode.ModeConfigError("production 必须显式配置 release_gate.shadow_mode=true")
+
+
+def startup_snapshot(root: Path | None = None) -> dict:
+    """纯配置预检，不建目录、不连接数据库；可安全用于启动摘要/readiness。"""
+    from sqlalchemy.engine import make_url
+
+    root = (root or DEFAULT_POLICY_PATH.parent).resolve()
+    production = runtime_mode.is_production()
+    python = root / ".venv/bin/python"
+    if production and (not python.is_file() or not os.access(python, os.X_OK)):
+        raise runtime_mode.ModeConfigError("production 必须使用仓库 .venv/bin/python")
+    explicit = os.environ.get("AIOPS_DATA_ROOT", "")
+    if explicit and not Path(explicit).expanduser().is_absolute():
+        raise runtime_mode.ModeConfigError("AIOPS_DATA_ROOT 必须是绝对路径")
+    data = runtime_mode.data_root()
+    if production and data in (root, root / "data"):
+        raise runtime_mode.ModeConfigError("production 数据根不得复用 demo 数据根")
+    anchor = data
+    while not anchor.exists() and anchor != anchor.parent:
+        anchor = anchor.parent
+    if not anchor.is_dir() or not os.access(anchor, os.R_OK | os.W_OK | os.X_OK):
+        raise runtime_mode.ModeConfigError("数据根不可访问/写入；未创建任何目录")
+    database = runtime_mode.db_url()
+    try:
+        db = make_url(database) if database else None
+        if production and (db.get_backend_name() != "mysql" or not db.host or not db.database or not db.username):
+            raise ValueError
+    except Exception:
+        raise runtime_mode.ModeConfigError("production 需要完整 MySQL URL（详情已隐藏）") from None
+    if production and not os.environ.get("AIOPS_REDIS_URL", "").startswith(("redis://", "rediss://")):
+        raise runtime_mode.ModeConfigError("production 必须配置 AIOPS_REDIS_URL")
+    from urllib.parse import urlsplit
+    try:
+        endpoint = urlsplit("//" + os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))
+        if not endpoint.hostname or not endpoint.port or endpoint.path or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment:
+            raise ValueError
+    except ValueError:
+        raise runtime_mode.ModeConfigError("TEMPORAL_ADDRESS 必须为 host:port（无凭证）") from None
+    listeners = {}
+    for name, default_port in (("BFF", 8600), ("WEBHOOK", 8099), ("METRICS", 9091 if production else 9090)):
+        host = os.environ.get(f"AIOPS_{name}_HOST", "127.0.0.1")
+        try:
+            address = ipaddress.ip_address(host)
+            port = int(os.environ.get(f"AIOPS_{name}_PORT", str(default_port)))
+            if not 1 <= port <= 65535 or (production and not address.is_loopback):
+                raise ValueError
+        except ValueError:
+            raise runtime_mode.ModeConfigError(f"{name} 监听地址/端口非法（production 要求 loopback）") from None
+        listeners[name.lower()] = {"host": host, "port": port}
+    if len({v["port"] for v in listeners.values()}) != len(listeners):
+        raise runtime_mode.ModeConfigError("组件监听端口不能重复")
+    policy = load_policy()
+    return {"mode": runtime_mode.mode(), "repository": str(root), "python": str(python),
+            "policy_path": policy._source, "policy_sha256": policy._sha256,
+            "shadow_mode": policy.release_gate.shadow_mode, "data_root": str(data),
+            "database": "mysql (configured)" if db else "file (demo)",
+            "temporal_address": endpoint.netloc,
+            "namespace": runtime_mode.temporal_namespace(), "task_queue": runtime_mode.temporal_task_queue(),
+            "listeners": listeners}
 
 
 def snapshot_for_workflow(policy: Policy) -> dict:
@@ -268,9 +348,14 @@ def snapshot_for_workflow(policy: Policy) -> dict:
 
     工作流内只读该快照，运行期修改磁盘 YAML 不影响进行中的流程（设计方案第 9 节）。
     """
+    validate_runtime_policy(policy)
     gate = policy.release_gate
     return {
-        "policy_source": str(resolve_policy_path()),
+        "policy_source": policy._source or str(resolve_policy_path()),
+        "policy_sha256": policy._sha256,
+        "runtime_mode": runtime_mode.mode(),
+        "temporal_namespace": runtime_mode.temporal_namespace(),
+        "temporal_task_queue": runtime_mode.temporal_task_queue(),
         # P1-2：shadow 档透传（工作流读取用 .get 兜底，旧快照无此键时行为不变）
         "shadow_mode": gate.shadow_mode,
         "triage": {

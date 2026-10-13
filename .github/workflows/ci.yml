@@ -1,11 +1,5 @@
-# AIOps Agent 合入门禁（P0-2）
-#
-# 三条门禁均为本地已验证口径（与 README「开发与测试」一致）：
-#   1. 单测：python -m unittest discover -s tests -t .   —— 必须带 -t .：
-#      触发 tests/__init__.py 的 demo 隔离钩子；缺 -t . 时测试以顶层模块导入、
-#      生产档下会直连真实数据库（CI 无 .env，仍显式设 demo 双保险）。
-#   2. 前端：npm ci && npm run build（tsc --noEmit && vite build）。
-#   3. SAST：bash scripts/security-scan.sh（Bandit Medium+，HIGH 必须为 0）。
+# Batch I: configuration is not evidence of a completed CI run.
+# No vulnerability exceptions have been approved: existing findings block too.
 name: CI
 
 on:
@@ -15,33 +9,50 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   tests:
-    name: 单元测试（unittest / demo 档）
-    runs-on: ubuntu-latest
+    name: Python 3.12 demo tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
       AIOPS_MODE: demo
-      AIOPS_POLICY_PATH: ./demo-policy.yaml
+      PYTHON_DOTENV_DISABLED: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: requirements.txt
-      - name: 安装依赖（含可选 MCP 组件，保证 mcp_server 用例不跳过）
-        run: pip install -r requirements.txt -r requirements-mcp.txt
-      - name: 运行单元测试（必须带 -t .）
-        run: python -m unittest discover -s tests -t . -v
+      - name: Create isolated CI venv and install hash locks
+        run: |
+          python -c "import platform; assert (platform.system(), platform.machine()) in [('Linux', 'x86_64'), ('Darwin', 'arm64')]"
+          python -m venv .venv
+          .venv/bin/python -m pip --isolated install --index-url https://pypi.org/simple --require-hashes -r requirements-build.lock
+          .venv/bin/python -m pip --isolated install --index-url https://pypi.org/simple --require-hashes --no-build-isolation --only-binary=:all: --no-binary=drain3 -r requirements-ci.lock
+          .venv/bin/python -m pip check
+      - name: Native dependency lock resolution (not a macOS cross-download)
+        run: |
+          sed -n 's/^\([a-z0-9.-]*==[^ ]*\).*$/\1/p' requirements-ci.lock > "$RUNNER_TEMP/native-constraints.txt"
+          .venv/bin/python -m pip --isolated install --index-url https://pypi.org/simple --dry-run --ignore-installed --no-build-isolation --only-binary=:all: --no-binary=drain3 --report "$RUNNER_TEMP/native-resolution.json" -r requirements-ci.in -c "$RUNNER_TEMP/native-constraints.txt"
+          .venv/bin/python scripts/ci_dependencies.py "$RUNNER_TEMP/native-resolution.json" --check-lock requirements-ci.lock
+      - name: Full demo unit suite (must retain -t . safety hook)
+        run: .venv/bin/python -m unittest discover -s tests -t . -v
+      - name: Offline CI isolation contract
+        run: .venv/bin/python scripts/ci_integration.py --check
 
   web-build:
-    name: 前端构建（tsc + vite）
-    runs-on: ubuntu-latest
+    name: Frontend tsc + vite
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -50,23 +61,73 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - name: 安装依赖
+      - run: npm ci
         working-directory: web
-        run: npm ci
-      - name: 构建
+      - run: npm run build
         working-directory: web
-        run: npm run build
+      - name: Frontend dependency gate (no accepted high/critical baseline)
+        run: npm audit --audit-level=high
+        working-directory: web
 
   security-scan:
-    name: Bandit SAST（Medium+，HIGH=0）
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    name: Bandit HIGH=0 and dependency advisories
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: 安装 Bandit
-        run: pip install bandit
-      - name: 执行 SAST 扫描
+      - run: |
+          python -m venv .venv
+          .venv/bin/python -m pip --isolated install --index-url https://pypi.org/simple --require-hashes -r requirements-build.lock
+          .venv/bin/python -m pip --isolated install --index-url https://pypi.org/simple --require-hashes --no-build-isolation --only-binary=:all: --no-binary=drain3 -r requirements-ci.lock
+      - name: Existing Bandit gate (HIGH must be zero)
         run: bash scripts/security-scan.sh
+      - name: Include new CI entrypoints in HIGH gate
+        run: .venv/bin/python -m bandit -lll scripts/ci_integration.py scripts/ci_dependencies.py
+      - name: Dependency advisory gate (all severities; NO silent baseline waiver)
+        run: .venv/bin/python -m pip_audit --disable-pip --no-deps -r requirements-ci.lock -r requirements-build.lock
+
+  image-security:
+    name: Pinned image HIGH/CRITICAL gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - mysql@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
+          - redis@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+          - temporalio/server:1.32.1@sha256:acecbab5b0b8ae9cf4012b508866ca97feda3709577bf157b537239f40029049
+          - temporalio/admin-tools:1.32.1@sha256:9ef0dc5b063bf4ffd5c1512de72e0e73e225bd2c7006a18ce69bd592a8862a83
+          - grafana/loki@sha256:1107dd5274e0ada47e42472b7a7e71f3b2a2fe878878108f3e2f9e51528f0193
+    steps:
+      - uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          image-ref: ${{ matrix.image }}
+          scan-type: image
+          format: table
+          exit-code: "1"
+          ignore-unfixed: "false"
+          severity: HIGH,CRITICAL
+          scanners: vuln
+
+  isolated-integration:
+    name: Isolated MySQL / Redis / formal Temporal / shadow workflow
+    needs: [tests, web-build, security-scan, image-security]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PYTHON_DOTENV_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m venv .venv
+          .venv/bin/python -m pip --isolated install --index-url https://pypi.org/simple --require-hashes -r requirements-build.lock
+          .venv/bin/python -m pip --isolated install --index-url https://pypi.org/simple --require-hashes --no-build-isolation --only-binary=:all: --no-binary=drain3 -r requirements-ci.lock
+      - name: Dedicated entrypoint (never imports or disables tests/__init__.py)
+        run: .venv/bin/python scripts/ci_integration.py --run

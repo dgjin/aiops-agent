@@ -1,0 +1,23 @@
+# Direct project inputs, sampled from the existing Python 3.12 macOS environment.
+# Not pip freeze: unrelated installed packages are intentionally excluded.
+# Exact CI transitive closure + hashes live in requirements-ci.lock.
+# These versions are a compatibility baseline, NOT a no-vulnerability claim.
+temporalio==1.33.0
+pydantic==2.13.5
+PyYAML==6.0.3
+drain3==0.9.11
+fastapi==0.142.2
+uvicorn[standard]==0.54.0
+faiss-cpu==1.15.1
+numpy==2.5.3
+python-dotenv==1.2.4
+sqlalchemy==2.1.3
+pymysql==1.2.3
+cryptography==50.0.2
+prometheus-client==0.26.0
+redis==8.1.0
+bandit==1.9.4
+opentelemetry-api==1.45.0
+opentelemetry-sdk==1.45.0
+opentelemetry-instrumentation-fastapi==0.66b0
+opentelemetry-exporter-otlp-proto-http==1.45.0
