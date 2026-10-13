@@ -240,6 +240,8 @@ class ManifestTests(TemporaryDeployment):
         self.assertEqual(text.count("basic_auth {"), 2)
         self.assertEqual(text.count("header_up -Authorization"), 2)
         self.assertIn("method POST\n        path /webhook", text)
+        # 帮助中心「系统视图」iframe 加载 /diagrams/*.html：生产入口必须放行该静态前缀。
+        self.assertIn("/diagrams/*", text)
         for internal in ("metrics", "readyz", "livez", "docs", "openapi[.]json"):
             self.assertIn(internal, text.split("@private", 1)[1].splitlines()[0])
         self.assertIn("header_up X-Forwarded-For {http.request.remote.host}", text)
