@@ -382,7 +382,8 @@ export AIOPS_NOTIFY_WEBHOOK="https://..."
 export AIOPS_NOTIFY_CALLBACK_BASE="https://<你的回调网关>/aiops/callback"
 ```
 
-> 通知发送为「先留痕、后 POST」，失败自动降级（`failed`）不阻断修复流程。
+> 通知发送为「先留痕、后 POST」，投递结果以机器人应答码为准（飞书 `code` / 钉钉 `errcode` 非零 = `failed`，如加签不符 `19021`；网络异常同理）；任何失败均自动降级、不阻断修复流程。
+> 本机生产环境推荐直接写入工程根 `.env`（`AIOPS_FEISHU_WEBHOOK=...` / `AIOPS_NOTIFY_SECRET=...`），修改后执行 `./start.sh restart` 受控重启生效（环境指纹变化触发）。
 
 ### 3.8 IM 通道（ChatOps：群内查询与审批）
 

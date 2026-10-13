@@ -369,7 +369,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 | 升级卡片 | `render_escalation_card` | 转人工原因 + 严重级别 + 处置动作 | 红 |
 
 - **双 provider**：飞书（interactive card，按钮 `value` 携带回调契约）；钉钉（actionCard，按钮 `actionURL` 查询参数携带回调契约）；
-- **投递器 `NotificationSender`**：三种模式——`live`（配置 webhook 真实 POST，飞书加签秒级时间戳/钉钉加签毫秒级时间戳）、`recorded`（未配置 webhook，留痕 `data/notify/<msg_id>.json`）、`failed`（投递异常降级，**通知失败不阻断修复主流程**）；无论何种模式均先留痕；
+- **投递器 `NotificationSender`**：三种模式——`live`（配置 webhook 真实 POST 且机器人应答码为 0，飞书加签秒级时间戳/钉钉加签毫秒级时间戳）、`recorded`（未配置 webhook，留痕 `data/notify/<msg_id>.json`）、`failed`（网络异常或机器人应答非零如加签不符，降级并携带原因，**通知失败不阻断修复主流程**）；无论何种模式均先留痕；
 - **回调契约**：按钮载荷 `{"wf_id": "aiops-fix-<service>-<alert_id>", "gate": "approval|second_approval", "decision": "approve|reject"}`；`parse_callback` 同时支持飞书 dict 结构与钉钉 actionURL 字符串，字段缺失或取值非法返回 `None`（服务端据此拒绝）；解析后的合法结果由回调网关转发 workflow signal（生产接线点）。
 
 ### 4.7 执行层（`release.py`）
