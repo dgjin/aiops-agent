@@ -226,6 +226,12 @@ def write_status(path: Path, state: dict) -> None:
 
 
 def main() -> None:
+    # 禁用 urllib 系统代理快照（同 watchdog/mcp_server 的 ProxyHandler({}) 惯例）：
+    # 巡检只访问被监控应用（本机/内网）与 Alertmanager；若系统代理在首次 urlopen
+    # 时开启，全局 opener 会永久缓存该代理，代理关闭后仍走死端口 → 探测全部误判不可达。
+    urllib.request.install_opener(
+        urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    )
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

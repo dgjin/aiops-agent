@@ -130,6 +130,12 @@ def check_once(
 
 
 def main() -> None:
+    # 禁用 urllib 系统代理快照（同 watchdog/mcp_server 的 ProxyHandler({}) 惯例）：
+    # 检测只访问本机 Loki 与 Alertmanager；若系统代理在首次 urlopen 时开启，全局
+    # opener 会永久缓存该代理，代理关闭后仍走死端口 → 查询/注入全部失败。
+    urllib.request.install_opener(
+        urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    )
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

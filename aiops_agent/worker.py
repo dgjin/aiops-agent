@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 import sys
+import urllib.request
 from pathlib import Path
 
 from temporalio.client import Client
@@ -52,6 +53,12 @@ _ACTIVITY_LIST = [
 
 
 async def main() -> None:
+    # 禁用 urllib 系统代理快照（同 watchdog/mcp_server 的 ProxyHandler({}) 惯例）：
+    # 本进程只访问本机/内网服务（Temporal、Loki、Ollama、被监控系统）；若系统代理
+    # 在首次 urlopen 时开启，全局 opener 会永久缓存该代理，代理关闭后仍走死端口。
+    urllib.request.install_opener(
+        urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    )
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

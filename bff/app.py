@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import urllib.request
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -35,6 +36,13 @@ from .deps import ApiError, WEB_DIST, gw, log, ok
 from .middleware import register_middlewares
 from .middleware import required_role as required_role  # noqa: F401 - 兼容测试引用（bff.app.required_role）
 from .routes import include_routers
+
+# 禁用 urllib 系统代理快照（同 watchdog/mcp_server 的 ProxyHandler({}) 惯例）：
+# BFF 只访问本机/内网服务（被监控应用探测、Ollama/Docker 自检、Manifest 拉取）；
+# 若系统代理在首次 urlopen 时开启，全局 opener 会永久缓存该代理，代理关闭后仍走死端口。
+urllib.request.install_opener(
+    urllib.request.build_opener(urllib.request.ProxyHandler({}))
+)
 
 
 def _rotation_check_seconds() -> int:

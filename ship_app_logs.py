@@ -33,6 +33,7 @@ import json
 import os
 import re
 import time
+import urllib.request
 from pathlib import Path
 
 from aiops_agent import config as _config  # noqa: F401 - 触发工程根 .env 加载（与其他入口一致）
@@ -285,6 +286,12 @@ def follow(
 
 
 def main() -> None:
+    # 禁用 urllib 系统代理快照（同 watchdog/mcp_server 的 ProxyHandler({}) 惯例）：
+    # 采集只推送本机 Loki；若系统代理在首次 urlopen 时开启，全局 opener 会永久
+    # 缓存该代理，代理关闭后仍走死端口 → 推送全部失败。
+    urllib.request.install_opener(
+        urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    )
     parser = argparse.ArgumentParser(
         description="应用日志接入 Loki（Filebeat 角色）：单文件模式或按被监控应用清单热采集"
     )
