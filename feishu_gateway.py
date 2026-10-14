@@ -43,21 +43,10 @@ import os
 import sys
 import urllib.error
 import urllib.request
-from pathlib import Path
 from typing import Callable
 
+from aiops_agent import config as _config  # noqa: F401 - 触发工程根 .env 加载（与其他入口一致）
 from aiops_agent import feishu_app, notify
-
-# 可选：自动加载工程根目录 .env（未安装 python-dotenv 时静默跳过，不影响运行；
-# tests 导入时不生效——与 aiops_agent/config.py 同惯例，保证单测隔离。
-# 手动 CLI（--list-chats/--send-test-card）不经 aiops_agent.config，须在此自加载）。
-try:  # pragma: no cover - 取决于本地是否安装 python-dotenv
-    from dotenv import load_dotenv
-
-    if "tests" not in sys.modules:
-        load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
-except ImportError:  # pragma: no cover
-    pass
 
 log = logging.getLogger("feishu-gateway")
 
