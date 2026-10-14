@@ -20,7 +20,7 @@ BFF ``POST /api/im/card-callback``（复用既有验签 / 解析 / 角色判定 
 的 event_type="card.action.trigger"，响应回写逻辑完全复用）。上游修复后
 _install_card_frame_patch 可整体移除。
 
-运行：
+运行（自动加载工程根目录 .env）：
     .venv/bin/python feishu_gateway.py                     # 启动长连接（常驻，watchdog 托管）
     .venv/bin/python feishu_gateway.py --list-chats        # 列出机器人所在群（取群 chat_id）
     .venv/bin/python feishu_gateway.py --send-test-card    # 发送链路验证卡（验证端到端回传）
@@ -43,9 +43,21 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Callable
 
 from aiops_agent import feishu_app, notify
+
+# 可选：自动加载工程根目录 .env（未安装 python-dotenv 时静默跳过，不影响运行；
+# tests 导入时不生效——与 aiops_agent/config.py 同惯例，保证单测隔离。
+# 手动 CLI（--list-chats/--send-test-card）不经 aiops_agent.config，须在此自加载）。
+try:  # pragma: no cover - 取决于本地是否安装 python-dotenv
+    from dotenv import load_dotenv
+
+    if "tests" not in sys.modules:
+        load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
+except ImportError:  # pragma: no cover
+    pass
 
 log = logging.getLogger("feishu-gateway")
 
