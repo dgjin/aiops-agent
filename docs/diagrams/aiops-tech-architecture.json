@@ -21,7 +21,7 @@
           "worker",
           "temporal"
         ],
-        "note": "React SPA 经 BFF(:8600) 聚合与鉴权；浏览器不直连 Temporal"
+        "note": "React SPA 经 BFF(:8600) 聚合与鉴权；浏览器不直连 Temporal；卡片回调经 BFF 验签"
       },
       {
         "id": "orchestration",
@@ -99,7 +99,7 @@
       "type": "backend",
       "label": "FastAPI BFF",
       "sublabel": ":8600 · uvicorn",
-      "tag": "RBAC · 限流",
+      "tag": "RBAC · IM 回调",
       "brand": "fastapi",
       "sources": [
         {
@@ -844,7 +844,7 @@
       "title": "前端与接入",
       "items": [
         "React 19 + TS 7 + Vite 8 + Tailwind 4，构建产物由 BFF 静态托管",
-        "FastAPI + uvicorn :8600：RBAC、限流与 prometheus-client /metrics",
+        "FastAPI + uvicorn :8600：RBAC、限流、飞书卡片回调网关与 /metrics",
         "告警接入 :8099 纯标准库：Token 鉴权 fail-closed + 幂等去重"
       ]
     },

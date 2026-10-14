@@ -59,7 +59,7 @@
           "store",
           "im"
         ],
-        "note": "看板 / 审批 / 发布窗口经 BFF（RBAC）聚合，浏览器不直连 Temporal"
+        "note": "看板 / 审批 / 发布窗口经 BFF（RBAC）聚合；飞书卡片回调经 BFF 验签直达审批信号"
       },
       {
         "id": "guard-rails",
@@ -326,7 +326,7 @@
       "type": "backend",
       "label": "运维 BFF",
       "sublabel": "FastAPI · :8600",
-      "tag": "RBAC · 度量",
+      "tag": "RBAC · 回调网关",
       "brand": "fastapi",
       "sources": [
         {
@@ -360,8 +360,8 @@
     {
       "id": "im",
       "type": "external",
-      "label": "IM 通知",
-      "sublabel": "飞书 / 钉钉卡片",
+      "label": "IM 交互",
+      "sublabel": "卡片回调 · ChatOps",
       "pos": [
         970,
         570
@@ -763,9 +763,9 @@
       "dot": "rose",
       "title": "三道闸门 + 需求分析闭环",
       "items": [
-        "闸门 1：置信度 < 0.8 → 转人工；闸门 2：驳回 / 超时 + 保护目录二级审批",
-        "闸门 3：金丝雀 / 直连发布 + 公告窗口 + 劣化回滚；需求流人工已确认免检",
-        "需求闭环：导出 API → BFF（Code RAG + LLM）方案 / 验收 → 管理员批准启动"
+        "闸门 1：置信度 < 0.8 → 转人工；闸门 2：飞书卡片 / 控制台双通道",
+        "驳回或超时转人工 + 保护目录二级审批；闸门 3：金丝雀 / 直连 + 公告窗口 + 劣化回滚",
+        "需求闭环：导出 API → BFF（Code RAG + LLM）→ 管理员批准；需求流人工已确认免检"
       ]
     },
     {
@@ -774,7 +774,7 @@
       "items": [
         "Qoder 无头 CLI · 隔离工作区（Read/Edit/Write/Grep，禁 Bash）；失败退兜底补丁",
         "watchdog 30s 判活 6 组件自动拉起；demo / MySQL 8 双模存储",
-        "kill switch 失败关闭；流程速查与审计全量留痕"
+        "kill switch 失败关闭；卡片回调验签 + 流程审计全量留痕"
       ]
     }
   ]

@@ -6,9 +6,9 @@
   "status": "pass",
   "visualReview": "pending",
   "artifact": {
-    "path": "/Users/dgjin/dgjinapp/AIOps Agent/diagrams/aiops-tech-architecture.html",
-    "sha256": "2598f4611b96a21fdcba7d6187dbc284d22a2336aca98a3be7ad8acd02125617",
-    "bytes": 868482
+    "path": "/Users/dgjin/dgjinapp/AIOps Agent/aiops-agent/docs/diagrams/aiops-tech-architecture.html",
+    "sha256": "884821fcfb318cd9248b38e4c6ed4495f6348cfc665436905f9e0a1695fd8dcb",
+    "bytes": 868560
   },
   "state": {
     "detail": "read",

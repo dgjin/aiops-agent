@@ -47,6 +47,17 @@
         "note": "置信度、审批、发布三道闸门在不确定路径上默认走向转人工"
       },
       {
+        "id": "im-approval",
+        "label": "IM 卡片审批",
+        "focus": [
+          "approve",
+          "release",
+          "todo",
+          "escalate"
+        ],
+        "note": "飞书卡片按钮 → BFF 回调网关验签 → 审批信号直达；卡片就地回执防重复"
+      },
+      {
         "id": "manual-loop",
         "label": "回炉与待办处置",
         "focus": [
@@ -56,7 +67,7 @@
           "escalate",
           "todo"
         ],
-        "note": "沙箱回炉重生成、shadow 档仅建议不执行；转人工待办指派 / 关闭 / 重试按来源分流"
+        "note": "沙箱回炉重生成、影子续接复用补丁；转人工待办指派 / 关闭 / 重试按来源分流"
       }
     ]
   },
@@ -116,8 +127,7 @@
     ],
     "allowedTerminals": [
       "escalate",
-      "todo",
-      "shadowed"
+      "todo"
     ],
     "requiredEdges": [
       {
@@ -219,7 +229,7 @@
       "col": 4,
       "type": "backend",
       "label": "审批与公告",
-      "sublabel": "15 分钟窗口 · FIFO",
+      "sublabel": "卡片回调 · 15 分钟",
       "tag": "闸门 2"
     },
     {
@@ -247,8 +257,9 @@
       "col": 5,
       "type": "backend",
       "label": "转人工待办",
-      "sublabel": "指派 · 关闭 · 重试修复",
-      "tag": "SLA 30 分钟"
+      "sublabel": "指派 · 关闭 · 重试",
+      "tag": "SLA 30 分钟",
+      "width": 84
     }
   ],
   "edges": [
@@ -314,6 +325,13 @@
       "variant": "dashed"
     },
     {
+      "from": "shadowed",
+      "to": "test",
+      "label": "续接复用补丁",
+      "role": "return",
+      "variant": "dashed"
+    },
+    {
       "from": "triage",
       "to": "escalate",
       "label": "闸门 1：置信度 < 0.8",
@@ -350,7 +368,7 @@
       "title": "三道闸门 + 需求人工确认",
       "items": [
         "闸门 1：置信度 < 0.8 转人工；需求流免检（人工已确认）",
-        "闸门 2：驳回或超时 → 转人工；受保护目录二级审批",
+        "闸门 2：飞书卡片 / 控制台双通道；驳回或超时 → 转人工；受保护目录二级审批",
         "闸门 3：公告 15 分钟 + 劣化回滚；shadow 档仅建议不发布"
       ]
     },
@@ -367,8 +385,8 @@
       "dot": "orange",
       "title": "异常回炉与待办闭环",
       "items": [
-        "沙箱失败回炉重生成；重试超限 → ESCALATED",
-        "待办留痕（actor+时间戳）；SLA 30 分钟自动再升级一次",
+        "沙箱失败回炉重生成；影子建议续接复用原补丁（-resume1 幂等）",
+        "重试超限 → ESCALATED；待办留痕（actor+时间戳）；SLA 30 分钟自动再升级一次",
         "快照冻结不热改 · Temporal 事件历史即审计；kill switch 切回人工"
       ]
     }

@@ -6,9 +6,9 @@
   "status": "pass",
   "visualReview": "pending",
   "artifact": {
-    "path": "/Users/dgjin/dgjinapp/AIOps Agent/diagrams/aiops-dataflow.html",
-    "sha256": "51327348a8c65193c1d1c12d931a2e365cb6e5bbc546d7ba8b7801b1fd5f4410",
-    "bytes": 827171
+    "path": "/Users/dgjin/dgjinapp/AIOps Agent/aiops-agent/docs/diagrams/aiops-dataflow.html",
+    "sha256": "404ca528cbdfd7d16f88a87310fbdb1b59cb83eef7a198d24c9898fc16c92f34",
+    "bytes": 827221
   },
   "state": {
     "detail": "read",
