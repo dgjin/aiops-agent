@@ -97,7 +97,7 @@ def build_components() -> tuple[Component, ...]:
         "--min-lines 100 --factor 3 --cooldown 300" if production else DEFAULT_SURGE_ARGS))
     def script(name: str, *args: str) -> tuple[str, ...]:
         return (str(python), str(ROOT / name), *args)
-    return (
+    components = [
         Component("worker", "aiops_agent.worker", (str(python), "-m", "aiops_agent.worker"), ROOT / "worker.log"),
         Component("bff", "uvicorn bff.app:app", (str(python), "-m", "uvicorn", "bff.app:app",
                   "--host", os.environ.get("AIOPS_BFF_HOST", "127.0.0.1"),
@@ -107,8 +107,18 @@ def build_components() -> tuple[Component, ...]:
                   os.environ.get("AIOPS_WEBHOOK_PORT", "8099")), ROOT / "alert_webhook.log"),
         Component("app_prober", "app_prober.py", script("app_prober.py"), ROOT / "app_prober.log"),
         Component("ship_app_logs", "ship_app_logs.py", script("ship_app_logs.py", "--follow"), ROOT / "ship_app_logs.log"),
-        Component("log_surge_detector", "log_surge_detector.py", script("log_surge_detector.py", *surge), ROOT / "log_surge_detector.log"),
-    )
+    ]
+    # 飞书长连接网关（卡片回传交互接收）：仅应用凭证配置齐全时注册——未配置＝能力
+    # 未启用（网关进程缺凭证会拒绝启动，注册只会造成拉起-退出循环）。
+    if (os.environ.get("AIOPS_FEISHU_APP_ID") or "").strip() and (
+            os.environ.get("AIOPS_FEISHU_APP_SECRET") or "").strip():
+        components.append(Component(
+            "feishu_gateway", "feishu_gateway.py", script("feishu_gateway.py"), ROOT / "feishu_gateway.log",
+        ))
+    components.append(Component(
+        "log_surge_detector", "log_surge_detector.py", script("log_surge_detector.py", *surge), ROOT / "log_surge_detector.log",
+    ))
+    return tuple(components)
 
 
 def maintenance_path() -> Path:

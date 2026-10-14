@@ -2,12 +2,12 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 文档版本 | v1.4 |
-| 日期 | 2026-10-01（v1.6 修订 2026-10-14） |
+| 文档版本 | v1.7 |
+| 日期 | 2026-10-01（v1.7 修订 2026-10-14） |
 | 状态 | 已实现系统（与 aiops-agent/ 工程代码逐项对齐） |
 | 关联文档 | 《AIOps 自动运维智能体系统设计方案》v1.1、《AIOps 自动运维智能体系统实施计划》v1.0、《用户操作手册》、《部署手册》 |
 | 适用范围 | 应用服务器异常自愈、AI 辅助代码修复与自动化发布（含演示环境全链路） |
-| 修订记录 | v1.6（2026-10-14）：飞书卡片回调网关落地（审批交互闭环）——`POST /api/im/card-callback` 接收新版 `card.action.trigger` 回调（Verification Token 验签 via `AIOPS_FEISHU_VERIFY_TOKEN`、挑战握手、加密载荷拒绝），复用角色判定（`AIOPS_IM_USERS`，operator 才可审批）/写守卫/kill switch 转发 Temporal 信号，响应 200 + toast + 处置结果卡（`render_approval_result_card`，防重复点击）；按钮载荷 `wf_id` 改由活动层注入真实流程 ID（`activity.info().workflow_id`，需求/重跑流程与公式值不一致）；middleware 回调通道豁免 Bearer（fail-closed：未配置 503 / 凭证不符 401）；测试基线 1331 用例；v1.5（2026-10-13）：影子建议续接——影子档 SHADOWED 建议归档评估后可续接执行完整链路（`resume_patch` 快照键复用原补丁、首轮跳过生成直入完整沙箱验证；端点 `POST /api/requirements/analyses/{id}/resume-shadow`，续接流程 id 固定 `-resume1` 幂等防重、会话 `approved.wf_id` 重指向并溯源 `resumed_from`）；发布层门禁按策略档位判定（影子档禁止真实发布 / 全链路放行，策略不可确认 fail-closed 防旁路）；测试基线 1305 用例；v1.4（2026-10-13）：生产档切换全链路执行——`release-gate-policy.yaml` 显式声明 `shadow_mode: false`；`validate_runtime_policy` 由「强制影子档」调整为「production 必须显式声明 shadow_mode（true=影子档 / false=全链路），缺失即拒绝启动」防静默漂移；readiness 配置校验标签 `valid_full_chain`；v1.3（2026-10-13）：IM 流程通知补齐——新增接收/需求接收/进入修复三类流程卡片（4.6 共 7 类卡片），工作流调用以 patched 标记守护（flow-intake-notify-g1 / requirement-intake-notify-g1 / fix-start-notify-g1）；activity 13→16；v1.2：测试基线 836 用例；运维治理加固：组件守护单实例锁与档位锁定+一致性校验、开机自启（launchd）、备份与恢复演练、数据清理与日志轮转、doctor 磁盘水位检查、启动档位横幅；v1.1：测试基线 832 用例；默认模型切换 qwen3.8:27b-mlx；新增 Qoder 修复引擎（4.3.3）、需求分析闭环（4.9）、可用性巡检/日志采集/组件守护；BFF 路由扩至 11 域 |
+| 修订记录 | v1.7（2026-10-14）：飞书客户端确认交互落地（长连接模式）——审批卡片发送侧切换为企业自建应用机器人（新增 `aiops_agent/feishu_app.py`：tenant_access_token 缓存、`im/v1/messages` 发卡、`im/v1/chats` 列群；三要素齐全优先于 webhook，失败降级留痕不回落），接收侧新增长连接网关 `feishu_gateway.py`（WSS 免公网订阅 `card.action.trigger` → 注入共享凭证转发 BFF 回调端点 → 回写 toast/结果卡；3 秒预算内转发超时 2.5s；含 CARD 帧改写补丁规避 lark-oapi ≤1.7.4 issue #126）；watchdog 应用凭证齐全时自动加挂（默认仍 6 组件）；`AIOPS_FEISHU_VERIFY_TOKEN` 语义调整为网关↔BFF 共享凭证（长连接无需与飞书后台一致）；测试基线 1364 用例；v1.6（2026-10-14）：飞书卡片回调网关落地（审批交互闭环）——`POST /api/im/card-callback` 接收新版 `card.action.trigger` 回调（Verification Token 验签 via `AIOPS_FEISHU_VERIFY_TOKEN`、挑战握手、加密载荷拒绝），复用角色判定（`AIOPS_IM_USERS`，operator 才可审批）/写守卫/kill switch 转发 Temporal 信号，响应 200 + toast + 处置结果卡（`render_approval_result_card`，防重复点击）；按钮载荷 `wf_id` 改由活动层注入真实流程 ID（`activity.info().workflow_id`，需求/重跑流程与公式值不一致）；middleware 回调通道豁免 Bearer（fail-closed：未配置 503 / 凭证不符 401）；测试基线 1331 用例；v1.5（2026-10-13）：影子建议续接——影子档 SHADOWED 建议归档评估后可续接执行完整链路（`resume_patch` 快照键复用原补丁、首轮跳过生成直入完整沙箱验证；端点 `POST /api/requirements/analyses/{id}/resume-shadow`，续接流程 id 固定 `-resume1` 幂等防重、会话 `approved.wf_id` 重指向并溯源 `resumed_from`）；发布层门禁按策略档位判定（影子档禁止真实发布 / 全链路放行，策略不可确认 fail-closed 防旁路）；测试基线 1305 用例；v1.4（2026-10-13）：生产档切换全链路执行——`release-gate-policy.yaml` 显式声明 `shadow_mode: false`；`validate_runtime_policy` 由「强制影子档」调整为「production 必须显式声明 shadow_mode（true=影子档 / false=全链路），缺失即拒绝启动」防静默漂移；readiness 配置校验标签 `valid_full_chain`；v1.3（2026-10-13）：IM 流程通知补齐——新增接收/需求接收/进入修复三类流程卡片（4.6 共 7 类卡片），工作流调用以 patched 标记守护（flow-intake-notify-g1 / requirement-intake-notify-g1 / fix-start-notify-g1）；activity 13→16；v1.2：测试基线 836 用例；运维治理加固：组件守护单实例锁与档位锁定+一致性校验、开机自启（launchd）、备份与恢复演练、数据清理与日志轮转、doctor 磁盘水位检查、启动档位横幅；v1.1：测试基线 832 用例；默认模型切换 qwen3.8:27b-mlx；新增 Qoder 修复引擎（4.3.3）、需求分析闭环（4.9）、可用性巡检/日志采集/组件守护；BFF 路由扩至 11 域 |
 
 ---
 
@@ -17,7 +17,7 @@
 
 本文档描述 AIOps 自动运维智能体**已落地实现**的系统设计：五层架构、Temporal 工作流编排、三道闸门、各模块真实实现细节、接口契约与容错机制。与《设计方案》（顶层设计）和《实施计划》（工作包拆解）配套，供开发维护、评审验收与生产化改造参照。
 
-本文所有接口名、配置键、环境变量、数据字段均与 `aiops-agent/` 工程代码一一对应，行文中的行为描述已通过单元测试（836 个用例，2026-10-12 基线）与端到端实测验证。
+本文所有接口名、配置键、环境变量、数据字段均与 `aiops-agent/` 工程代码一一对应，行文中的行为描述已通过单元测试（1364 个用例，2026-10-14 基线）与端到端实测验证。
 
 ### 1.2 系统定位
 
@@ -103,8 +103,9 @@
 | Code RAG | `aiops_agent/code_rag.py` | AST 切块、嵌入、FAISS/纯 Python 双后端索引与检索 |
 | 修复 Agent | `aiops_agent/fix_agent.py` | 目标定位、修复 prompt、diff 应用管线、编译校验、兜底补丁 |
 | 沙箱 | `aiops_agent/sandbox.py` | SAST、工作区、Docker/K8s 隔离执行、unittest 解析、TestReport |
-| 通知 | `aiops_agent/notify.py` | 七类卡片渲染（审批/公告/升级/影子建议/接收/需求接收/进入修复）+ 处置结果卡（批准/驳回回执）、投递器（recorded/live/failed）、回调解析（新旧版兼容）+ 操作者提取 |
+| 通知 | `aiops_agent/notify.py` + `aiops_agent/feishu_app.py` | 七类卡片渲染（审批/公告/升级/影子建议/接收/需求接收/进入修复）+ 处置结果卡（批准/驳回回执）、投递器（recorded/live/failed；飞书应用三要素齐全优先应用机器人发卡＝`live/channel=feishu-app`，失败降级不回落 webhook）、回调解析（新旧版兼容）+ 操作者提取 |
 | 回调网关 | `bff/routes/im_callback.py` | 飞书卡片回调端点（验签/角色/写守卫/kill switch/signal/审计/处置结果卡响应），见 4.6.1 |
+| 长连接网关 | `feishu_gateway.py` | 飞书长连接（WSS）接收 `card.action.trigger` → 注入共享凭证转发 BFF 回调端点 → 回写 toast/结果卡；`--list-chats` / `--send-test-card` 辅助工具；含 CARD 帧改写补丁（lark-oapi issue #126）；watchdog 条件托管（应用凭证齐全才注册），见 4.6.1 |
 | 发布 | `aiops_agent/release.py` | ArgoCD 渲染/提交、镜像构建、金丝雀容器、探活观测、晋级/回收 |
 | 演示 CLI | `demo_cli.py` | 启动流程、审批/加速/取消/排队、状态查询、结果获取 |
 | 索引工具 | `index_codebase.py` | 建库 / 检索 CLI（代码块 + 历史工单） |
@@ -124,7 +125,7 @@
 | 应用注册表 | `aiops_agent/app_registry.py`、`app_manifest.py` | 清单/Manifest → 修复契约（关键字/健康路径/专属索引/仓库定位） |
 | 变更关联 | `aiops_agent/changes.py` | 最近发布/配置变更注入 triage 上下文（双通道变更源：外部 feed + ArgoCD 留痕） |
 | 控制台 | `bff/` + `web/` | FastAPI BFF（14 域路由，:8600）+ React SPA（同源托管，局域网可访问） |
-| 组件守护与编排 | `scripts/aiops-watchdog.py`、`scripts/demo-up.sh` | 6 常驻组件巡检自动拉起（单实例锁 + 档位锁定/一致性校验，可交 launchd 托管）/ 一键启动停止与状态（含档位横幅） |
+| 组件守护与编排 | `scripts/aiops-watchdog.py`、`scripts/demo-up.sh` | 常驻组件巡检自动拉起（默认 6 个；飞书应用凭证齐全时含长连接网关共 7 个；单实例锁 + 档位锁定/一致性校验，可交 launchd 托管）/ 一键启动停止与状态（含档位横幅） |
 | 生产交付物 | `deploy/` | Dockerfile、K8s 清单 12 文件（38 资源）、Prometheus、Grafana |
 
 ### 2.3 技术栈
@@ -139,7 +140,7 @@
 | 修复引擎 | 本地 LLM（Ollama，默认）/ Qoder CLI 无头（可选） | `AIOPS_FIX_PROVIDER=ollama/qoder`；Qoder 默认模型 `DeepSeek-Flash`（见 4.3.3） |
 | 向量检索 | FAISS（faiss-cpu）+ 纯 Python 回退 | `IndexFlatIP` + L2 归一化（内积=余弦） |
 | 沙箱 | Docker（本机）/ K8s Job + gVisor（生产） | 镜像 `python:3.12-slim`；禁网、只读、限额 |
-| 通知 | 飞书 / 钉钉自定义机器人 | 交互卡片；支持加签 |
+| 通知 | 飞书（企业自建应用机器人 / 自定义机器人）/ 钉钉自定义机器人 | 交互卡片；应用机器人卡片支持按钮回传（回调经 lark-oapi 长连接，见 4.6.1）；支持加签 |
 | 发布 | ArgoCD API + Docker 滚动 | Application manifest；SLO：错误率 ≤5%、P99 ≤500ms |
 | 生产持久化 | MySQL 8.0 + PyMySQL/SQLAlchemy 2.0 | InnoDB/utf8mb4；`pool_recycle=3600` + `pool_pre_ping`；BIGINT 自增/JSON/ENUM |
 | 多副本限速 | Redis 7（可选） | 滑动窗口存 `aiops:rl:*`；未配置退化为进程内窗口 |
@@ -392,6 +393,8 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 - **安全模型（fail-closed）**：middleware `_CALLBACK_ENDPOINTS` 精确路径豁免 Bearer（飞书无法携带控制台凭证），改以路由内 Verification Token 验签（恒时比较）——`AIOPS_FEISHU_VERIFY_TOKEN` 未配置＝通道关闭（503）、凭证不符＝认证失败（401），挑战握手与动作回调同一校验，不回落常规鉴权；操作者角色按 `AIOPS_IM_USERS` 映射判定（未映射＝viewer，仅 operator 可审批）；写操作复用 `_find_flow`（完整/唯一前缀匹配）+ `_write_guard`（阶段允许 + 防重复）与 kill switch（激活即拒绝）；
 - **审计与可观测**：信号发出后 `invalidate_cache` 刷新缓存、`metrics.observe_gate_event` 计入闸门指标，操作审计 `actor=im:<operator>`、`action=card-callback:approval|second-approval:approve|reject`、`params.channel=feishu-card`；
 - **与同类声明对齐**：操作者身份提取（`extract_callback_operator`）兼容 v2 `event.operator`（open_id/user_id/union_id）与 v1 顶层；响应层写入的 `wf_id` 即按钮回传值，网关内先经 `_find_flow` 解析为真实流程后再发信号。
+- **客户端真实交互链路（2026-10-14 落地，长连接模式）**：发送侧新增应用机器人通道（`feishu_app.py`，三要素齐全时 `NotificationSender` 优先应用发卡——记录 `channel=feishu-app`，失败降级留痕且**不回落** webhook）；接收侧新增长连接网关 `feishu_gateway.py`（WSS 免公网订阅 `card.action.trigger`；`build_forward_payload` 以本进程 `AIOPS_FEISHU_VERIFY_TOKEN` 覆写 `header.token` 后转发 BFF 回调端点，3 秒时限内转发超时 2.5s，任何失败转 `toast.error` 不抛错；操作者 open_id 记入网关日志 `feishu_gateway.log`）；watchdog 条件托管（应用凭证齐全自动加挂为第 7 个组件，未配置默认仍 6 组件）；
+- **上游缺陷规避（lark-oapi ≤1.7.4）**：官方长连接客户端 `_handle_data_frame` 丢弃 `MessageType.CARD` 帧（larksuite/oapi-sdk-python issue #126，表现为点击按钮报错 200340）——网关安装帧类型改写补丁（CARD 帧 `type` 头改写为 `event` 后交官方派发，路由依据 payload 内 `event_type="card.action.trigger"`，响应回写逻辑复用官方），进程内幂等安装，上游修复后可移除。
 
 ### 4.7 执行层（`release.py`）
 
@@ -471,7 +474,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 | triage/fix → Ollama | 出 | `POST /api/chat`（JSON 模式） | `think=false`，`temperature=0.2`；超时 45s |
 | code_rag → Ollama | 出 | embeddings API | `bge-m3:latest`，1024 维 |
 | notify → 飞书/钉钉 | 出 | 群机器人 webhook POST | 加签：飞书秒级补签、钉钉毫秒级签名（query 参数） |
-| 飞书卡片回调 → BFF 网关 | 入 | `POST /api/im/card-callback`（v2 `card.action.trigger`） | 验签 `AIOPS_FEISHU_VERIFY_TOKEN`（未配置 503 / 不符 401）；200 响应 `{toast, card}`（处置结果卡）；契约 `{wf_id, gate, decision}`；非法即拒；见 4.6.1 |
+| 飞书卡片回调 → BFF 网关 | 入 | `POST /api/im/card-callback`（v2 `card.action.trigger`） | 验签 `AIOPS_FEISHU_VERIFY_TOKEN`（未配置 503 / 不符 401）；200 响应 `{toast, card}`（处置结果卡）；契约 `{wf_id, gate, decision}`；非法即拒；长连接模式下由 `feishu_gateway.py` 注入共享凭证转发；见 4.6.1 |
 | release → ArgoCD | 出 | `POST /api/v1/applications` | Bearer token；失败抛错走 activity 重试 |
 | release → 应用容器 | 出 | `GET /health`、`POST /order` | 探活与观测请求（真实 HTTP） |
 | 沙箱 → 运行时 | 出 | Docker CLI / K8s API | 隔离参数见 4.4 |
@@ -622,7 +625,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 | MR 创建 | **已实现**三平台真实创建（GitLab/GitHub/Gitee）+ 降级链（见 4.8） | 按需扩展 Bitbucket 等平台 |
 | K8s 沙箱 | manifest 渲染就绪，本机用 Docker 对齐 | 集群接线：apply Job → 轮询状态 → 读 pod 日志 |
 | WebSocket 公告 | 卡片投递 + 留痕（语义对齐） | 接真实 WS 网关向在线会话推送 |
-| 回调服务端 | **已落地**（2026-10-14）：飞书卡片回调网关 `POST /api/im/card-callback`，含验签/角色/写守卫/kill switch/审计全链（见 4.6.1） | 钉钉按钮回调网关切换：actionURL 契约经外置转发器至等价校验后发信号 |
+| 回调服务端 | **已落地**（2026-10-14）：飞书卡片回调网关 `POST /api/im/card-callback`（应用机器人发卡 + 长连接网关 `feishu_gateway.py` 免公网接收回调），含验签/角色/写守卫/kill switch/审计全链（见 4.6.1） | 钉钉按钮回调网关切换：actionURL 契约经外置转发器至等价校验后发信号 |
 | 向量库 | FAISS（精确检索，演示规模充分） | 数据规模增长后升级 Milvus 等托管向量库 |
 | 修复引擎 | 默认 Ollama（模型随 triage，`qwen3.8:27b-mlx`） | 可切 `AIOPS_FIX_PROVIDER=qoder`（CLI 无头）/ `AIOPS_FIX_MODEL` 换模 |
 | 感知数据源 | 复用本机监控栈（Loki/Alertmanager） | 接生产 Prometheus/OTel/Filebeat，接口不变 |

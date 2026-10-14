@@ -247,6 +247,26 @@ class TestComponentTable(unittest.TestCase):
         surge = comps[-1]
         self.assertEqual(surge.cmd[-4:], ("--min-lines", "100", "--factor", "3"))
 
+    def test_feishu_gateway_registered_only_with_app_credentials(self) -> None:
+        """应用凭证齐全才注册长连接网关（半套/空值不注册，防拉起-退出循环）；surge 恒为末位。"""
+        base = ["worker", "bff", "alert_webhook", "app_prober", "ship_app_logs", "log_surge_detector"]
+        self.assertEqual([c.name for c in watchdog.build_components()], base)
+        for env in ({"AIOPS_FEISHU_APP_ID": "cli_x"},
+                    {"AIOPS_FEISHU_APP_ID": "  ", "AIOPS_FEISHU_APP_SECRET": "sec"}):
+            with self.subTest(env=env), mock.patch.dict(os.environ, env):
+                self.assertEqual([c.name for c in watchdog.build_components()], base)
+        with mock.patch.dict(os.environ, {"AIOPS_FEISHU_APP_ID": "cli_x",
+                                          "AIOPS_FEISHU_APP_SECRET": "sec"}):
+            comps = watchdog.build_components()
+        self.assertEqual(
+            [c.name for c in comps],
+            ["worker", "bff", "alert_webhook", "app_prober", "ship_app_logs",
+             "feishu_gateway", "log_surge_detector"],
+        )
+        gateway_comp = comps[-2]  # surge 保持末位（现有断言不破坏）
+        self.assertEqual(gateway_comp.cmd, (str(comps[0].cmd[0]), str(watchdog.ROOT / "feishu_gateway.py")))
+        self.assertTrue((watchdog.ROOT / "feishu_gateway.py").is_file())
+
 
 class TestModeAndLock(unittest.TestCase):
     """档位锁定与单实例锁（P1/P2）：防档位混用、防双守护。"""

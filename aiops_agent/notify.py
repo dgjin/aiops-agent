@@ -30,6 +30,13 @@
     AIOPS_NOTIFY_CALLBACK_BASE                  钉钉按钮回调基址（默认本机演示地址）
     AIOPS_FEISHU_VERIFY_TOKEN                   飞书卡片回调 Verification Token
                                                 （未配置＝回调通道关闭，BFF 侧读取）
+    AIOPS_FEISHU_APP_ID / AIOPS_FEISHU_APP_SECRET  应用机器人凭证（与接收方三要素
+                                                齐全时飞书卡片经应用通道发送，按钮
+                                                可回传交互；自定义机器人 webhook
+                                                发送的卡片不支持回传）
+    AIOPS_FEISHU_RECEIVE_ID                     应用通道接收方（群 chat_id 或 open_id）
+    AIOPS_FEISHU_RECEIVE_ID_TYPE                接收方类型（chat_id / open_id / email，
+                                                默认 chat_id）
 """
 
 from __future__ import annotations
@@ -45,6 +52,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from . import feishu_app
 from .models import Alert, Patch, RequirementTask, RootCause, TestReport
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -448,6 +456,39 @@ class NotificationSender:
             if callback_base is not None
             else os.environ.get("AIOPS_NOTIFY_CALLBACK_BASE", DEFAULT_CALLBACK_BASE)
         ).rstrip("/")
+        # 应用机器人通道（三要素齐全时优先生效）：卡片回传交互（审批按钮）只能由
+        # 应用发送的卡片承载——自定义群机器人 webhook 发送的卡片仅支持跳转 URL。
+        self.feishu_app_id = (os.environ.get("AIOPS_FEISHU_APP_ID") or "").strip()
+        self.feishu_app_secret = (os.environ.get("AIOPS_FEISHU_APP_SECRET") or "").strip()
+        self.feishu_receive_id = (os.environ.get("AIOPS_FEISHU_RECEIVE_ID") or "").strip()
+        self.feishu_receive_id_type = (
+            (os.environ.get("AIOPS_FEISHU_RECEIVE_ID_TYPE") or "").strip() or "chat_id"
+        )
+
+    def _feishu_app_ready(self) -> bool:
+        """应用机器人通道是否可用（provider=feishu 且凭证与接收方三要素齐全）。"""
+        return bool(self.feishu_app_id and self.feishu_app_secret and self.feishu_receive_id)
+
+    def _send_via_feishu_app(self, message: dict, msg_id: str, record: Path) -> dict:
+        """应用机器人通道投递（卡片可回传交互）；失败降级不抛错。
+
+        与 webhook 通道的差异：应答判定由 feishu_app 内部完成（code==0 才成功），
+        本方法只负责渠道衔接、留痕关联与降级包装。
+        """
+        card = message.get("card")
+        if not isinstance(card, dict):
+            return {
+                "mode": "failed", "msg_id": msg_id, "error": "消息非交互卡片结构，应用通道跳过",
+                "path": str(record),
+            }
+        try:
+            message_id = feishu_app.send_card(card, self.feishu_receive_id, self.feishu_receive_id_type)
+        except feishu_app.FeishuAppError as exc:
+            return {"mode": "failed", "msg_id": msg_id, "error": str(exc), "path": str(record)}
+        result = {"mode": "live", "msg_id": msg_id, "path": str(record), "channel": "feishu-app"}
+        if message_id:
+            result["message_id"] = message_id
+        return result
 
     def _prepare(self, message: dict) -> tuple[str, dict]:
         """按 provider 构造请求 URL 与请求体（含加签）。"""
@@ -482,13 +523,15 @@ class NotificationSender:
             return None, ""
 
     def send(self, message: dict, msg_id: str) -> dict:
-        """投递卡片：始终留痕；配置 webhook 时真实 POST。失败降级（通知不阻断主流程）。
-
+        """投递卡片：始终留痕；应用通道或 webhook 真实发送。失败降级（不阻断主 流程）。
         成功 = HTTP 2xx 且业务应答码为 0；仅看 HTTP 状态会把机器人拒收误报为 live。
+        通道优先级：应用机器人（三要素配置齐全；卡片可回传交互）→ 群机器人 webhook。
         """
         NOTIFY_DIR.mkdir(parents=True, exist_ok=True)
         record = NOTIFY_DIR / f"{msg_id}.json"
         record.write_text(json.dumps(message, ensure_ascii=False, indent=2), encoding="utf-8")
+        if self.provider == "feishu" and self._feishu_app_ready():
+            return self._send_via_feishu_app(message, msg_id, record)
         if not self.webhook:
             return {"mode": "recorded", "msg_id": msg_id, "path": str(record)}
         url, body = self._prepare(message)

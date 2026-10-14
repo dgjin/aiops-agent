@@ -2,11 +2,11 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 文档版本 | v1.1 |
-| 日期 | 2026-10-12 |
+| 文档版本 | v1.8 |
+| 日期 | 2026-10-12（v1.8 修订 2026-10-14） |
 | 适用对象 | SRE / 实施工程师 / 环境维护人员 |
 | 关联文档 | 《系统设计说明书》、《用户操作手册》 |
-| 修订记录 | v1.7（2026-10-14）：飞书卡片回调网关（审批交互落地）——`POST /api/im/card-callback` 接收 `card.action.trigger` 回调并直通 Temporal 审批信号（Verification Token 验签、挑战握手、加密载荷拒绝、200+toast 响应含处置结果卡）；新增环境变量 `AIOPS_FEISHU_VERIFY_TOKEN`（未配置＝通道关闭）与飞书后台配置步骤（见 3.9，原 3.9 MCP 顺延为 3.10）；测试基线 1331 用例；v1.1（2026-10-12）：同步最新工程现状——BFF 控制台（0.0.0.0:8600，支持局域网访问）、可用性巡检 / 日志采集 / 组件守护、需求基线闭环、Qoder 修复引擎、模型默认值切换（qwen3.8:27b-mlx）、测试基线 836 用例；v1.2（2026-10-12）：运维治理（沙箱清理 / 日志轮转 / 数据备份与恢复演练 / launchd 开机自启）、watchdog 单实例锁与档位锁定；v1.3（2026-10-12）：P1 生产就绪续轮——Temporal dev server 持久化语义实测文档化（§2.4.1）、watchdog RSS 内存守护（AIOPS_WATCHDOG_RSS_MB，doctor「组件内存」检查项）、沙箱产物独立卷 env 化（AIOPS_SANDBOX_ROOT / AIOPS_QODER_ROOT，代码/清理/doctor/K8s 同源）、测试基线 857 用例；v1.4（2026-10-13）：IM 流程通知补齐（接收/需求接收/进入修复卡片，activity 13→16）、测试基线 1289 用例；v1.5（2026-10-13）：生产档切换全链路执行（`release-gate-policy.yaml` 显式 `shadow_mode: false`；生产档「必须显式声明档位」校验保留），策略变更后须 `./start.sh restart` 受控重启、测试基线 1290 用例；v1.6（2026-10-13）：影子建议续接（`resume-shadow` 端点复用影子档补丁续接完整链路）；发布层门禁按策略档位判定（影子档禁止真实发布 / 全链路放行；已注册直连型应用 `deploy_canary` 放行）、测试基线 1305 用例 |
+| 修订记录 | v1.8（2026-10-14）：飞书客户端确认交互落地（长连接模式）——审批卡片改由企业自建应用机器人发送（`AIOPS_FEISHU_APP_ID` / `AIOPS_FEISHU_APP_SECRET` / `AIOPS_FEISHU_RECEIVE_ID` 三要素齐全自动启用，未配置回落群机器人 webhook）；新增 `feishu_gateway.py` 长连接网关（WSS 接收 `card.action.trigger` → 注入共享凭证转发 BFF 回调端点；含 CARD 帧改写补丁规避 lark-oapi ≤1.7.4 缺陷 issue #126），watchdog 在应用凭证齐全时自动加挂（默认仍 6 组件）；`AIOPS_FEISHU_VERIFY_TOKEN` 调整为网关↔BFF 共享凭证（长连接模式无需与飞书后台一致）；3.9 改写为长连接主模式（原 HTTP 回调列为备选）；测试基线 1364 用例；v1.7（2026-10-14）：飞书卡片回调网关（审批交互落地）——`POST /api/im/card-callback` 接收 `card.action.trigger` 回调并直通 Temporal 审批信号（Verification Token 验签、挑战握手、加密载荷拒绝、200+toast 响应含处置结果卡）；新增环境变量 `AIOPS_FEISHU_VERIFY_TOKEN`（未配置＝通道关闭）与飞书后台配置步骤（见 3.9，原 3.9 MCP 顺延为 3.10）；测试基线 1331 用例；v1.1（2026-10-12）：同步最新工程现状——BFF 控制台（0.0.0.0:8600，支持局域网访问）、可用性巡检 / 日志采集 / 组件守护、需求基线闭环、Qoder 修复引擎、模型默认值切换（qwen3.8:27b-mlx）、测试基线 836 用例；v1.2（2026-10-12）：运维治理（沙箱清理 / 日志轮转 / 数据备份与恢复演练 / launchd 开机自启）、watchdog 单实例锁与档位锁定；v1.3（2026-10-12）：P1 生产就绪续轮——Temporal dev server 持久化语义实测文档化（§2.4.1）、watchdog RSS 内存守护（AIOPS_WATCHDOG_RSS_MB，doctor「组件内存」检查项）、沙箱产物独立卷 env 化（AIOPS_SANDBOX_ROOT / AIOPS_QODER_ROOT，代码/清理/doctor/K8s 同源）、测试基线 857 用例；v1.4（2026-10-13）：IM 流程通知补齐（接收/需求接收/进入修复卡片，activity 13→16）、测试基线 1289 用例；v1.5（2026-10-13）：生产档切换全链路执行（`release-gate-policy.yaml` 显式 `shadow_mode: false`；生产档「必须显式声明档位」校验保留），策略变更后须 `./start.sh restart` 受控重启、测试基线 1290 用例；v1.6（2026-10-13）：影子建议续接（`resume-shadow` 端点复用影子档补丁续接完整链路）；发布层门禁按策略档位判定（影子档禁止真实发布 / 全链路放行；已注册直连型应用 `deploy_canary` 放行）、测试基线 1305 用例 |
 
 ---
 
@@ -21,7 +21,7 @@
 | 日志/告警 | 复用本机 Loki + Alertmanager（可选） | Prometheus + Alertmanager + Loki/ELK |
 | 沙箱 | Docker 容器隔离（`--network none` 等） | K8s Job + gVisor（manifest 已就绪） |
 | 发布 | ArgoCD 留痕 + Docker 真实滚动 | ArgoCD 真实 API + Argo Rollouts |
-| 通知 | 留痕模式 / 真实群机器人 webhook | 飞书/钉钉 + 回调网关 |
+| 通知 | 留痕模式 / 真实投递（飞书应用机器人卡片可交互） | 飞书/钉钉 + 长连接回调网关 |
 
 > 本手册第 2-4 章为**默认路径**：一台 macOS/Linux 机器即可完成全链路部署与验证；第 5 章给出生产切换的接线点清单。
 
@@ -37,7 +37,7 @@
 | Alertmanager | 可选（告警自动触发） | 任意 0.2x | 9093 |
 | 稳定容器 | 发布链路必需 | 由 demo-app 构建 | 18080 |
 
-> 此外，系统自身有 **6 个常驻组件**（worker、BFF 控制台 `:8600`、告警接入 `:8099`、可用性巡检、日志采集、突增检测），并由 `scripts/aiops-watchdog.py` 组件守护看护（每 30 秒巡检、崩溃自动拉起，可经 launchd 托管实现登录自启，见 7.6）；日常演示建议用 `scripts/demo-up.sh` 一键启动（见 3.1）。
+> 此外，系统自身有 **6 个常驻组件**（worker、BFF 控制台 `:8600`、告警接入 `:8099`、可用性巡检、日志采集、突增检测），并由 `scripts/aiops-watchdog.py` 组件守护看护（每 30 秒巡检、崩溃自动拉起，可经 launchd 托管实现登录自启，见 7.6）；配置飞书应用凭证（`AIOPS_FEISHU_APP_ID` / `AIOPS_FEISHU_APP_SECRET`）后自动加挂第 7 个组件「飞书长连接网关」（`feishu_gateway.py`，见 3.9）；日常演示建议用 `scripts/demo-up.sh` 一键启动（见 3.1）。
 
 ---
 
@@ -79,7 +79,7 @@ export AIOPS_POLICY_PATH=./demo-policy.yaml
 .venv/bin/python demo_cli.py start --service order --alert-id smoke-001
 ```
 
-> **更省事的方式**：`bash scripts/demo-up.sh` 一键拉起全部 6 个常驻组件与组件守护（幂等，已运行组件自动跳过；演示播种用 `demo` 子命令，仅 demo 档）——详见 3.1。
+> **更省事的方式**：`bash scripts/demo-up.sh` 一键拉起全部常驻组件与组件守护（幂等，已运行组件自动跳过；演示播种用 `demo` 子命令，仅 demo 档）——详见 3.1。
 
 ### 2.1 前置检查
 
@@ -278,7 +278,7 @@ export AIOPS_POLICY_PATH=./demo-policy.yaml
 本地（production / demo 档均可）推荐用一键脚本编排全部常驻组件（替代逐一手工启动 3.2-3.5 各组件）：
 
 ```bash
-./start.sh                         # 受控启动（推荐入口）：依赖与端口预检后拉起 6 常驻组件与组件守护（无隐式动作）
+./start.sh                         # 受控启动（推荐入口）：依赖与端口预检后拉起常驻组件（默认 6 个）与组件守护（无隐式动作）
 ./start.sh web                     # 额外在前台启动前端 vite dev（热更，5273；Ctrl+C 只停前端）
 ./start.sh install                 # 将组件守护交 launchd 托管（登录自启；受控重装同命令）
 ./start.sh sync-ip                 # 按当前网络地址同步生产部署（Caddyfile/settings/监控片段 + 重签 TLS、reload Caddy；--dry-run 预览）
@@ -288,9 +288,9 @@ bash scripts/demo-up.sh down       # 停止全部常驻组件（含组件守护�
 bash scripts/demo-up.sh env        # 仅依赖与端口预检（不启动任何服务）
 ```
 
-脚本档位=环境变量 > .env > production（缺省 production），启动日志如实打印有效配置快照；按序启动 worker → BFF(:8600) → 告警接入(:8099) → 可用性巡检 → 日志采集 → 突增检测 → **组件守护**（不自动灌日志/起流程；演示播种用 `bash scripts/demo-up.sh demo`，仅 demo 档）。
+脚本档位=环境变量 > .env > production（缺省 production），启动日志如实打印有效配置快照；按序启动 worker → BFF(:8600) → 告警接入(:8099) → 可用性巡检 → 日志采集 → 飞书长连接网关〔条件启动〕 → 突增检测 → **组件守护**（不自动灌日志/起流程；演示播种用 `bash scripts/demo-up.sh demo`，仅 demo 档）。
 
-组件守护 `scripts/aiops-watchdog.py` 每 30 秒巡检 6 个常驻组件，异常自动拉起；崩溃风暴（窗口内 5 次）自动冷却 10 分钟。守护启动时获取单实例锁（`data/aiops-watchdog.lock`，防双守护）并锁定生效档位（环境变量 > .env > production），显式传给被拉起组件。参数：`AIOPS_WATCHDOG_INTERVAL`（巡检周期）、`AIOPS_WATCHDOG_SURGE_ARGS`（突增检测器拉起参数）。另按 RSS 内存水位守护（默认 1024MB，`AIOPS_WATCHDOG_RSS_MB` 可调，0=关闭）：超限即就地重启——macOS 无 cgroup 场景的组件软限额（P1，2026-10-12；`demo_cli.py doctor` 的「组件内存」检查项同口径）。
+组件守护 `scripts/aiops-watchdog.py` 每 30 秒巡检已注册常驻组件（默认 6 个；飞书应用凭证齐全时含长连接网关共 7 个），异常自动拉起；崩溃风暴（窗口内 5 次）自动冷却 10 分钟。守护启动时获取单实例锁（`data/aiops-watchdog.lock`，防双守护）并锁定生效档位（环境变量 > .env > production），显式传给被拉起组件。参数：`AIOPS_WATCHDOG_INTERVAL`（巡检周期）、`AIOPS_WATCHDOG_SURGE_ARGS`（突增检测器拉起参数）。另按 RSS 内存水位守护（默认 1024MB，`AIOPS_WATCHDOG_RSS_MB` 可调，0=关闭）：超限即就地重启——macOS 无 cgroup 场景的组件软限额（P1，2026-10-12；`demo_cli.py doctor` 的「组件内存」检查项同口径）。
 
 开机自启：`./start.sh install`（等价 `bash scripts/launchd-install.sh install`）将守护交由 launchd 托管（登录自启、崩溃自动重启，详见 7.6）。
 
@@ -384,6 +384,7 @@ export AIOPS_NOTIFY_CALLBACK_BASE="https://<你的回调网关>/aiops/callback"
 
 > 通知发送为「先留痕、后 POST」，投递结果以机器人应答码为准（飞书 `code` / 钉钉 `errcode` 非零 = `failed`，如加签不符 `19021`；网络异常同理）；任何失败均自动降级、不阻断修复流程。
 > 本机生产环境推荐直接写入工程根 `.env`（`AIOPS_FEISHU_WEBHOOK=...` / `AIOPS_NOTIFY_SECRET=...`），修改后执行 `./start.sh restart` 受控重启生效（环境指纹变化触发）。
+> 飞书审批卡片的「批准 / 驳回」按钮回传交互（应用机器人发送 + 长连接接收回调）见 3.9。
 
 ### 3.8 IM 通道（ChatOps：群内查询与审批）
 
@@ -405,22 +406,32 @@ curl -X POST http://127.0.0.1:8600/api/im/command \
 
 回复契约：命令级失败（权限不足 / 未找到流程 / 前置校验不过）也返回 200 + `ok:false`（`reply` 含原因，由网桥转回群）；仅「载荷无法解析 = 400」「系统级故障（kill switch / Temporal 不可达）= 5xx」走错误状态码。审批执行复用流程域同款写守卫；写命令受 kill switch 阻断（查询命令保留可用），操作审计 actor 记为 `im:<sender>`。
 
-### 3.9 飞书卡片回调网关（审批交互，2026-10-14 落地）
+### 3.9 飞书客户端确认交互（长连接模式，2026-10-14 落地）
 
-审批卡片上的「批准 / 驳回」按钮点击后由飞书服务器回调本系统内置网关（**无需新增进程**，BFF 域 `bff/routes/im_callback.py`），全链：验签 → 解析按钮载荷与操作者身份 → 角色判定 → 写守卫 → Temporal 审批信号 → 响应 toast + 处置结果卡（就地替换按钮区，防重复点击）。
+审批卡片上的「批准 / 驳回」按钮点击后真实生效（飞书客户端内直接确认），链路分发送与接收两端，全部落地于本工程、无需外置服务：
+
+- **发送侧（应用机器人）**：卡片改由**企业自建应用机器人**发送——群自定义机器人 webhook 的卡片按钮不支持回传（官方限制，点击无反应）；`.env` 配置应用三要素后通知通道自动切换优先应用发送（未配置回落 webhook 留痕，见 3.7）；
+- **接收侧（长连接网关）**：`feishu_gateway.py` 以**长连接**（WSS，主动出站、免公网域名/内网穿透）订阅 `card.action.trigger` 回调，注入共享凭证后转发 BFF 内置端点 `POST /api/im/card-callback`（`bff/routes/im_callback.py`），全链：验签 → 解析按钮载荷与操作者身份 → 角色判定 → 写守卫 → Temporal 审批信号 → 回写 toast + 处置结果卡（就地替换按钮区，防重复点击）。
 
 ```bash
-# .env：Verification Token（必填；未配置＝通道关闭 503）。
-# 取值 = 飞书开放平台：事件与回调 → 加密策略 → Verification Token（卡片回调需明文模式，Encrypt Key 不启用）
-AIOPS_FEISHU_VERIFY_TOKEN=<openssl rand -hex 24 或飞书后台既有 Token>
+# .env：应用三要素 + 网关↔BFF 共享凭证（修改后 ./start.sh restart 受控重启生效）
+AIOPS_FEISHU_APP_ID=cli_xxxxxxxx             # 开放平台 → 应用 → 凭证与基础信息
+AIOPS_FEISHU_APP_SECRET=xxxxxxxx
+AIOPS_FEISHU_RECEIVE_ID=oc_xxxxxxxx          # 目标群 chat_id（取法见下第 3 步）
+AIOPS_FEISHU_RECEIVE_ID_TYPE=chat_id         # 可选，默认 chat_id
+AIOPS_FEISHU_VERIFY_TOKEN=<openssl rand -hex 24>   # 共享凭证：网关与 BFF 同值即可（长连接模式无需与飞书后台一致）；未配置＝回调通道关闭 503
 ```
 
-**飞书后台配置（开发者后台 → 应用 → 事件与回调 → 回调配置）**：
+**飞书开放平台配置（开发者后台 → 应用）**：
 
-1. 订阅方式选「将回调发送至开发者服务器」，请求地址填 `https://<本机IP>:8643/api/im/card-callback`（生产档经 Caddy，见第 9 章；本机演示可填 `http://127.0.0.1:8600/api/im/card-callback`）；
-2. 加密策略保持**明文模式**（启用 Encrypt Key 会被网关明确拒绝 400）；
-3. 保存时飞书发起 `url_verification` 挑战握手，网关校验 Token 后回显 `challenge`——若报校验失败，先核对 `AIOPS_FEISHU_VERIFY_TOKEN` 与后台一致性再重启 BFF；
-4. 仅需订阅新版卡片回调（`card.action.trigger`）；飞书后台「回调订阅」自动对卡片生效，无需额外订阅事件。
+1. 创建**企业自建应用**并添加「机器人」能力；「事件与回调」订阅方式选 **「使用长连接接收回调」**（免公网要求），订阅新版卡片回调 `card.action.trigger`；
+2. 权限管理添加 `im:message:send_as_bot`（发卡）与 `im:chat:readonly`（列群取 chat_id），发布应用版本并经管理员审批生效；
+3. 把机器人拉进目标群，执行 `.venv/bin/python feishu_gateway.py --list-chats` 取群 `chat_id` 填入 `.env`（亦可在群设置页直接查看），`./start.sh restart` 生效（watchdog 检测到应用凭证齐全后自动加挂长连接网关）；
+4. 自检：`.venv/bin/python feishu_gateway.py --send-test-card` 发验证卡，点击「验证回调」后 `feishu_gateway.log` 出现 `收到卡片回调 operator=ou_...` 即链路已通；把该 open_id 按角色填入 `AIOPS_IM_USERS` 后重启，即可用于真实审批。
+
+> 上游缺陷说明：lark-oapi ≤1.7.4 长连接客户端会丢弃 CARD 帧（larksuite/oapi-sdk-python issue #126，表现为飞书客户端点击按钮报错 200340），网关内置帧类型改写补丁自动规避（启动日志「已安装 CARD 帧改写补丁」）；上游修复后可移除。
+>
+> 备选模式（HTTP 回调，要求 BFF 具备公网可达地址）：订阅方式改选「将回调发送至开发者服务器」，请求地址填 `https://<本机IP>:8643/api/im/card-callback`（生产档经 Caddy，见第 9 章；本机演示可填 `http://127.0.0.1:8600/api/im/card-callback`）；此时 `AIOPS_FEISHU_VERIFY_TOKEN` 须改为飞书后台「事件与回调」页的 Verification Token（随回调送达，保存配置时飞书发起 `url_verification` 挑战握手，网关校验 Token 后回显 `challenge`）。两种方式均保持**明文模式**（启用 Encrypt Key 会被网关明确拒绝 400）。
 
 审批人身份取自回调载荷 `event.operator`（open_id/user_id/union_id 依次尝试），角色按 `AIOPS_IM_USERS` 映射判定——**未映射＝viewer（仅可查询），仅 operator 可审批**；审批只认发卡时嵌入的运行中真实流程 ID（旧卡片含公式 ID 的，走控制台/ChatOps 兼容）。手工验证：
 
@@ -520,7 +531,9 @@ export AIOPS_MCP_TOKEN=<控制台令牌>                 # 透传 BFF 鉴权；�
 | `AIOPS_QODER_ROOT` | `./data/qoder` | worker（qoder） | Qoder 隔离工作区根目录 |
 | `AIOPS_IM_TOKEN` | 空（通道关闭） | BFF | IM 通道（ChatOps）鉴权令牌，见 3.8 |
 | `AIOPS_IM_USERS` | 空（全员 viewer） | BFF | 发送者角色映射 JSON（`{"<sender>":"operator"}` 或 `{"<sender>":{"role":"admin"}}`） |
-| `AIOPS_FEISHU_VERIFY_TOKEN` | 空（通道关闭 503） | BFF | 飞书卡片回调验签 Token（= 飞书后台 Verification Token，明文模式），见 3.9 |
+| `AIOPS_FEISHU_APP_ID` / `AIOPS_FEISHU_APP_SECRET` | 空（应用通道关闭） | notify / feishu_gateway | 企业自建应用凭证：应用机器人发卡（notify）与长连接网关（feishu_gateway），见 3.9 |
+| `AIOPS_FEISHU_RECEIVE_ID` / `AIOPS_FEISHU_RECEIVE_ID_TYPE` | 空 / `chat_id` | notify / feishu_gateway | 卡片接收方（群 chat_id 等）与 ID 类型，见 3.9 |
+| `AIOPS_FEISHU_VERIFY_TOKEN` | 空（通道关闭 503） | BFF / feishu_gateway | 网关↔BFF 共享凭证（长连接模式两端同值即可，无需与飞书后台一致；HTTP 备选模式＝飞书后台 Verification Token），见 3.9 |
 | `AIOPS_MCP_BASE_URL` | `http://127.0.0.1:8600` | mcp_server | MCP server 转发的 BFF 地址，见 3.10 |
 | `AIOPS_MCP_TOKEN` | 空（工具调用 401） | mcp_server | MCP 侧透传的控制台令牌（决定能力边界），见 3.10 |
 
@@ -672,7 +685,7 @@ docker compose --profile obs up -d    # Prometheus http://127.0.0.1:9095 / Grafa
 | --- | --- | --- | --- |
 | 1 | 沙箱 | Docker 容器真实隔离已落地；K8s Job manifest 渲染保留 | 集群内切换 gVisor runtimeClass 提交 `batch/v1 Job` |
 | 2 | 发布 | ArgoCD 真实提交 + Docker 滚动金丝雀已落地 | 配置 `AIOPS_ARGOCD_URL/TOKEN`；镜像前缀指向制品仓库 |
-| 3 | 通知 | 飞书/钉钉交互卡片 + **钉钉**回调解析已落地 | 飞书卡片回调网关**已落地**（`POST /api/im/card-callback`，见 3.9）；钉钉按钮回调需外置网关转发等价信号 |
+| 3 | 通知 | 飞书/钉钉交互卡片 + **钉钉**回调解析已落地 | 飞书卡片回调网关**已落地**（2026-10-14：应用机器人发卡 + 长连接网关接收回调，`POST /api/im/card-callback`，见 3.9）；钉钉按钮回调需外置网关转发等价信号 |
 | 4 | 公告 | 卡片投递 + 留痕已落地 | 接 WebSocket 网关推送站内弹窗 |
 | 5 | 感知层 | 本机 Loki/Alertmanager 实测链路 | 接生产 Prometheus/Alertmanager/Loki/OTel；`aiops_demo` 标签改专用 receiver |
 | 6 | MR | **已实现**三平台真实创建（GitLab/GitHub/Gitee，`aiops_agent/git_integration.py`） | 策略 `git:` 段配置 `repo_url` + `AIOPS_GIT_TOKEN` 注入 |
@@ -772,7 +785,7 @@ docker compose --profile obs up -d    # Prometheus http://127.0.0.1:9095 / Grafa
 ### 7.6 开机自启（launchd，macOS）
 
 ```bash
-bash scripts/launchd-install.sh install    # 安装：登录自启 + 崩溃自动重启（仅托管 watchdog 一个进程，6 组件由其巡检拉起）
+bash scripts/launchd-install.sh install    # 安装：登录自启 + 崩溃自动重启（仅托管 watchdog 一个进程，常驻组件由其巡检拉起）
 bash scripts/launchd-install.sh status     # 查看托管状态与守护进程
 bash scripts/launchd-install.sh uninstall  # 卸载（常驻组件保持运行）
 ```

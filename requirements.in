@@ -21,3 +21,4 @@ opentelemetry-api==1.45.0
 opentelemetry-sdk==1.45.0
 opentelemetry-instrumentation-fastapi==0.66b0
 opentelemetry-exporter-otlp-proto-http==1.45.0
+lark-oapi==1.7.4

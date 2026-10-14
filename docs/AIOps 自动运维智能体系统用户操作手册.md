@@ -2,11 +2,11 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 文档版本 | v1.5 |
-| 日期 | 2026-10-01（v1.5 修订 2026-10-14） |
+| 文档版本 | v1.6 |
+| 日期 | 2026-10-01（v1.6 修订 2026-10-14） |
 | 适用对象 | 运维值班人员、审批人（含二级审批人）、演示人员、联调开发 |
 | 关联文档 | 《系统设计说明书》、《部署手册》 |
-| 修订记录 | v1.5（2026-10-14）：飞书审批卡片按钮直达审批落地（点击→内置回调网关→生效→卡片变回执）——操作者需映射为 operator（`AIOPS_IM_USERS`），成功/失败均有 toast 与卡片回执，防重复点击；钉钉按钮仍需外置网关转发（第 7 章）；v1.1：控制台四级导航（总览/跨系统待办/被监控系统/平台）与局域网访问；一键启动与组件守护指引（demo-up.sh）。v1.2（2026-10-13）：production 档收敛 loopback、经本机 Caddy HTTPS（8643）进入（见 9.1/9.2/9.3/9.5；产物未运行验收）；v1.3（2026-10-13）：IM 流程通知补齐（接收/需求接收/进入修复状态消息，卡片共七类）；生产档切换全链路执行（`shadow_mode: false`，MR → 审批 → 公告 → 金丝雀）；v1.4（2026-10-13）：影子建议续接——影子档（SHADOWED）建议归档评估后可续接执行完整链路（复用原补丁、不重新生成；`POST /api/requirements/analyses/{id}/resume-shadow`，见 5.4） |
+| 修订记录 | v1.6（2026-10-14）：飞书客户端确认交互落地（长连接模式）——审批卡片改由企业自建应用机器人发送、长连接网关（`feishu_gateway.py`，watchdog 托管）接收回调，点击「批准 / 驳回」在飞书客户端内直接生效；未配置应用凭证时回落群机器人 webhook 仅留痕；配置与自检步骤见 7.1；v1.5（2026-10-14）：飞书审批卡片按钮直达审批落地（点击→内置回调网关→生效→卡片变回执）——操作者需映射为 operator（`AIOPS_IM_USERS`），成功/失败均有 toast 与卡片回执，防重复点击；钉钉按钮仍需外置网关转发（第 7 章）；v1.1：控制台四级导航（总览/跨系统待办/被监控系统/平台）与局域网访问；一键启动与组件守护指引（demo-up.sh）。v1.2（2026-10-13）：production 档收敛 loopback、经本机 Caddy HTTPS（8643）进入（见 9.1/9.2/9.3/9.5；产物未运行验收）；v1.3（2026-10-13）：IM 流程通知补齐（接收/需求接收/进入修复状态消息，卡片共七类）；生产档切换全链路执行（`shadow_mode: false`，MR → 审批 → 公告 → 金丝雀）；v1.4（2026-10-13）：影子建议续接——影子档（SHADOWED）建议归档评估后可续接执行完整链路（复用原补丁、不重新生成；`POST /api/requirements/analyses/{id}/resume-shadow`，见 5.4） |
 
 ---
 
@@ -176,7 +176,7 @@ python demo_cli.py approve --wf-id aiops-fix-order-a-1001 --decision approve
 python demo_cli.py approve --wf-id aiops-fix-order-a-1001 --decision reject
 ```
 
-- 收到**飞书**审批卡片后，直接点击卡片上的「批准 / 驳回」按钮即可完成审批（2026-10-14 起内置回调网关已打通）：操作者需在 `AIOPS_IM_USERS` 中映射为 operator，成功后卡片就地替换为处置结果（toast + 绿/红回执卡，防重复点击）；权限不足 / 阶段不符 / 重复点击均会在 toast 中提示原因；钉钉按钮需外置网关转发（见第 7 章）；
+- 收到**飞书**审批卡片后，直接点击卡片上的「批准 / 驳回」按钮即可完成审批（2026-10-14 起真实链路打通：应用机器人发卡 + 长连接接收回调，配置与自检见 7.1）：操作者需在 `AIOPS_IM_USERS` 中映射为 operator，成功后卡片就地替换为处置结果（toast + 绿/红回执卡，防重复点击）；权限不足 / 阶段不符 / 重复点击均会在 toast 中提示原因；钉钉按钮需外置网关转发（见第 7 章）；
 - **超时策略（锁定）**：规定时间（演示 300s / 生产 30m）内无响应 → **自动驳回**并升级值班负责人（`gate2:timeout->reject`）；驳回即关闭流程并留痕。
 
 #### 4.3.2 二级审批（受保护目录）
@@ -423,14 +423,17 @@ python demo_cli.py status --wf-id aiops-fix-nl2sql-logsurge-<HHMMSS>
 
 ## 7 审批卡片的回调说明（对接方）
 
-### 7.1 飞书（内置网关，无需自建）
+### 7.1 飞书（应用机器人 + 长连接，无需自建服务）
 
-审批卡片上的「批准 / 驳回」按钮点击后，飞书服务器回调本系统 BFF 内置网关 `POST /api/im/card-callback`（Verification Token 经 `AIOPS_FEISHU_VERIFY_TOKEN` 配置，飞书后台接线步骤见《部署手册》3.9）。点击后立即：
+审批卡片由**企业自建应用机器人**发送（群自定义机器人 webhook 的卡片按钮不支持回传，点击无反应）；卡片上的「批准 / 驳回」点击后，由 `feishu_gateway.py` 长连接网关接收回调并转发本系统 BFF 内置端点 `POST /api/im/card-callback`（免公网域名；应用创建、三要素配置与自检步骤见《部署手册》3.9）。点击后立即：
 
-1. 验签 → 解析按钮载荷（`wf_id/gate/decision`）与操作者身份（`event.operator`）；
-2. 按 `AIOPS_IM_USERS` 判定操作者角色（未映射＝viewer，仅 operator 可审批）；
-3. 写守卫（阶段允许 / 防重复）+ kill switch 检查 → 转发 Temporal 审批信号；
-4. 响应 toast 提示并在卡片上就地替换为**处置结果卡**（绿=已批准 / 红=已驳回，无按钮，防重复点击）。
+1. 网关收到 `card.action.trigger`（`feishu_gateway.log` 输出 `收到卡片回调 operator=ou_...`）并注入共享凭证转发 BFF；
+2. 验签 → 解析按钮载荷（`wf_id/gate/decision`）与操作者身份（`event.operator`）；
+3. 按 `AIOPS_IM_USERS` 判定操作者角色（未映射＝viewer，仅 operator 可审批）；
+4. 写守卫（阶段允许 / 防重复）+ kill switch 检查 → 转发 Temporal 审批信号；
+5. 响应 toast 提示并在卡片上就地替换为**处置结果卡**（绿=已批准 / 红=已驳回，无按钮，防重复点击）。
+
+> 点击无反应的排查顺序：① 网关进程是否在运行（`./start.sh status`；需 `.env` 已配置 `AIOPS_FEISHU_APP_ID` / `AIOPS_FEISHU_APP_SECRET`，watchdog 才会加挂该组件）；② `feishu_gateway.log` 是否有「收到卡片回调」行——有则后续问题在 BFF（查 `bff.log` 的 401/503）；没有则检查开放平台「订阅方式」是否为长连接、`card.action.trigger` 是否已订阅、应用版本是否已发布并经管理员审批。
 
 ### 7.2 钉钉（外部网关转运）
 
@@ -559,7 +562,7 @@ curl -X POST http://127.0.0.1:8600/api/system/kill-switch \
 ## 附录 A 命令速查卡
 
 ```bash
-# 一键启动（受控）：依赖预检 + 6 常驻组件（含 BFF 控制台）+ 组件守护（不自动灌日志/起流程）
+# 一键启动（受控）：依赖预检 + 常驻组件（默认 6 个，含 BFF 控制台；配飞书应用凭证后加挂长连接网关）+ 组件守护（不自动灌日志/起流程）
 ./start.sh                         # 无隐式动作；./start.sh web 加前端热更；底层即 demo-up.sh
 ./start.sh status                  # 查看组件与守护状态、生效档位快照
 ./start.sh sync-ip                 # 网络地址变化后同步生产部署（Caddyfile/settings/监控片段 + 重签 TLS、reload Caddy）

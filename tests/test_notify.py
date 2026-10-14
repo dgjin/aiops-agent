@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -289,6 +290,97 @@ class TestSenderLive(unittest.TestCase):
             self.assertEqual(result["mode"], "failed")
             self.assertIn(code, result["error"])
             self.assertTrue(Path(result["path"]).is_file())  # 降级仍留痕
+
+
+class TestSenderFeishuApp(unittest.TestCase):
+    """应用机器人发送通道（2026-10-14）：三要素齐全时优先生效（卡片按钮可回传交互）。"""
+
+    ENV = {
+        "AIOPS_FEISHU_APP_ID": "cli_test",
+        "AIOPS_FEISHU_APP_SECRET": "sec_test",
+        "AIOPS_FEISHU_RECEIVE_ID": "oc_group",
+    }
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="wp8-notify-"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _resp(self, body: bytes = b'{"code": 0, "msg": "success"}') -> mock.MagicMock:
+        resp = mock.MagicMock()
+        resp.status = 200
+        resp.read.return_value = body
+        resp.__enter__.return_value = resp
+        return resp
+
+    def test_app_channel_preferred(self) -> None:
+        card = notify.render_approval_card(ALERT, ROOT_CAUSE, PATCH, REPORT, False)
+        with mock.patch.dict(os.environ, self.ENV), mock.patch.object(
+            notify, "NOTIFY_DIR", self.tmp / "notify"
+        ), mock.patch.object(
+            notify.feishu_app, "send_card", return_value="om_app_1"
+        ) as send_card, mock.patch(
+            "aiops_agent.notify.urllib.request.urlopen"
+        ) as urlopen:
+            sender = notify.NotificationSender(
+                provider="feishu", webhook="http://feishu.example/hook", secret="s3cret"
+            )
+            result = sender.send(card, msg_id="approval-p-nt-1-r1")
+        self.assertEqual(result["mode"], "live")
+        self.assertEqual(result["channel"], "feishu-app")
+        self.assertEqual(result["message_id"], "om_app_1")
+        self.assertEqual(send_card.call_args[0][0], card["card"])  # 发送卡片体而非整条消息
+        self.assertEqual(send_card.call_args[0][1:], ("oc_group", "chat_id"))
+        urlopen.assert_not_called()  # 应用通道生效即不走 webhook
+
+    def test_app_failure_degrades_without_raising(self) -> None:
+        card = notify.render_broadcast_card(ALERT, PATCH, "v1.0.242")
+        error = notify.feishu_app.FeishuAppError("code=230002 bot is not in chat")
+        with mock.patch.dict(os.environ, self.ENV), mock.patch.object(
+            notify, "NOTIFY_DIR", self.tmp / "notify"
+        ), mock.patch.object(
+            notify.feishu_app, "send_card", side_effect=error
+        ), mock.patch(
+            "aiops_agent.notify.urllib.request.urlopen"
+        ) as urlopen:
+            sender = notify.NotificationSender(
+                provider="feishu", webhook="http://feishu.example/hook"
+            )
+            result = sender.send(card, msg_id="broadcast-p-nt-1-r1")
+        self.assertEqual(result["mode"], "failed")
+        self.assertIn("230002", result["error"])
+        self.assertTrue(Path(result["path"]).is_file())  # 降级仍留痕
+        urlopen.assert_not_called()  # 应用通道已配置时不再重复投递 webhook
+
+    def test_non_card_message_skips_app_channel(self) -> None:
+        with mock.patch.dict(os.environ, self.ENV), mock.patch.object(
+            notify, "NOTIFY_DIR", self.tmp / "notify"
+        ), mock.patch.object(notify.feishu_app, "send_card") as send_card:
+            sender = notify.NotificationSender(
+                provider="feishu", webhook="http://feishu.example/hook"
+            )
+            result = sender.send({"msg_type": "text", "text": "no card"}, msg_id="text-p-nt-1-r1")
+        self.assertEqual(result["mode"], "failed")
+        self.assertIn("非交互卡片结构", result["error"])
+        send_card.assert_not_called()
+
+    def test_partial_credentials_fall_back_to_webhook(self) -> None:
+        card = notify.render_broadcast_card(ALERT, PATCH, "v1.0.242")
+        env = {"AIOPS_FEISHU_APP_ID": "cli_test", "AIOPS_FEISHU_APP_SECRET": "sec_test"}  # 缺 RECEIVE_ID
+        with mock.patch.dict(os.environ, env), mock.patch.object(
+            notify, "NOTIFY_DIR", self.tmp / "notify"
+        ), mock.patch.object(notify.feishu_app, "send_card") as send_card, mock.patch(
+            "aiops_agent.notify.urllib.request.urlopen", return_value=self._resp()
+        ) as urlopen:
+            sender = notify.NotificationSender(
+                provider="feishu", webhook="http://feishu.example/hook"
+            )
+            result = sender.send(card, msg_id="broadcast-p-nt-1-r1")
+        self.assertEqual(result["mode"], "live")
+        self.assertIsNone(result.get("channel"))  # 走的是 webhook 通道
+        send_card.assert_not_called()
+        self.assertEqual(urlopen.call_count, 1)
 
 
 class TestParseCallback(unittest.TestCase):

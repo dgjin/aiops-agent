@@ -3,16 +3,17 @@
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
 | v1.0 | 2026-10-14 | 首版：按运行边界八层盘点全部组件（常驻进程 / 核心引擎 / BFF / 前端 / 基础设施 / 外部依赖 / 被监控系统 / 工具链） |
+| v1.1 | 2026-10-14 | 新增飞书长连接网关 `feishu_gateway.py`（条件启动，watchdog 托管）与飞书应用机器人发送通道（`aiops_agent/feishu_app.py`） |
 
 > **口径说明**：本清单按「运行边界」分层，与《AIOps 自动运维智能体系统部署手册》§1.1「运行时组件清单」互为补充（手册侧重安装与启动顺序，本文侧重全量罗列与职责边界）。信息来源：部署手册 §1.1、根级 `docker-compose.yml` / `docker-compose.production.yml`、`deploy/` 目录、工程目录实测（2026-10-14）。
 >
-> **规模小结**：7 个自建常驻进程（6 组件 + 1 守护）、33 个核心引擎模块、14 个 BFF 功能模块 + 14 个路由模块、14 个控制台页面 + 23 个组件 + 3 个图表、8 类基础设施容器、6 类外部依赖。
+> **规模小结**：8 个自建常驻进程（6 组件 + 1 飞书长连接网关〔配置应用凭证后由守护加挂〕 + 1 守护）、33 个核心引擎模块、14 个 BFF 功能模块 + 14 个路由模块、14 个控制台页面 + 23 个组件 + 3 个图表、8 类基础设施容器、6 类外部依赖。
 
 ---
 
-## 1 系统常驻进程（6 组件 + 1 守护）
+## 1 系统常驻进程（6 组件 + 1 网关 + 1 守护）
 
-由 `./start.sh`（唯一启动入口）或 `bash scripts/demo-up.sh`（兼容薄壳）一键编排，启动顺序：worker → BFF → 告警接入 → 可用性巡检 → 日志采集 → 突增检测 → 组件守护。
+由 `./start.sh`（唯一启动入口）或 `bash scripts/demo-up.sh`（兼容薄壳）一键编排，启动顺序：worker → BFF → 告警接入 → 可用性巡检 → 日志采集 → 飞书长连接网关〔条件启动〕 → 突增检测 → 组件守护。
 
 | 组件 | 入口 | 默认端口 | 职责 | 关键依赖 |
 | --- | --- | --- | --- | --- |
@@ -22,7 +23,8 @@
 | 可用性巡检 | `python app_prober.py` | — | 按被监控应用清单定时探测健康端点（支持 `probe_keyword` 页面内容校验） | 应用清单（热加载） |
 | 日志采集 | `python ship_app_logs.py --follow` | — | 被监控应用日志增量采集，推送 Loki | Loki |
 | 突增检测 | `python log_surge_detector.py` | — | 错误日志突增检测（Drain3 模板聚类 + 基线），命中后触发修复流程 | Loki、应用清单（热加载） |
-| 组件守护 | `python scripts/aiops-watchdog.py` | — | 每 30 秒巡检 6 个常驻组件，崩溃自动拉起；单实例锁、档位锁定、RSS 内存水位守护；可经 launchd 托管登录自启 | 上述 6 组件 |
+| 飞书长连接网关 | `python feishu_gateway.py` | — | 飞书卡片回调接收（WSS 长连接，免公网）：`card.action.trigger` → 注入共享凭证转发 BFF `/api/im/card-callback` → 回写 toast/处置结果卡；`--list-chats` / `--send-test-card` 辅助工具 | 飞书开放平台（应用凭证）、BFF、lark-oapi；**条件启动**（`AIOPS_FEISHU_APP_ID` / `_APP_SECRET` 齐全才注册） |
+| 组件守护 | `python scripts/aiops-watchdog.py` | — | 每 30 秒巡检已注册常驻组件（默认 6 个；飞书应用凭证齐全时含长连接网关共 7 个），崩溃自动拉起；单实例锁、档位锁定、RSS 内存水位守护；可经 launchd 托管登录自启 | 上述常驻组件 |
 
 **按需进程（不常驻）**：
 
@@ -256,6 +258,6 @@
 
 - **触发链**：Alertmanager(9093) → 告警接入(8099) → Temporal(7233)；日志突增检测（Loki 3101）与可用性巡检同样经 Temporal 启动流程。
 - **执行链**：Temporal → Worker → Ollama(11434)（triage/修复生成）→ Code RAG（本地索引）→ Docker 沙箱（补丁验证）→ 发布（demo 留痕 / production 真实滚动）→ 通知（飞书）。
-- **展示链**：浏览器 / 飞书回调 → BFF(8600) → Temporal + data 产物；浏览器不直连 Temporal。
+- **展示链**：浏览器 / 飞书回调（卡片交互经 `feishu_gateway` 长连接网关转发） → BFF(8600) → Temporal + data 产物；浏览器不直连 Temporal。
 - **持久化**：demo 档 = 文件（`data/`）；production 档 = MySQL(3316) 5 表 + Redis(6380)；Temporal 与 Loki 均为命名卷持久化。
-- **一键编排**：`./start.sh` → `scripts/demo-up.sh`（兼容薄壳）→ `scripts/aiops-watchdog.py` 执行编排（6 组件 + 守护）；watchdog 崩溃拉起，launchd 可选托管登录自启。
+- **一键编排**：`./start.sh` → `scripts/demo-up.sh`（兼容薄壳）→ `scripts/aiops-watchdog.py` 执行编排（默认 6 组件 + 守护；飞书应用凭证齐全时含长连接网关共 7 组件）；watchdog 崩溃拉起，launchd 可选托管登录自启。
