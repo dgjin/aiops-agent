@@ -67,6 +67,11 @@ _IM_ENDPOINTS: tuple[tuple[str, str], ...] = (
 _IM_ROLE = "viewer"
 _IM_USER = "im:gateway"
 
+# 平台回调通道（飞书卡片动作回调，审批交互）：精确路径集合。飞书服务器直接 POST，
+# 凭证在请求体（Verification Token），无法携带控制台 Bearer；中间件放行到路由，
+# 由路由内 fail-closed 校验（未配置＝503、不符＝401，挑战握手与动作回调一致）。
+_CALLBACK_ENDPOINTS: frozenset[str] = frozenset({"/api/im/card-callback"})
+
 
 class ImChannelError(RuntimeError):
     """IM 通道关闭 / 认证失败：携带 HTTP 状态码，绝不回落常规鉴权。"""
@@ -225,6 +230,9 @@ async def _auth_guard(request: Request, call_next):
         return await call_next(request)  # 静态资源与 SPA fallback 不鉴权
     if path in _PUBLIC_ENDPOINTS:
         return await call_next(request)  # 登录：认证前唯一合法入口
+    if path in _CALLBACK_ENDPOINTS:
+        # 平台回调通道：凭证在请求体（路由内 fail-closed 校验），无法走 Bearer 鉴权
+        return await call_next(request)
 
     # 静态令牌通道可用性（不可用不立即 503：会话通道可能仍工作，反之亦然）
     try:

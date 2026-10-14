@@ -1,0 +1,363 @@
+............/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56190)>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56192)>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56195)>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56197)>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56200)>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:84: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56204)>
+  return self.run(*args, **kwds)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.............2026-10-14 08:00:39,586 INFO aiops.prober: 可用性巡检启动：interval=15s 连续失败阈值=3 探测超时=2.0s 告警目标=http://localhost:9093
+.2026-10-14 08:00:39,587 INFO aiops.prober: 可用性巡检启动：interval=15s 连续失败阈值=3 探测超时=2.0s 告警目标=http://localhost:9093
+2026-10-14 08:00:39,587 INFO aiops.prober: 可用性巡检已停止
+.2026-10-14 08:00:39,587 INFO aiops.prober: [演示应用] 探测 http://app-1.test:3000/ → 在线 200（8.0ms）
+.2026-10-14 08:00:39,587 INFO aiops.prober: [演示应用] 探测 http://app-1.test:3000/ → 失败（连续 1 次，阈值 3）：connection refused
+2026-10-14 08:00:39,587 INFO aiops.prober: [演示应用] 探测 http://app-1.test:3000/ → 失败（连续 2 次，阈值 3）：connection refused
+2026-10-14 08:00:39,587 WARNING aiops.prober: [演示应用] 告警注入失败（下轮重试）：boom
+2026-10-14 08:00:39,588 INFO aiops.prober: [演示应用] 探测 http://app-1.test:3000/ → 失败（连续 3 次，阈值 3）：connection refused
+.2026-10-14 08:00:39,588 INFO aiops.prober: [演示应用] 探测 http://app-1.test:3000/ → 在线 200（8.0ms）
+.2026-10-14 08:00:39,588 INFO aiops.prober: [演示应用] 探测 http://app-1.test:3000/ → 失败（连续 1 次，阈值 3）：connection refused
+2026-10-14 08:00:39,588 INFO aiops.prober: [演示应用] 探测 http://app-1.test:3000/ → 失败（连续 2 次，阈值 3）：connection refused
+2026-10-14 08:00:39,588 WARNING aiops.prober: [演示应用] http://app-1.test:3000/ 连续 3 次不可达 → 已注入告警 probe-app-1-1000（→ Alertmanager → AIOps 修复流程）
+2026-10-14 08:00:39,588 INFO aiops.prober: [演示应用] 探测 http://app-1.test:3000/ → 失败（连续 3 次，阈值 3）：connection refused
+2026-10-14 08:00:39,588 INFO aiops.prober: [演示应用] 已注入 resolved（http://app-1.test:3000/ 恢复在线）
+.2026-10-14 08:00:39,588 INFO aiops.prober: [演示应用] 探测 http://app-1.test:3000/ → 失败（连续 1 次，阈值 3）：connection refused
+2026-10-14 08:00:39,588 INFO aiops.prober: [演示应用] 探测 http://app-1.test:3000/ → 失败（连续 2 次，阈值 3）：connection refused
+2026-10-14 08:00:39,589 WARNING aiops.prober: [演示应用] http://app-1.test:3000/ 连续 3 次不可达 → 已注入告警 probe-app-1-1000（→ Alertmanager → AIOps 修复流程）
+2026-10-14 08:00:39,589 INFO aiops.prober: [演示应用] 探测 http://app-1.test:3000/ → 失败（连续 3 次，阈值 3）：connection refused
+2026-10-14 08:00:39,589 INFO aiops.prober: [演示应用] 探测 http://app-1.test:3000/ → 失败（连续 4 次，阈值 3）：connection refused
+2026-10-14 08:00:39,589 INFO aiops.prober: [演示应用] 已注入 resolved（http://app-1.test:3000/ 恢复在线）
+2026-10-14 08:00:39,589 INFO aiops.prober: [演示应用] 探测 http://app-1.test:3000/ → 在线 200（8.0ms）
+...........2026-10-14 08:00:39,645 INFO httpx2: HTTP Request: GET http://testserver/api/audit/summary?days=7 "HTTP/1.1 200 OK"
+.2026-10-14 08:00:39,651 INFO httpx2: HTTP Request: GET http://testserver/api/audit/summary "HTTP/1.1 401 Unauthorized"
+.................................2026-10-14 08:00:39,728 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 200 OK"
+2026-10-14 08:00:39,763 INFO httpx2: HTTP Request: POST http://testserver/api/users "HTTP/1.1 200 OK"
+2026-10-14 08:00:39,793 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 200 OK"
+2026-10-14 08:00:39,825 INFO httpx2: HTTP Request: POST http://testserver/api/users/u1/password "HTTP/1.1 200 OK"
+2026-10-14 08:00:39,826 INFO httpx2: HTTP Request: GET http://testserver/api/auth/status "HTTP/1.1 401 Unauthorized"
+2026-10-14 08:00:39,856 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 200 OK"
+.2026-10-14 08:00:39,914 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 200 OK"
+2026-10-14 08:00:39,945 INFO httpx2: HTTP Request: POST http://testserver/api/users "HTTP/1.1 200 OK"
+2026-10-14 08:00:39,975 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,005 INFO httpx2: HTTP Request: POST http://testserver/api/auth/password "HTTP/1.1 401 Unauthorized"
+2026-10-14 08:00:40,062 INFO httpx2: HTTP Request: POST http://testserver/api/auth/password "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,063 INFO httpx2: HTTP Request: GET http://testserver/api/auth/status "HTTP/1.1 401 Unauthorized"
+2026-10-14 08:00:40,094 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 200 OK"
+.2026-10-14 08:00:40,151 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,183 INFO httpx2: HTTP Request: POST http://testserver/api/users "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,213 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,217 INFO httpx2: HTTP Request: DELETE http://testserver/api/users/u1 "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,219 INFO httpx2: HTTP Request: GET http://testserver/api/auth/status "HTTP/1.1 401 Unauthorized"
+.2026-10-14 08:00:40,281 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 401 Unauthorized"
+.2026-10-14 08:00:40,345 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,349 INFO httpx2: HTTP Request: GET http://testserver/api/auth/status "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,352 INFO httpx2: HTTP Request: GET http://testserver/api/users "HTTP/1.1 200 OK"
+.2026-10-14 08:00:40,415 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 401 Unauthorized"
+2026-10-14 08:00:40,443 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 401 Unauthorized"
+2026-10-14 08:00:40,471 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 401 Unauthorized"
+2026-10-14 08:00:40,473 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 429 Too Many Requests"
+.2026-10-14 08:00:40,529 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,532 INFO httpx2: HTTP Request: POST http://testserver/api/auth/logout "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,533 INFO httpx2: HTTP Request: GET http://testserver/api/auth/status "HTTP/1.1 401 Unauthorized"
+.2026-10-14 08:00:40,536 INFO httpx2: HTTP Request: GET http://testserver/api/auth/status "HTTP/1.1 401 Unauthorized"
+2026-10-14 08:00:40,537 INFO httpx2: HTTP Request: GET http://testserver/api/users "HTTP/1.1 401 Unauthorized"
+.2026-10-14 08:00:40,591 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,594 INFO httpx2: HTTP Request: PUT http://testserver/api/users/admin "HTTP/1.1 409 Conflict"
+2026-10-14 08:00:40,597 INFO httpx2: HTTP Request: PUT http://testserver/api/users/admin "HTTP/1.1 409 Conflict"
+2026-10-14 08:00:40,599 INFO httpx2: HTTP Request: DELETE http://testserver/api/users/admin "HTTP/1.1 409 Conflict"
+.2026-10-14 08:00:40,655 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,685 INFO httpx2: HTTP Request: POST http://testserver/api/users "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,714 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,742 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,744 INFO httpx2: HTTP Request: GET http://testserver/api/users/u1/sessions "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,747 INFO httpx2: HTTP Request: DELETE http://testserver/api/users/u1/sessions "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,748 INFO httpx2: HTTP Request: GET http://testserver/api/auth/status "HTTP/1.1 401 Unauthorized"
+2026-10-14 08:00:40,749 INFO httpx2: HTTP Request: GET http://testserver/api/auth/status "HTTP/1.1 401 Unauthorized"
+.2026-10-14 08:00:40,752 INFO httpx2: HTTP Request: GET http://testserver/api/auth/status "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,755 INFO httpx2: HTTP Request: POST http://testserver/api/monitored-apps "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,756 INFO httpx2: HTTP Request: POST http://testserver/api/monitored-apps "HTTP/1.1 403 Forbidden"
+2026-10-14 08:00:40,757 INFO httpx2: HTTP Request: POST http://testserver/api/auth/logout "HTTP/1.1 200 OK"
+.2026-10-14 08:00:40,759 INFO httpx2: HTTP Request: GET http://testserver/api/nonexistent "HTTP/1.1 401 Unauthorized"
+.2026-10-14 08:00:40,818 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,849 INFO httpx2: HTTP Request: POST http://testserver/api/users "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,883 INFO httpx2: HTTP Request: POST http://testserver/api/auth/login "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,886 INFO httpx2: HTTP Request: GET http://testserver/api/auth/status "HTTP/1.1 200 OK"
+2026-10-14 08:00:40,888 INFO httpx2: HTTP Request: GET http://testserver/api/users "HTTP/1.1 403 Forbidden"
+2026-10-14 08:00:40,889 INFO httpx2: HTTP Request: POST http://testserver/api/users "HTTP/1.1 403 Forbidden"
+2026-10-14 08:00:40,891 INFO httpx2: HTTP Request: POST http://testserver/api/monitored-apps "HTTP/1.1 403 Forbidden"
+...........................................................s.s.......2026-10-14 08:00:42,696 INFO aiops.bff: [card-callback] ou_ops → approval/approve（wf=aiops-fix-order-a-301）
+.2026-10-14 08:00:42,698 WARNING aiops.bff: [card-callback] Verification Token 校验失败
+.....2026-10-14 08:00:42,702 INFO aiops.bff: [card-callback] 拒绝：operator=ou_ops wf=aiops-fix-order-a-301：当前阶段 FIXING 不允许该操作（要求 WAIT_APPROVAL）
+2026-10-14 08:00:42,702 INFO aiops.bff: [card-callback] 拒绝：operator=ou_ops wf=aiops-fix-order-a-301：流程已结束（COMPLETED），不能执行写操作
+2026-10-14 08:00:42,702 INFO aiops.bff: [card-callback] 拒绝：operator=ou_ops wf=aiops-fix-order-a-301：一级审批已提交（approve），不能重复提交
+...2026-10-14 08:00:42,705 INFO aiops.bff: [card-callback] ou_ops → approval/reject（wf=aiops-fix-order-a-301）
+...2026-10-14 08:00:42,721 INFO aiops.bff: [card-callback] ou_ops → second_approval/approve（wf=aiops-fix-order-a-301）
+.2026-10-14 08:00:42,722 WARNING aiops.bff: [card-callback] 权限拒绝：operator=ou_ops role=viewer gate=approval wf=aiops-fix-order-a-301
+..........................................2026-10-14 08:00:42,731 INFO aiops.bff: [chatops] 拒绝：sender=alice verb=approve wf=aiops-fix-order-a-201：当前阶段 FIXING 不允许该操作（要求 WAIT_APPROVAL）
+2026-10-14 08:00:42,731 INFO aiops.bff: [chatops] 拒绝：sender=alice verb=approve wf=aiops-fix-order-a-201：流程已结束（COMPLETED），不能执行写操作
+2026-10-14 08:00:42,732 INFO aiops.bff: [chatops] 拒绝：sender=alice verb=approve wf=aiops-fix-order-a-201：一级审批已提交（approve），不能重复提交
+.2026-10-14 08:00:42,733 INFO aiops.bff: [chatops] alice → approve（wf=aiops-fix-order-a-201）
+.....2026-10-14 08:00:42,737 INFO aiops.bff: [chatops] 拒绝：sender=alice verb=second_approve wf=aiops-fix-order-a-201：该流程不涉及受保护目录，无需二级审批
+....2026-10-14 08:00:42,740 WARNING aiops.bff: [chatops] 权限拒绝：sender=alice role=viewer verb=approve
+.............................................................................................................................................2026-10-14 08:00:42,830 INFO aiops.cleanup: [cleanup] mode=demo dry_run=True deleted={'audit_files': 1, 'audit_rows': 0, 'sandbox_workspaces': 0, 'notify_files': 0, 'qoder_workspaces': 0, 'qoder_records': 0, 'argocd_files': 0, 'workflow_runs': 0} errors=0
+.2026-10-14 08:00:42,832 INFO aiops.cleanup: [cleanup] mode=demo dry_run=False deleted={'audit_files': 1, 'audit_rows': 0, 'sandbox_workspaces': 0, 'notify_files': 0, 'qoder_workspaces': 0, 'qoder_records': 0, 'argocd_files': 0, 'workflow_runs': 0} errors=0
+.2026-10-14 08:00:42,834 INFO aiops.cleanup: [cleanup] mode=demo dry_run=False deleted={'audit_files': 1, 'audit_rows': 0, 'sandbox_workspaces': 0, 'notify_files': 0, 'qoder_workspaces': 0, 'qoder_records': 0, 'argocd_files': 0, 'workflow_runs': 0} errors=0
+...2026-10-14 08:00:42,848 INFO aiops.cleanup: [cleanup] mode=production dry_run=False deleted={'audit_files': 0, 'audit_rows': 0, 'sandbox_workspaces': 0, 'notify_files': 0, 'qoder_workspaces': 0, 'qoder_records': 0, 'argocd_files': 0, 'workflow_runs': 0} errors=0
+.2026-10-14 08:00:42,860 INFO aiops.cleanup: [cleanup] mode=production dry_run=False deleted={'audit_files': 0, 'audit_rows': 1, 'sandbox_workspaces': 0, 'notify_files': 0, 'qoder_workspaces': 0, 'qoder_records': 0, 'argocd_files': 0, 'workflow_runs': 1} errors=0
+.2026-10-14 08:00:42,872 INFO aiops.cleanup: [cleanup] mode=production dry_run=True deleted={'audit_files': 0, 'audit_rows': 1, 'sandbox_workspaces': 0, 'notify_files': 0, 'qoder_workspaces': 0, 'qoder_records': 0, 'argocd_files': 0, 'workflow_runs': 1} errors=0
+.2026-10-14 08:00:42,875 INFO aiops.cleanup: [cleanup] mode=demo dry_run=False deleted={'audit_files': 0, 'audit_rows': 0, 'sandbox_workspaces': 0, 'notify_files': 1, 'qoder_workspaces': 0, 'qoder_records': 0, 'argocd_files': 1, 'workflow_runs': 0} errors=0
+.2026-10-14 08:00:42,877 INFO aiops.cleanup: [cleanup] mode=demo dry_run=False deleted={'audit_files': 1, 'audit_rows': 0, 'sandbox_workspaces': 0, 'notify_files': 0, 'qoder_workspaces': 0, 'qoder_records': 0, 'argocd_files': 0, 'workflow_runs': 0} errors=2
+.2026-10-14 08:00:42,878 INFO aiops.cleanup: [cleanup] mode=demo dry_run=False deleted={'audit_files': 0, 'audit_rows': 0, 'sandbox_workspaces': 0, 'notify_files': 0, 'qoder_workspaces': 0, 'qoder_records': 0, 'argocd_files': 0, 'workflow_runs': 0} errors=0
+...2026-10-14 08:00:42,880 INFO aiops.cleanup: [cleanup] mode=demo dry_run=False deleted={'audit_files': 0, 'audit_rows': 0, 'sandbox_workspaces': 0, 'notify_files': 0, 'qoder_workspaces': 1, 'qoder_records': 1, 'argocd_files': 0, 'workflow_runs': 0} errors=0
+.2026-10-14 08:00:42,882 INFO aiops.cleanup: [cleanup] mode=demo dry_run=False deleted={'audit_files': 0, 'audit_rows': 0, 'sandbox_workspaces': 1, 'notify_files': 0, 'qoder_workspaces': 0, 'qoder_records': 0, 'argocd_files': 0, 'workflow_runs': 0} errors=0
+.2026-10-14 08:00:43,386 INFO aiops.activities: [mr] 桩结果（mode=recorded）!1865（https://git.example.com/ops/wp4-t9/-/merge_requests/demo）
+2026-10-14 08:00:43,386 INFO aiops.activities: [mr] 标签: ai-fix:wp4-t9, model:aiops-fix-demo-v0.1, confidence:0.95
+.2026-10-14 08:00:43,888 WARNING aiops.activities: [rag] Code RAG 不可用，降级为空引用: no index
+2026-10-14 08:00:43,888 INFO aiops.activities: [rag] Code RAG 检索到 0 条引用:
+.2026-10-14 08:00:44,389 INFO aiops.activities: [rag] Code RAG 检索到 1 条引用:
+2026-10-14 08:00:44,389 INFO aiops.activities:   - [0.840] ticket data/historical_tickets.json::INC-2026-0101
+.2026-10-14 08:00:44,891 INFO aiops.activities: [triage] 根因判定（演示桩）：NullPointerException confidence=0.92
+....................................2026-10-14 08:00:45,399 WARNING aiops.activities: [rag] 应用 svc-auto 专属索引构建失败，降级为空引用（不回退他仓索引）: boom
+.2026-10-14 08:00:45,400 INFO aiops.activities: [rag] 应用 svc-auto 专属索引自动构建完成：1 文件 / 0 块（仓库=/private/tmp/aiops-unit-louv9vt6/tmp8sb5k7si/repo，耗时=0.0s，索引=/private/tmp/aiops-unit-louv9vt6/tmp8sb5k7si/idx.json）
+2026-10-14 08:00:45,400 INFO aiops.activities: [rag] 应用 svc-auto 复用已有专属索引: /private/tmp/aiops-unit-louv9vt6/tmp8sb5k7si/idx.json
+.2026-10-14 08:00:45,401 INFO aiops.activities: [rag] 应用 svc-auto 复用已有专属索引: /private/tmp/aiops-unit-louv9vt6/tmp5t1ym2zt/idx.json
+2026-10-14 08:00:45,402 INFO aiops.activities: [rag] 应用 svc-auto 专属索引自动构建完成：1 文件 / 0 块（仓库=/private/tmp/aiops-unit-louv9vt6/tmp5t1ym2zt/b，耗时=0.0s，索引=/private/tmp/aiops-unit-louv9vt6/tmp5t1ym2zt/idx.json）
+.2026-10-14 08:00:45,904 INFO aiops.activities: [rag] Code RAG 检索到 0 条引用:
+..2026-10-14 08:00:46,407 INFO aiops.activities: [rag] Code RAG 检索到 1 条引用:
+2026-10-14 08:00:46,407 INFO aiops.activities:   - [0.840] ticket data/historical_tickets.json::INC-2026-0101
+.2026-10-14 08:00:46,908 INFO aiops.activities: [rag] Code RAG 检索到 0 条引用:
+..................................................................................2026-10-14 08:00:48,424 INFO aiops.activities: [mr] 已创建 MR !77（https://gitlab.example.com/ops/demo-app/-/merge_requests/77，provider=gitlab）
+2026-10-14 08:00:48,424 INFO aiops.activities: [mr] 标签: aiops
+.2026-10-14 08:00:48,926 INFO aiops.activities: [mr] 桩结果（mode=recorded）!1535（https://git.example.com/ops/wp5-a1/-/merge_requests/demo）
+2026-10-14 08:00:48,926 INFO aiops.activities: [mr] 标签: ai-fix:wp5-a1, model:qwen3:8b, confidence:0.92
+...............2026-10-14 08:00:48,929 WARNING aiops.git: [git] GitHub PR 标签补挂失败（不影响创建）: HTTP 422: {"message":"label missing"}
+......2026-10-14 08:00:48,932 WARNING aiops.bff: [kill-switch] 已激活（操作者=li，原因=演练）
+2026-10-14 08:00:48,933 INFO httpx2: HTTP Request: POST http://testserver/api/system/kill-switch "HTTP/1.1 200 OK"
+2026-10-14 08:00:48,934 INFO httpx2: HTTP Request: POST http://testserver/api/monitored-apps "HTTP/1.1 503 Service Unavailable"
+2026-10-14 08:00:48,935 INFO httpx2: HTTP Request: GET http://testserver/api/auth/status "HTTP/1.1 200 OK"
+.2026-10-14 08:00:48,938 WARNING aiops.bff: [kill-switch] 已激活（操作者=li，原因=演练）
+2026-10-14 08:00:48,939 INFO httpx2: HTTP Request: POST http://testserver/api/system/kill-switch "HTTP/1.1 200 OK"
+.2026-10-14 08:00:48,941 WARNING aiops.bff: [kill-switch] 已激活（操作者=li，原因=未注明）
+2026-10-14 08:00:48,942 INFO httpx2: HTTP Request: POST http://testserver/api/system/kill-switch "HTTP/1.1 200 OK"
+2026-10-14 08:00:48,943 INFO httpx2: HTTP Request: POST http://testserver/api/monitored-apps "HTTP/1.1 503 Service Unavailable"
+2026-10-14 08:00:48,945 WARNING aiops.bff: [kill-switch] 已关闭（操作者=li，原因=未注明）
+2026-10-14 08:00:48,945 INFO httpx2: HTTP Request: POST http://testserver/api/system/kill-switch "HTTP/1.1 200 OK"
+2026-10-14 08:00:48,948 INFO httpx2: HTTP Request: POST http://testserver/api/monitored-apps "HTTP/1.1 200 OK"
+.2026-10-14 08:00:48,950 INFO httpx2: HTTP Request: POST http://testserver/api/system/kill-switch "HTTP/1.1 403 Forbidden"
+...............2026-10-14 08:00:48,975 INFO drain3.template_miner: Starting Drain3 template miner
+.2026-10-14 08:00:48,975 INFO drain3.template_miner: Starting Drain3 template miner
+.2026-10-14 08:00:48,975 INFO drain3.template_miner: Starting Drain3 template miner
+.........2026-10-14 08:00:48,976 WARNING aiops.surge: 读取被监控应用清单失败（本轮跳过）：boom
+........2026-10-14 08:00:48,977 INFO aiops.surge: 突增检测器启动：services=（清单动态） interval=15s window=1m min_lines=100 factor=3.0
+.2026-10-14 08:00:48,977 INFO aiops.surge: 突增检测器启动：services=（清单动态） interval=15s window=1m min_lines=100 factor=3.0
+2026-10-14 08:00:48,977 WARNING aiops.surge: 本轮检测失败（RuntimeError: HTTP Error 502: Bad Gateway），15s 后重试
+2026-10-14 08:00:48,977 INFO aiops.surge: 突增检测器已停止
+.....................................2026-10-14 08:01:00,818 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 401 Unauthorized"
+.2026-10-14 08:01:00,825 INFO httpx2: HTTP Request: GET http://testserver/metrics "HTTP/1.1 200 OK"
+.2026-10-14 08:01:00,828 INFO httpx2: HTTP Request: GET http://testserver/metrics "HTTP/1.1 200 OK"
+.2026-10-14 08:01:00,885 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 200 OK"
+.2026-10-14 08:01:00,887 INFO httpx2: HTTP Request: GET http://testserver/api/flows/wf-cardinality-probe "HTTP/1.1 200 OK"
+.................2026-10-14 08:01:00,937 WARNING aiops.tracing: [tracing] OTel 初始化失败（降级为无追踪）：boom
+..2026-10-14 08:01:00,937 WARNING aiops.metrics: [metrics] worker 指标服务启动失败（端口 56284）：[Errno 48] Address already in use
+..2026-10-14 08:01:00,938 INFO aiops.metrics: [metrics] worker 指标服务已启动：127.0.0.1:19399/metrics
+..........................................................2026-10-14 08:01:01,060 WARNING aiops.activities: [escalate] 转人工升级（投递=recorded）：alert=nt-1 原因=测试始终失败，重试耗尽
+.2026-10-14 08:01:01,061 INFO aiops.activities: ================= 审批卡片 =================
+2026-10-14 08:01:01,061 INFO aiops.activities: 服务: order | 告警: nt-1 | 投递: recorded
+2026-10-14 08:01:01,061 INFO aiops.activities: 根因: coupon 空值未防护。 (confidence=0.92)
+2026-10-14 08:01:01,061 INFO aiops.activities: 补丁: p-nt-1-r1 | 风险: 低：仅新增防御分支，不改动既有逻辑。
+2026-10-14 08:01:01,061 INFO aiops.activities: 测试: 单测 6/6 passed / 回归 通过 / SAST 无高危模式
+2026-10-14 08:01:01,061 INFO aiops.activities: 回滚预案: 保留上一稳定版本，金丝雀劣化自动回滚
+2026-10-14 08:01:01,061 INFO aiops.activities: ===============================================
+.2026-10-14 08:01:01,062 INFO aiops.activities: [notify] 进入修复流程通知（order）：alert=nt-1 confidence=0.92 模式=shadow 投递=recorded
+.2026-10-14 08:01:01,063 INFO aiops.activities: [notify] 已接收告警通知（order）：alert=nt-1 投递=recorded
+.2026-10-14 08:01:01,064 INFO aiops.activities: [notify] 已接收需求任务通知（order）：entry=e-1 v2 投递=recorded
+.2026-10-14 08:01:01,065 INFO aiops.activities: [notify] 已向 1327 个在线会话推送公告（v1.0.785，投递=recorded）
+.............................2026-10-14 08:01:01,072 INFO aiops.activities: [shadow] 修复建议已生成（未执行，仅供人工参考）：补丁=p-nt-1-r1 投递=recorded
+.................................................................................................................................................................................2026-10-14 08:01:09,348 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 401 Unauthorized"
+2026-10-14 08:01:09,350 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 401 Unauthorized"
+2026-10-14 08:01:09,351 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 429 Too Many Requests"
+.2026-10-14 08:01:09,355 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 200 OK"
+2026-10-14 08:01:09,357 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 200 OK"
+2026-10-14 08:01:09,360 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 200 OK"
+2026-10-14 08:01:09,362 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 200 OK"
+2026-10-14 08:01:09,365 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 200 OK"
+2026-10-14 08:01:09,367 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 200 OK"
+.2026-10-14 08:01:09,369 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 401 Unauthorized"
+2026-10-14 08:01:09,370 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 401 Unauthorized"
+2026-10-14 08:01:09,371 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 401 Unauthorized"
+2026-10-14 08:01:09,372 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 401 Unauthorized"
+2026-10-14 08:01:09,373 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 401 Unauthorized"
+.2026-10-14 08:01:09,377 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 200 OK"
+2026-10-14 08:01:09,379 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 200 OK"
+2026-10-14 08:01:09,382 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 200 OK"
+2026-10-14 08:01:09,383 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 429 Too Many Requests"
+.2026-10-14 08:01:09,385 WARNING aiops.bff: [kill-switch] 已关闭（操作者=li，原因=未注明）
+2026-10-14 08:01:09,386 INFO httpx2: HTTP Request: POST http://testserver/api/system/kill-switch "HTTP/1.1 200 OK"
+2026-10-14 08:01:09,387 WARNING aiops.bff: [kill-switch] 已关闭（操作者=li，原因=未注明）
+2026-10-14 08:01:09,388 INFO httpx2: HTTP Request: POST http://testserver/api/system/kill-switch "HTTP/1.1 200 OK"
+2026-10-14 08:01:09,389 INFO httpx2: HTTP Request: POST http://testserver/api/system/kill-switch "HTTP/1.1 429 Too Many Requests"
+.2026-10-14 08:01:09,395 INFO httpx2: HTTP Request: GET http://testserver/diagrams/aiops-architecture.html?theme=dark "HTTP/1.1 200 OK"
+.2026-10-14 08:01:09,399 INFO httpx2: HTTP Request: GET http://testserver/diagrams/aiops-workflow.html "HTTP/1.1 200 OK"
+.2026-10-14 08:01:09,405 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 503 Service Unavailable"
+.2026-10-14 08:01:09,406 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 401 Unauthorized"
+.2026-10-14 08:01:09,407 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 401 Unauthorized"
+2026-10-14 08:01:09,411 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 503 Service Unavailable"
+2026-10-14 08:01:09,414 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 503 Service Unavailable"
+.2026-10-14 08:01:09,417 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 503 Service Unavailable"
+...2026-10-14 08:01:09,420 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 503 Service Unavailable"
+2026-10-14 08:01:09,420 INFO httpx2: HTTP Request: GET http://testserver/api/subsystems "HTTP/1.1 503 Service Unavailable"
+.2026-10-14 08:01:09,422 INFO httpx2: HTTP Request: GET http://testserver/api/health "HTTP/1.1 401 Unauthorized"
+2026-10-14 08:01:09,422 INFO httpx2: HTTP Request: GET http://testserver/api/subsystems "HTTP/1.1 401 Unauthorized"
+.2026-10-14 08:01:09,423 INFO httpx2: HTTP Request: GET http://testserver/livez "HTTP/1.1 200 OK"
+2026-10-14 08:01:09,424 INFO httpx2: HTTP Request: GET http://testserver/readyz "HTTP/1.1 503 Service Unavailable"
+2026-10-14 08:01:09,424 INFO httpx2: HTTP Request: GET http://testserver/readyz "HTTP/1.1 200 OK"
+.2026-10-14 08:01:09,425 INFO httpx2: HTTP Request: GET http://testserver/livez "HTTP/1.1 404 Not Found"
+2026-10-14 08:01:09,425 INFO httpx2: HTTP Request: GET http://testserver/readyz "HTTP/1.1 404 Not Found"
+2026-10-14 08:01:09,426 INFO httpx2: HTTP Request: GET http://testserver/metrics "HTTP/1.1 404 Not Found"
+2026-10-14 08:01:09,426 INFO httpx2: HTTP Request: GET http://testserver/livez "HTTP/1.1 404 Not Found"
+2026-10-14 08:01:09,427 INFO httpx2: HTTP Request: GET http://testserver/readyz "HTTP/1.1 404 Not Found"
+2026-10-14 08:01:09,427 INFO httpx2: HTTP Request: GET http://testserver/metrics "HTTP/1.1 404 Not Found"
+2026-10-14 08:01:09,428 INFO httpx2: HTTP Request: GET http://testserver/livez "HTTP/1.1 404 Not Found"
+2026-10-14 08:01:09,428 INFO httpx2: HTTP Request: GET http://testserver/readyz "HTTP/1.1 404 Not Found"
+2026-10-14 08:01:09,428 INFO httpx2: HTTP Request: GET http://testserver/metrics "HTTP/1.1 404 Not Found"
+2026-10-14 08:01:09,429 INFO httpx2: HTTP Request: GET http://testserver/livez "HTTP/1.1 404 Not Found"
+2026-10-14 08:01:09,429 INFO httpx2: HTTP Request: GET http://testserver/readyz "HTTP/1.1 404 Not Found"
+2026-10-14 08:01:09,430 INFO httpx2: HTTP Request: GET http://testserver/metrics "HTTP/1.1 404 Not Found"
+..........2026-10-14 08:01:09,463 INFO aiops.metrics: [metrics] worker 指标服务已启动：127.0.0.1:9091/metrics
+................ss.................2026-10-14 08:01:10,550 INFO aiops.activities: [canary] p-route-r0（容器金丝雀）：错误率=0.00% P99=8ms → 金丝雀健康
+.2026-10-14 08:01:10,551 INFO aiops.activities: [canary] p-route-r0（直连发布）：错误率=0.00% P99=5ms → 直连发布健康
+..............2026-10-14 08:01:19,006 WARNING asyncio: Executing <Task pending name='Task-1154' coro=<ReleaseHistoryReplayTest.test_old_failed_histories_keep_legacy_failure_commands() running at <repo>/tests/test_release_replay.py:127> wait_for=<Future pending cb=[<builtins.PyDoneCallback object at 0x12995b4d0>(), Task.task_wakeup()] created at /Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/base_events.py:427> cb=[_run_until_complete_cb() at /Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/base_events.py:180] created at /Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/asyncio/runners.py:100> took 0.221 seconds
+...[2m2026-10-14T00:01:19.164944Z[0m [33m WARN[0m [2mtemporalio_sdk_core::worker::workflow[0m[2m:[0m Failing workflow task [3mrun_id[0m[2m=[0m00000000-0000-4000-8000-000000000001 [3mfailure[0m[2m=[0mFailure { failure: Some(Failure { message: "[TMPRL1100] Nondeterminism error: Activity machine does not handle this event: HistoryEvent(id: 61, TimerStarted)", source: "", stack_trace: "", encoded_attributes: None, cause: None, failure_info: Some(ApplicationFailureInfo(ApplicationFailureInfo { r#type: "", non_retryable: false, details: None, next_retry_delay: None, category: Unspecified })) }), force_cause: NonDeterministicError }
+...............<repo>/tests/test_release_safety.py:179: DeprecationWarning: This process (pid=45452) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+.....2026-10-14 08:01:19,397 INFO aiops.activities: [canary] patch-g（直连发布）：错误率=0.00% P99=0ms → 直连发布健康（全流量，非百分比金丝雀）
+....<repo>/tests/test_release_safety.py:499: DeprecationWarning: This process (pid=45452) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+........................2026-10-14 08:01:19,516 ERROR aiops.bff.requirement: [requirement] 分析执行异常（ra-app-a-7 v1）：boom
+Traceback (most recent call last):
+  File "<repo>/bff/requirement_analyses.py", line 565, in execute_analysis
+    analysis, meta = requirement_agent.analyze_requirement(
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/mock.py", line 1134, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/mock.py", line 1138, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/mock.py", line 1193, in _execute_mock_call
+    raise effect
+RuntimeError: boom
+.2026-10-14 08:01:19,519 INFO aiops.bff.requirement: [requirement] 分析完成：ra-app-a-7 v1（degraded=False，耗时=1.0s，引用=0 条）
+............................................/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56383)>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56386)>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56389)>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56394)>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56396)>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56398)>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56400)>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56402)>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56418)>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56420)>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56422)>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:84: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56426)>
+  return self.run(*args, **kwds)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+......./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56430)>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56432)>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56434)>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/unittest/suite.py:84: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 56436)>
+  return self.run(*args, **kwds)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+...............................ss.......................{
+  "mode": "demo",
+  "dry_run": true,
+  "run_at": "t",
+  "ttl_days": {},
+  "deleted": {},
+  "errors": []
+}
+{
+  "mode": "demo",
+  "dry_run": false,
+  "run_at": "t",
+  "ttl_days": {},
+  "deleted": {},
+  "errors": [
+    "x: boom"
+  ]
+}
+已推送 3 行日志: service=nl2sql mode=normal level=info → http://localhost:3101
+Dependency metadata closure checked: Python 3.12 Linux x86_64 / macOS arm64; NOT native execution
+CI static target contract OK (no containers invoked)
+CI static target contract OK (no containers invoked)
+[ship] 本轮采集失败（RuntimeError: HTTP Error 502: Bad Gateway），0s 后重试
+.[ship] 读取被监控应用清单失败：RuntimeError: boom
+................................2026-10-14 08:01:28,576 INFO aiops.worker: 策略快照已加载（默认），shadow_mode=True, confidence_threshold=0.8, max_fix_retries=2, approval_timeout=0:30:00, countdown=0:15:00, canary=5%/observe=0:05:00, auto_rollback=True
+2026-10-14 08:01:28,576 INFO aiops.worker: Worker 已启动：task_queue=aiops-production-tasks, namespace=aiops-production
+....................................2026-10-14 08:01:28,713 WARNING aiops.topology: [topology] 清单读取失败，跳过拓扑注入: db down
+....................................2026-10-14 08:01:32,465 INFO aiops.watchdog: 有效启动配置：{"fingerprint": "safe-fingerprint", "mode": "demo", "listeners": {}}
+....2026-10-14 08:01:32,469 ERROR aiops.watchdog: 操作失败：锁已占用但守护身份/档位不可确认；要求受控 restart
+.........2026-10-14 08:01:32,477 WARNING aiops.watchdog: 维护标志有效，守护不拉起任何组件
+........2026-10-14 08:01:32,485 INFO aiops.watchdog: 有效启动配置：{"fingerprint": "safe-fingerprint", "mode": "demo", "listeners": {}}
+.2026-10-14 08:01:32,486 INFO aiops.watchdog: 有效启动配置：{"fingerprint": "safe-fingerprint", "mode": "demo", "listeners": {}}
+2026-10-14 08:01:32,487 INFO aiops.watchdog: 组件已启动（非业务 readiness 证明）；生产验收仍需 G2/G3
+..........2026-10-14 08:01:32,497 INFO aiops.watchdog: 有效启动配置：{"fingerprint": "safe-fingerprint", "mode": "demo", "listeners": {}}
+2026-10-14 08:01:32,498 INFO aiops.watchdog: 组件已启动（非业务 readiness 证明）；生产验收仍需 G2/G3
+..2026-10-14 08:01:32,500 INFO aiops.webhook: 已启动 workflow: aiops-fix-nl2sql-a-1
+2026-10-14 08:01:32,500 INFO aiops.webhook: 已启动 workflow: aiops-fix-order-b-1
+2026-10-14 08:01:32,500 INFO aiops.webhook: 故障域聚合（修复风暴防护）：service=nl2sql 归入事件 agg-nl2sql-456207（窗口内第 2 条，代表流程 aiops-fix-nl2sql-a-1）
+.2026-10-14 08:01:32,501 INFO aiops.webhook: 故障域聚合（修复风暴防护）：service=nl2sql 归入事件 agg-nl2sql-456207（窗口内第 2 条，代表流程 None）
+2026-10-14 08:01:32,501 INFO aiops.webhook: 已启动 workflow: aiops-fix-nl2sql-a-1
+2026-10-14 08:01:32,501 INFO aiops.webhook: 故障域聚合（修复风暴防护）：service=nl2sql 归入事件 agg-nl2sql-456207（窗口内第 2 条，代表流程 aiops-fix-nl2sql-a-1）
+.2026-10-14 08:01:32,507 INFO aiops.webhook: 已启动 workflow: aiops-fix-nl2sql-a-1
+.2026-10-14 08:01:32,514 INFO aiops.webhook: 事件补偿一轮：到期=1 认领=1 启动=1 已存在=0 失败=0
+.2026-10-14 08:01:32,516 WARNING aiops.webhook: kill switch 激活，跳过本轮事件补偿
+.2026-10-14 08:01:32,518 WARNING aiops.webhook: kill switch 拦截告警启动：kill switch 已激活
+.2026-10-14 08:01:32,524 INFO aiops.webhook: 故障域聚合：service=nl2sql 归入事件 evt-nl2sql-9a606066（当前 2 条，代表流程 aiops-fix-nl2sql-a-1）
+.2026-10-14 08:01:32,530 INFO aiops.webhook: 已启动 workflow: aiops-fix-nl2sql-a-1
+2026-10-14 08:01:32,530 INFO aiops.webhook: 故障域聚合：service=nl2sql 归入事件 evt-nl2sql-c8fe4933（当前 2 条，代表流程 aiops-fix-nl2sql-a-1）
+...................................
+----------------------------------------------------------------------
+Ran 1331 tests in 56.026s
+
+OK (skipped=6)
+策略快照：<repo>/demo-policy.yaml（shadow_mode=False, confidence_threshold=0.8, max_fix_retries=2, approval_timeout=0:30:00, countdown=0:15:00, canary=5%/observe=0:05:00, auto_rollback=True）
+已启动 workflow: test-wf
+查询状态: python demo_cli.py status --wf-id test-wf

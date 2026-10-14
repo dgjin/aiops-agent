@@ -91,6 +91,15 @@ class TestApprovalCardFeishu(unittest.TestCase):
         card = notify.render_approval_card(ALERT, ROOT_CAUSE, PATCH, REPORT, True)
         self.assertIn("需二级审批", _card_text(card))
 
+    def test_wf_id_override_for_callback(self) -> None:
+        # 活动层传入运行中的真实 workflow id（需求/重跑流程与公式值不一致，
+        # 否则点击回调无法定位流程）
+        card = notify.render_approval_card(
+            ALERT, ROOT_CAUSE, PATCH, REPORT, False, wf_id="aiops-req-ra-app-9-v1"
+        )
+        approve = card["card"]["elements"][-1]["actions"][0]
+        self.assertEqual(approve["value"]["wf_id"], "aiops-req-ra-app-9-v1")
+
 
 class TestApprovalCardDingTalk(unittest.TestCase):
     def test_structure_and_callback_url(self) -> None:
@@ -308,6 +317,75 @@ class TestParseCallback(unittest.TestCase):
         self.assertIsNone(
             notify.parse_callback({"action": {"value": {"wf_id": "x", "gate": "nope", "decision": "approve"}}})
         )
+
+    def test_feishu_v2_card_action(self) -> None:
+        payload = {
+            "schema": "2.0",
+            "header": {"event_type": "card.action.trigger", "token": "vt"},
+            "event": {
+                "operator": {"open_id": "ou_x"},
+                "action": {
+                    "tag": "button",
+                    "value": {
+                        "wf_id": "aiops-fix-order-a-1",
+                        "gate": "approval",
+                        "decision": "approve",
+                    },
+                },
+            },
+        }
+        self.assertEqual(
+            notify.parse_callback(payload), ("aiops-fix-order-a-1", "approval", "approve")
+        )
+
+    def test_feishu_v2_without_action_rejected(self) -> None:
+        payload = {"schema": "2.0", "header": {}, "event": {"operator": {"open_id": "ou_x"}}}
+        self.assertIsNone(notify.parse_callback(payload))
+
+
+class TestExtractCallbackOperator(unittest.TestCase):
+    """回调触发者提取（审批人身份判定输入）：v2 event.operator 优先，旧版回落顶层。"""
+
+    def test_feishu_v2_operator_open_id(self) -> None:
+        payload = {"event": {"operator": {"open_id": "ou_ops", "user_id": "u1"}}}
+        self.assertEqual(notify.extract_callback_operator(payload), "ou_ops")
+
+    def test_feishu_v2_operator_user_id_fallback(self) -> None:
+        payload = {"event": {"operator": {"user_id": "u1"}}}
+        self.assertEqual(notify.extract_callback_operator(payload), "u1")
+
+    def test_legacy_top_level_open_id(self) -> None:
+        payload = {"open_id": "ou_legacy", "action": {"value": {"wf_id": "x"}}}
+        self.assertEqual(notify.extract_callback_operator(payload), "ou_legacy")
+
+    def test_missing_operator_returns_empty(self) -> None:
+        self.assertEqual(notify.extract_callback_operator({}), "")
+        self.assertEqual(notify.extract_callback_operator({"event": {"operator": {}}}), "")
+        self.assertEqual(
+            notify.extract_callback_operator({"event": {"operator": {"open_id": "  "}}}), ""
+        )
+
+
+class TestApprovalResultCard(unittest.TestCase):
+    """审批处置结果卡片（回调响应）：按钮区替换为处置结果，防重复点击与状态不明。"""
+
+    def test_approve_card_structure(self) -> None:
+        card = notify.render_approval_result_card(
+            "aiops-fix-order-nt-1", "approval", "approve", "ou_ops", "2026-10-14 09:00:00 UTC"
+        )
+        self.assertEqual(card["msg_type"], "interactive")
+        self.assertEqual(card["card"]["header"]["template"], "green")
+        text = _card_text(card)
+        self.assertIn("一级审批已批准", text)
+        self.assertIn("ou_ops", text)
+        self.assertNotIn('"tag": "action"', text)  # 按钮区已被处置结果替代
+
+    def test_reject_card_second_gate(self) -> None:
+        card = notify.render_approval_result_card(
+            "aiops-fix-order-nt-1", "second_approval", "reject", "ou_ops", "t"
+        )
+        self.assertEqual(card["card"]["header"]["template"], "red")
+        self.assertIn("二级审批已驳回", _card_text(card))
 
 
 class TestActivityIntegration(unittest.TestCase):

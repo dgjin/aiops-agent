@@ -18,6 +18,7 @@ from bff import aggregator, app, audit, config_items, middleware, temporal_gatew
 from bff.deps import ApiError
 from bff.routes import chatops as chatops_routes
 from bff.routes import flows as flows_routes
+from bff.routes import im_callback as im_callback_routes
 from bff.routes import systems as systems_routes
 from bff.routes.monitored_apps import _find_rollback_source
 from bff.temporal_gateway import _item_from_result, _item_from_status, check_stage_allowed
@@ -1485,6 +1486,285 @@ class ImCommandEndpointTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ApiError) as ctx:
                 await chatops_routes.api_im_command(self._im_request(source=source), payload)
             self.assertEqual(ctx.exception.status_code, 403)
+
+
+class CardCallbackGuardTest(unittest.IsolatedAsyncioTestCase):
+    """飞书卡片回调通道：middleware 层豁免 Bearer（凭证在请求体，路由内 fail-closed 校验）。"""
+
+    def _request(self, path: str = "/api/im/card-callback", method: str = "POST"):
+        from starlette.requests import Request
+
+        return Request(
+            {
+                "type": "http",
+                "http_version": "1.1",
+                "method": method,
+                "scheme": "http",
+                "path": path,
+                "headers": [],
+                "query_string": b"",
+                "client": ("127.0.0.1", 40000),
+                "server": ("127.0.0.1", 8600),
+            }
+        )
+
+    async def test_callback_path_reaches_route_without_bearer(self):
+        reached = []
+
+        async def call_next(request):
+            reached.append(request.url.path)
+            return JSONResponse(status_code=200, content={})
+
+        with mock.patch.dict(os.environ, {"AIOPS_MODE": "demo", "AIOPS_TRACK_SERVICE_TOKEN": ""}):
+            response = await middleware._auth_guard(self._request(), call_next)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(reached, ["/api/im/card-callback"])
+
+    async def test_lookalike_path_not_exempt(self):
+        """豁免为精确路径匹配：近似路径仍走常规鉴权（无凭证 401）。"""
+
+        async def call_next(request):  # pragma: no cover - 豁免不匹配时不应到达路由
+            raise AssertionError("近似路径不应被回调通道豁免")
+
+        with mock.patch.dict(os.environ, {"AIOPS_MODE": "demo", "AIOPS_TRACK_SERVICE_TOKEN": ""}), \
+                mock.patch.object(middleware.auth_store, "registry_tokens", return_value={}), \
+                mock.patch.object(middleware.auth_store, "resolve_session", return_value=None):
+            response = await middleware._auth_guard(
+                self._request(path="/api/im/card-callback/extra"), call_next
+            )
+        self.assertEqual(response.status_code, 401)
+
+
+class CardCallbackEndpointTest(unittest.IsolatedAsyncioTestCase):
+    """飞书卡片回调网关：凭证校验 / 解析 / 权限 / 前置校验 / 信号 / 审计（全打桩）。"""
+
+    _WF_ID = "aiops-fix-order-a-301"
+    _TOKEN = "vt-secret"
+    _OPERATOR = "ou_ops"
+
+    _WAIT_ITEM: dict = {
+        "wf_id": _WF_ID,
+        "exec_status": "RUNNING",
+        "stage": "WAIT_APPROVAL",
+        "alert": {"service": "order", "alert_id": "a-301"},
+        "patch_id": "patch-301",
+        "needs_second": False,
+        "approval": None,
+        "second_approval": None,
+        "root_cause": None,
+        "deadline": {"kind": "approval", "at": "2026-10-14T10:10:00+00:00"},
+        "start_time": "2026-10-14T10:00:00+00:00",
+    }
+
+    def _status(self, **overrides) -> dict:
+        base = {
+            "stage": "WAIT_APPROVAL",
+            "approval": None,
+            "needs_second": False,
+            "second_approval": None,
+        }
+        base.update(overrides)
+        return base
+
+    def _detail(self, **overrides) -> dict:
+        base = {
+            "wf_id": self._WF_ID,
+            "exec_status": "RUNNING",
+            "status": self._status(),
+            "errors": [],
+        }
+        base.update(overrides)
+        return base
+
+    def _v2(
+        self,
+        *,
+        decision: str = "approve",
+        gate: str = "approval",
+        operator: str | None = _OPERATOR,
+        wf_id: str | None = None,
+        event_type: str = "card.action.trigger",
+    ) -> dict:
+        """新版卡片动作回调载荷（Verification Token 在 header.token）。"""
+        return {
+            "schema": "2.0",
+            "header": {"event_id": "ev-1", "event_type": event_type, "token": self._TOKEN},
+            "event": {
+                "operator": {"open_id": operator} if operator is not None else {},
+                "action": {
+                    "tag": "button",
+                    "value": {"wf_id": wf_id or self._WF_ID, "gate": gate, "decision": decision},
+                },
+            },
+        }
+
+    @contextlib.contextmanager
+    def _channel_env(self, token: str = _TOKEN, users: dict | None = None):
+        env = {
+            "AIOPS_FEISHU_VERIFY_TOKEN": token,
+            "AIOPS_IM_USERS": json.dumps(
+                users if users is not None else {self._OPERATOR: "operator"}
+            ),
+        }
+        with mock.patch.dict(os.environ, env):
+            yield
+
+    async def test_challenge_handshake(self):
+        with self._channel_env():
+            reply = await im_callback_routes.api_im_card_callback(
+                {"type": "url_verification", "challenge": "ch-1", "token": self._TOKEN}
+            )
+        self.assertEqual(reply, {"challenge": "ch-1"})
+
+    async def test_challenge_bad_token_rejected(self):
+        with self._channel_env():
+            with self.assertRaises(ApiError) as ctx:
+                await im_callback_routes.api_im_card_callback(
+                    {"type": "url_verification", "challenge": "ch-1", "token": "wrong"}
+                )
+        self.assertEqual(ctx.exception.status_code, 401)
+
+    async def test_channel_unconfigured_closed(self):
+        with self._channel_env(token=""):
+            with self.assertRaises(ApiError) as ctx:
+                await im_callback_routes.api_im_card_callback(self._v2())
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertIn("通道关闭", ctx.exception.message)
+
+    async def test_approve_happy_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self._channel_env(), \
+                 mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+                 mock.patch.object(im_callback_routes.gw, "flow_detail", mock.AsyncMock(return_value=self._detail())), \
+                 mock.patch.object(im_callback_routes.gw, "signal_approval", mock.AsyncMock()) as signal, \
+                 mock.patch.object(im_callback_routes.gw, "invalidate_cache") as invalidate, \
+                 mock.patch.object(im_callback_routes.kill_switch, "get_state", return_value={"active": False}), \
+                 mock.patch.object(im_callback_routes.audit, "DATA_DIR", Path(tmp)):
+                reply = await im_callback_routes.api_im_card_callback(self._v2())
+                rows = audit.read_audit()
+        self.assertEqual(reply["toast"]["type"], "success")
+        self.assertIn("一级审批已批准", reply["toast"]["content"])
+        card = reply["card"]
+        self.assertEqual(card["type"], "raw")
+        self.assertEqual(card["data"]["header"]["template"], "green")
+        signal.assert_awaited_once_with(self._WF_ID, "approve")
+        invalidate.assert_called_once()
+        self.assertEqual(rows[0]["actor"], f"im:{self._OPERATOR}")
+        self.assertEqual(rows[0]["action"], "card-callback:approval:approve")
+        self.assertEqual(rows[0]["params"]["channel"], "feishu-card")
+        self.assertEqual(rows[0]["result"], "signaled")
+
+    async def test_second_approval_approve(self):
+        detail = self._detail(status=self._status(needs_second=True, approval="approve"))
+        with self._channel_env(), \
+             mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+             mock.patch.object(im_callback_routes.gw, "flow_detail", mock.AsyncMock(return_value=detail)), \
+             mock.patch.object(im_callback_routes.gw, "signal_second_approval", mock.AsyncMock()) as signal, \
+             mock.patch.object(im_callback_routes.gw, "invalidate_cache"), \
+             mock.patch.object(im_callback_routes.kill_switch, "get_state", return_value={"active": False}), \
+             mock.patch.object(im_callback_routes.audit, "write_audit"):
+            reply = await im_callback_routes.api_im_card_callback(self._v2(gate="second_approval"))
+        self.assertEqual(reply["toast"]["type"], "success")
+        self.assertIn("二级审批已批准", reply["toast"]["content"])
+        signal.assert_awaited_once_with(self._WF_ID, "approve")
+
+    async def test_unmapped_operator_cannot_approve(self):
+        with self._channel_env(users={}), \
+             mock.patch.object(im_callback_routes.gw, "signal_approval", mock.AsyncMock()) as signal:
+            reply = await im_callback_routes.api_im_card_callback(self._v2())
+        self.assertEqual(reply["toast"]["type"], "error")
+        self.assertIn("权限不足", reply["toast"]["content"])
+        signal.assert_not_awaited()
+
+    async def test_missing_operator_rejected(self):
+        with self._channel_env():
+            reply = await im_callback_routes.api_im_card_callback(self._v2(operator=None))
+        self.assertIn("无法识别操作者", reply["toast"]["content"])
+
+    async def test_guard_rejections_return_toast(self):
+        """前置校验与 Web 控制台同款：阶段不符 / 已结束 / 已决策均为 200 + toast error。"""
+        cases = [
+            (self._detail(status=self._status(stage="FIXING")), "不允许该操作"),
+            (self._detail(exec_status="COMPLETED"), "流程已结束"),
+            (self._detail(status=self._status(approval="approve")), "不能重复提交"),
+        ]
+        for detail, expected in cases:
+            with self._channel_env(), \
+                 mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+                 mock.patch.object(im_callback_routes.gw, "flow_detail", mock.AsyncMock(return_value=detail)), \
+                 mock.patch.object(im_callback_routes.kill_switch, "get_state", return_value={"active": False}):
+                reply = await im_callback_routes.api_im_card_callback(self._v2())
+            self.assertEqual(reply["toast"]["type"], "error", expected)
+            self.assertIn("未执行", reply["toast"]["content"])
+            self.assertIn(expected, reply["toast"]["content"])
+
+    async def test_flow_not_found_and_ambiguous(self):
+        with self._channel_env(), \
+             mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=[])):
+            reply = await im_callback_routes.api_im_card_callback(self._v2())
+        self.assertIn("未找到流程", reply["toast"]["content"])
+        items = [dict(self._WAIT_ITEM), {**self._WAIT_ITEM, "wf_id": self._WF_ID + "-2"}]
+        with self._channel_env(), \
+             mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=items)):
+            reply = await im_callback_routes.api_im_card_callback(self._v2(wf_id="aiops-fix-order"))
+        self.assertIn("不唯一", reply["toast"]["content"])
+
+    async def test_kill_switch_active_blocks(self):
+        active = {"active": True, "reason": "演练", "actor": "admin"}
+        with self._channel_env(), \
+             mock.patch.object(im_callback_routes.kill_switch, "get_state", return_value=active):
+            reply = await im_callback_routes.api_im_card_callback(self._v2())
+        self.assertEqual(reply["toast"]["type"], "error")
+        self.assertIn("kill switch", reply["toast"]["content"])
+
+    async def test_invalid_action_payload_toast(self):
+        payload = self._v2()
+        payload["event"]["action"]["value"] = {"wf_id": self._WF_ID}  # 缺 gate/decision
+        with self._channel_env():
+            reply = await im_callback_routes.api_im_card_callback(payload)
+        self.assertIn("无法解析回调载荷", reply["toast"]["content"])
+
+    async def test_encrypted_payload_rejected(self):
+        with self._channel_env():
+            with self.assertRaises(ApiError) as ctx:
+                await im_callback_routes.api_im_card_callback({"encrypt": "abc"})
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("加密", ctx.exception.message)
+
+    async def test_unsupported_event_type_rejected(self):
+        payload = self._v2(event_type="im.message.receive_v1")
+        with self._channel_env():
+            with self.assertRaises(ApiError) as ctx:
+                await im_callback_routes.api_im_card_callback(payload)
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    async def test_legacy_v1_payload_and_response_shape(self):
+        """旧版回调（无 header，action/open_id/token 在顶层）：解析兼容、响应为旧版包装。"""
+        payload = {
+            "open_id": self._OPERATOR,
+            "token": self._TOKEN,
+            "action": {
+                "tag": "button",
+                "value": {"wf_id": self._WF_ID, "gate": "approval", "decision": "reject"},
+            },
+        }
+        with self._channel_env(), \
+             mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+             mock.patch.object(im_callback_routes.gw, "flow_detail", mock.AsyncMock(return_value=self._detail())), \
+             mock.patch.object(im_callback_routes.gw, "signal_approval", mock.AsyncMock()) as signal, \
+             mock.patch.object(im_callback_routes.gw, "invalidate_cache"), \
+             mock.patch.object(im_callback_routes.kill_switch, "get_state", return_value={"active": False}), \
+             mock.patch.object(im_callback_routes.audit, "write_audit"):
+            reply = await im_callback_routes.api_im_card_callback(payload)
+        self.assertEqual(reply["toast"]["type"], "success")
+        self.assertIn("一级审批已驳回", reply["toast"]["content"])
+        self.assertNotIn("type", reply["card"])  # 旧版响应：card 直接为卡片 JSON
+        self.assertEqual(reply["card"]["header"]["template"], "red")
+        signal.assert_awaited_once_with(self._WF_ID, "reject")
+
+    async def test_registered_in_openapi(self):
+        paths = set(app.app.openapi().get("paths", {}))
+        self.assertIn("/api/im/card-callback", paths)
 
 
 if __name__ == "__main__":

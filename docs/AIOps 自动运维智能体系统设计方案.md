@@ -3,8 +3,8 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档版本 | v1.2 |
-| 日期 | 2026-09-30（v1.2 增补 2026-10-13：单机生产化整改 ADR 摘要见 5.1） |
-| 状态 | 已评审定稿（三项关键策略已锁定）；工程实现已按最新现状同步（2026-10-13） |
+| 日期 | 2026-09-30（v1.2 增补 2026-10-13：单机生产化整改 ADR 摘要见 5.1；2026-10-14 同步：飞书卡片回调网关落地，审批交互闭环） |
+| 状态 | 已评审定稿（三项关键策略已锁定）；工程实现已按最新现状同步（2026-10-14） |
 | 适用范围 | 应用服务器异常自愈、AI 辅助代码修复与自动化发布 |
 
 ---
@@ -237,14 +237,14 @@ NOTIFYING（倒计时中）
 | 代码修复引擎 | 本地 LLM（Ollama，默认，`qwen3.8:27b-mlx`）/ Qoder CLI 无头（可选） | 双提供者运行时可切换；失败安全侧降级不中断流程 |
 | CI/CD | GitLab / GitHub / Gitee MR 真实创建 + ArgoCD | 沙箱测试 + GitOps 发布（三平台已实现，见 `git_integration.py`） |
 | 测试沙箱 | Docker 容器隔离（已落地）/ K8s Job + gVisor（集群路径） | 强隔离执行测试（`--network none` 等） |
-| 通知 | 飞书/钉钉交互卡片 + 回调解析；站内弹窗（生产接线项） | 运维卡片已落地；WebSocket 弹窗推送待生产网关接入 |
+| 通知 | 飞书/钉钉交互卡片 + 回调网关；站内弹窗（生产接线项） | 运维卡片与飞书内置回调网关已落地（点击→审批生效→卡片回执，`POST /api/im/card-callback`）；钉钉回调需外置网关；WebSocket 弹窗推送待生产网关接入 |
 | 配置管理 | YAML + pydantic 强校验 | 策略即配置，可评审可回滚 |
 
 ---
 
 ## 8. 工程实现概要
 
-> 本节已按最新工程现状同步（2026-10-13）。演示期桩已全部真实化：真实 LLM 根因/修复、Docker 沙箱验证、金丝雀发布与自动回滚、飞书/钉钉通知（七类卡片，含流程接收/进入修复状态消息）、三平台 MR 创建、控制台 BFF 与前端 SPA、可用性巡检与日志采集闭环、运维治理（清理/轮转/备份/launchd/档位横幅）；单机生产化整改（批次 A–I，见 5.1）已落地：事件聚合持久化、ChatOps 专用通道、发布互斥日志、统一启动门禁、HTTPS/网络收敛产物与加密备份。全量单测 1290 用例（49 个测试文件，2026-10-13 回归复核，skipped=6）。
+> 本节已按最新工程现状同步（2026-10-14）。演示期桩已全部真实化：真实 LLM 根因/修复、Docker 沙箱验证、金丝雀发布与自动回滚、飞书/钉钉通知（七类卡片，含流程接收/进入修复状态消息）+ 飞书卡片回调网关（审批交互闭环：`POST /api/im/card-callback` 验签转发 Temporal 信号、响应 toast + 处置结果卡）、三平台 MR 创建、控制台 BFF 与前端 SPA、可用性巡检与日志采集闭环、运维治理（清理/轮转/备份/launchd/档位横幅）；单机生产化整改（批次 A–I，见 5.1）已落地：事件聚合持久化、ChatOps 专用通道、发布互斥日志、统一启动门禁、HTTPS/网络收敛产物与加密备份。全量单测 1331 用例（49 个测试文件，2026-10-14 回归复核，skipped=6）。
 
 ```text
 aiops-agent/                          # 单一代码库、双模运行（production 默认 / demo 演示）
@@ -255,11 +255,11 @@ aiops-agent/                          # 单一代码库、双模运行（product
 │   ├── triage.py / logs.py / page_health.py      # 分析层（LLM 根因 + Drain3 + 通用白屏判据）
 │   ├── code_rag.py / fix_agent.py / qoder_fix.py # 决策层（Ollama / Qoder 双修复提供者）
 │   ├── sandbox.py / release.py       # Docker 沙箱验证 / 金丝雀发布与自动回滚
-│   ├── notify.py                     # 飞书/钉钉七类交互卡片（含流程通知）+ 回调解析
+│   ├── notify.py                     # 飞书/钉钉七类交互卡片（含流程通知）+ 回调解析（v2/旧版）+ 处置结果卡
 │   ├── git_integration.py            # GitLab / GitHub / Gitee MR 真实创建
 │   └── ...（app_registry / kill_switch / cleanup / db / metrics / tracing 等）
-├── bff/ + web/                       # 控制台：FastAPI BFF（:8600，11 域路由）+ React SPA
-├── demo-app/ + tests/                # 演示被修复服务 / 单元测试（1290 用例）
+├── bff/ + web/                       # 控制台：FastAPI BFF（:8600，14 域路由，含卡片回调网关）+ React SPA
+├── demo-app/ + tests/                # 演示被修复服务 / 单元测试（1331 用例）
 ├── scripts/demo-up.sh                # 一键编排 6 常驻组件 + 组件守护（watchdog）
 ├── release-gate-policy.yaml / demo-policy.yaml   # 生产 / 演示加速策略
 └── demo_cli.py                       # 操作 CLI（start/status/approve/deploy-now/queue-patch）

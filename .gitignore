@@ -38,6 +38,8 @@ data/fix_eval_repo/**/__pycache__/
 # 运行日志（含 rotate-logs.sh 轮转产物 *.log.N.gz）
 *.log
 *.log.[0-9]*.gz
+# 例外：docs/ 验证归档包内的证据日志（如 飞书审批交互-2026-10-14/evidence/*.log），有意入库
+!docs/*/evidence/*.log
 nohup.out
 
 # 数据备份归档（含 .env 密钥，禁止提交；scripts/backup-data.py 生成）

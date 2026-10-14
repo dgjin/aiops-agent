@@ -3,11 +3,11 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档版本 | v1.4 |
-| 日期 | 2026-10-01（v1.4 修订 2026-10-13） |
+| 日期 | 2026-10-01（v1.6 修订 2026-10-14） |
 | 状态 | 已实现系统（与 aiops-agent/ 工程代码逐项对齐） |
 | 关联文档 | 《AIOps 自动运维智能体系统设计方案》v1.1、《AIOps 自动运维智能体系统实施计划》v1.0、《用户操作手册》、《部署手册》 |
 | 适用范围 | 应用服务器异常自愈、AI 辅助代码修复与自动化发布（含演示环境全链路） |
-| 修订记录 | v1.5（2026-10-13）：影子建议续接——影子档 SHADOWED 建议归档评估后可续接执行完整链路（`resume_patch` 快照键复用原补丁、首轮跳过生成直入完整沙箱验证；端点 `POST /api/requirements/analyses/{id}/resume-shadow`，续接流程 id 固定 `-resume1` 幂等防重、会话 `approved.wf_id` 重指向并溯源 `resumed_from`）；发布层门禁按策略档位判定（影子档禁止真实发布 / 全链路放行，策略不可确认 fail-closed 防旁路）；测试基线 1305 用例；v1.4（2026-10-13）：生产档切换全链路执行——`release-gate-policy.yaml` 显式声明 `shadow_mode: false`；`validate_runtime_policy` 由「强制影子档」调整为「production 必须显式声明 shadow_mode（true=影子档 / false=全链路），缺失即拒绝启动」防静默漂移；readiness 配置校验标签 `valid_full_chain`；v1.3（2026-10-13）：IM 流程通知补齐——新增接收/需求接收/进入修复三类流程卡片（4.6 共 7 类卡片），工作流调用以 patched 标记守护（flow-intake-notify-g1 / requirement-intake-notify-g1 / fix-start-notify-g1）；activity 13→16；v1.2：测试基线 836 用例；运维治理加固：组件守护单实例锁与档位锁定+一致性校验、开机自启（launchd）、备份与恢复演练、数据清理与日志轮转、doctor 磁盘水位检查、启动档位横幅；v1.1：测试基线 832 用例；默认模型切换 qwen3.8:27b-mlx；新增 Qoder 修复引擎（4.3.3）、需求分析闭环（4.9）、可用性巡检/日志采集/组件守护；BFF 路由扩至 11 域 |
+| 修订记录 | v1.6（2026-10-14）：飞书卡片回调网关落地（审批交互闭环）——`POST /api/im/card-callback` 接收新版 `card.action.trigger` 回调（Verification Token 验签 via `AIOPS_FEISHU_VERIFY_TOKEN`、挑战握手、加密载荷拒绝），复用角色判定（`AIOPS_IM_USERS`，operator 才可审批）/写守卫/kill switch 转发 Temporal 信号，响应 200 + toast + 处置结果卡（`render_approval_result_card`，防重复点击）；按钮载荷 `wf_id` 改由活动层注入真实流程 ID（`activity.info().workflow_id`，需求/重跑流程与公式值不一致）；middleware 回调通道豁免 Bearer（fail-closed：未配置 503 / 凭证不符 401）；测试基线 1331 用例；v1.5（2026-10-13）：影子建议续接——影子档 SHADOWED 建议归档评估后可续接执行完整链路（`resume_patch` 快照键复用原补丁、首轮跳过生成直入完整沙箱验证；端点 `POST /api/requirements/analyses/{id}/resume-shadow`，续接流程 id 固定 `-resume1` 幂等防重、会话 `approved.wf_id` 重指向并溯源 `resumed_from`）；发布层门禁按策略档位判定（影子档禁止真实发布 / 全链路放行，策略不可确认 fail-closed 防旁路）；测试基线 1305 用例；v1.4（2026-10-13）：生产档切换全链路执行——`release-gate-policy.yaml` 显式声明 `shadow_mode: false`；`validate_runtime_policy` 由「强制影子档」调整为「production 必须显式声明 shadow_mode（true=影子档 / false=全链路），缺失即拒绝启动」防静默漂移；readiness 配置校验标签 `valid_full_chain`；v1.3（2026-10-13）：IM 流程通知补齐——新增接收/需求接收/进入修复三类流程卡片（4.6 共 7 类卡片），工作流调用以 patched 标记守护（flow-intake-notify-g1 / requirement-intake-notify-g1 / fix-start-notify-g1）；activity 13→16；v1.2：测试基线 836 用例；运维治理加固：组件守护单实例锁与档位锁定+一致性校验、开机自启（launchd）、备份与恢复演练、数据清理与日志轮转、doctor 磁盘水位检查、启动档位横幅；v1.1：测试基线 832 用例；默认模型切换 qwen3.8:27b-mlx；新增 Qoder 修复引擎（4.3.3）、需求分析闭环（4.9）、可用性巡检/日志采集/组件守护；BFF 路由扩至 11 域 |
 
 ---
 
@@ -68,7 +68,7 @@
 │                          + 真实探活观测（SLO 判定）→ 全量 / 回滚          │
 ├────────────────────────────────────────────────────────────────────┤
 │ 通知层  notify.py        飞书/钉钉审批卡片、公告卡片、升级卡片 + 真实投递   │
-│                          + 回调契约解析（parse_callback）                │
+│                          + 回调契约解析 + 回调网关（4.6.1）              │
 ├────────────────────────────────────────────────────────────────────┤
 │ 验证层  sandbox.py       SAST 静态扫描 → 工作区准备 → 隔离容器执行单测      │
 │                          （Docker 本机形态 / K8s Job+gVisor 生产形态）     │
@@ -103,7 +103,8 @@
 | Code RAG | `aiops_agent/code_rag.py` | AST 切块、嵌入、FAISS/纯 Python 双后端索引与检索 |
 | 修复 Agent | `aiops_agent/fix_agent.py` | 目标定位、修复 prompt、diff 应用管线、编译校验、兜底补丁 |
 | 沙箱 | `aiops_agent/sandbox.py` | SAST、工作区、Docker/K8s 隔离执行、unittest 解析、TestReport |
-| 通知 | `aiops_agent/notify.py` | 七类卡片渲染（审批/公告/升级/影子建议/接收/需求接收/进入修复）、投递器（recorded/live/failed）、回调解析 |
+| 通知 | `aiops_agent/notify.py` | 七类卡片渲染（审批/公告/升级/影子建议/接收/需求接收/进入修复）+ 处置结果卡（批准/驳回回执）、投递器（recorded/live/failed）、回调解析（新旧版兼容）+ 操作者提取 |
+| 回调网关 | `bff/routes/im_callback.py` | 飞书卡片回调端点（验签/角色/写守卫/kill switch/signal/审计/处置结果卡响应），见 4.6.1 |
 | 发布 | `aiops_agent/release.py` | ArgoCD 渲染/提交、镜像构建、金丝雀容器、探活观测、晋级/回收 |
 | 演示 CLI | `demo_cli.py` | 启动流程、审批/加速/取消/排队、状态查询、结果获取 |
 | 索引工具 | `index_codebase.py` | 建库 / 检索 CLI（代码块 + 历史工单） |
@@ -122,7 +123,7 @@
 | 需求基线 | `analyze_requirements.py`、`aiops_agent/requirement_agent.py`、`requirements_client.py` | 需求导出接口拉取 → LLM 主动分析 → 控制台审批 → 驱动修复流程 |
 | 应用注册表 | `aiops_agent/app_registry.py`、`app_manifest.py` | 清单/Manifest → 修复契约（关键字/健康路径/专属索引/仓库定位） |
 | 变更关联 | `aiops_agent/changes.py` | 最近发布/配置变更注入 triage 上下文（双通道变更源：外部 feed + ArgoCD 留痕） |
-| 控制台 | `bff/` + `web/` | FastAPI BFF（11 域路由，:8600）+ React SPA（同源托管，局域网可访问） |
+| 控制台 | `bff/` + `web/` | FastAPI BFF（14 域路由，:8600）+ React SPA（同源托管，局域网可访问） |
 | 组件守护与编排 | `scripts/aiops-watchdog.py`、`scripts/demo-up.sh` | 6 常驻组件巡检自动拉起（单实例锁 + 档位锁定/一致性校验，可交 launchd 托管）/ 一键启动停止与状态（含档位横幅） |
 | 生产交付物 | `deploy/` | Dockerfile、K8s 清单 12 文件（38 资源）、Prometheus、Grafana |
 
@@ -380,7 +381,17 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 
 - **双 provider**：飞书（interactive card，按钮 `value` 携带回调契约）；钉钉（actionCard，按钮 `actionURL` 查询参数携带回调契约）；
 - **投递器 `NotificationSender`**：三种模式——`live`（配置 webhook 真实 POST 且机器人应答码为 0，飞书加签秒级时间戳/钉钉加签毫秒级时间戳）、`recorded`（未配置 webhook，留痕 `data/notify/<msg_id>.json`）、`failed`（网络异常或机器人应答非零如加签不符，降级并携带原因，**通知失败不阻断修复主流程**）；无论何种模式均先留痕；
-- **回调契约**：按钮载荷 `{"wf_id": "aiops-fix-<service>-<alert_id>", "gate": "approval|second_approval", "decision": "approve|reject"}`；`parse_callback` 同时支持飞书 dict 结构与钉钉 actionURL 字符串，字段缺失或取值非法返回 `None`（服务端据此拒绝）；解析后的合法结果由回调网关转发 workflow signal（生产接线点）。
+- **回调契约**：按钮载荷 `{"wf_id": "<运行中流程真实 ID>", "gate": "approval|second_approval", "decision": "approve|reject"}`——审批卡片在活动层（`notify_approvers`）渲染时经 `activity.info().workflow_id` 注入**运行中真实 workflow id**（需求流程 `aiops-req-…`、重跑/续接流程与公式值 `aiops-fix-<service>-<alert_id>` 不一致；公式值仅作为活动上下文外的回落）；`parse_callback` 同时支持飞书新版（`event.action.value`）/旧版（顶层 `action.value`）dict 结构与钉钉 actionURL 字符串，字段缺失或取值非法返回 `None`（服务端据此拒绝）；解析后的合法结果由内置回调网关转发 workflow signal（见 4.6.1，2026-10-14 落地）；
+
+#### 4.6.1 飞书卡片回调网关（审批交互落地，`bff/routes/im_callback.py`）
+
+飞书审批卡片上「批准 / 驳回」按钮此前仅有意愿、无服务端接线——本节点打通「按钮点击 → 飞书服务器回调 → 网关验签解析 → 权限判定 → Temporal 信号 → 卡片即时更新」全链路（2026-10-14 落地）：
+
+- **协议**：接收新版 `card.action.trigger` 回调（Verification Token 在 `header.token`；`event.operator` 携带操作者身份、`event.action.value` 携带按钮载荷）；兼容旧版结构（`action` 在顶层）；配置回调地址时响应 `url_verification` 挑战握手（回显 `challenge`）；加密模式（Encrypt Key）不支持——携带 `encrypt` 字段的载荷明确拒绝（400，飞书后台需保持明文模式）；
+- **响应契约**：除凭证/格式错误外一律 **HTTP 200 + toast**（飞书要求 3 秒内响应；5xx/超时会触发重试与客户端错误码）——权限不足 / 阶段不符 / 重复提交 / kill switch 等业务拒绝均在响应体 `toast.error` 中说明；审批成功后响应 `{toast: {type: success}, card: {type: raw, data: <处置结果卡>}}` 就地替换按钮区（`render_approval_result_card`：绿=批准 / 红=驳回，无按钮，防重复点击）；旧版回调响应 `card` 直接为卡片 JSON（无 `type/data` 包装）；
+- **安全模型（fail-closed）**：middleware `_CALLBACK_ENDPOINTS` 精确路径豁免 Bearer（飞书无法携带控制台凭证），改以路由内 Verification Token 验签（恒时比较）——`AIOPS_FEISHU_VERIFY_TOKEN` 未配置＝通道关闭（503）、凭证不符＝认证失败（401），挑战握手与动作回调同一校验，不回落常规鉴权；操作者角色按 `AIOPS_IM_USERS` 映射判定（未映射＝viewer，仅 operator 可审批）；写操作复用 `_find_flow`（完整/唯一前缀匹配）+ `_write_guard`（阶段允许 + 防重复）与 kill switch（激活即拒绝）；
+- **审计与可观测**：信号发出后 `invalidate_cache` 刷新缓存、`metrics.observe_gate_event` 计入闸门指标，操作审计 `actor=im:<operator>`、`action=card-callback:approval|second-approval:approve|reject`、`params.channel=feishu-card`；
+- **与同类声明对齐**：操作者身份提取（`extract_callback_operator`）兼容 v2 `event.operator`（open_id/user_id/union_id）与 v1 顶层；响应层写入的 `wf_id` 即按钮回传值，网关内先经 `_find_flow` 解析为真实流程后再发信号。
 
 ### 4.7 执行层（`release.py`）
 
@@ -460,7 +471,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 | triage/fix → Ollama | 出 | `POST /api/chat`（JSON 模式） | `think=false`，`temperature=0.2`；超时 45s |
 | code_rag → Ollama | 出 | embeddings API | `bge-m3:latest`，1024 维 |
 | notify → 飞书/钉钉 | 出 | 群机器人 webhook POST | 加签：飞书秒级补签、钉钉毫秒级签名（query 参数） |
-| 回调网关 → 工作流 | 入→信号 | `parse_callback` 解析后转发信号 | 契约 `{wf_id, gate, decision}`；非法即拒 |
+| 飞书卡片回调 → BFF 网关 | 入 | `POST /api/im/card-callback`（v2 `card.action.trigger`） | 验签 `AIOPS_FEISHU_VERIFY_TOKEN`（未配置 503 / 不符 401）；200 响应 `{toast, card}`（处置结果卡）；契约 `{wf_id, gate, decision}`；非法即拒；见 4.6.1 |
 | release → ArgoCD | 出 | `POST /api/v1/applications` | Bearer token；失败抛错走 activity 重试 |
 | release → 应用容器 | 出 | `GET /health`、`POST /order` | 探活与观测请求（真实 HTTP） |
 | 沙箱 → 运行时 | 出 | Docker CLI / K8s API | 隔离参数见 4.4 |
@@ -548,7 +559,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 
 ## 8 质量保障与评测体系
 
-### 8.1 单元测试矩阵（2026-10-13 回归复核：49 个测试文件 / 1290 用例通过、跳过 6）
+### 8.1 单元测试矩阵（2026-10-14 回归复核：49 个测试文件 / 1331 用例通过、跳过 6）
 
 | 测试文件 | 覆盖范围 |
 | --- | --- |
@@ -559,8 +570,8 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 | `tests/test_vector_backend.py` | FAISS 一致性、陈旧索引回退、依赖缺失回退、修复模型选择 |
 | `tests/test_sandbox.py` | SAST 规则、工作区、unittest 解析、Runner 语义 |
 | `tests/test_release.py` | manifest 渲染、观测判定、promote/回滚、版本号 |
-| `tests/test_notify.py` | 卡片结构、加签、投递模式、回调解析 |
-| `tests/test_auth.py` / `test_bff.py` | 令牌鉴权/轮换/宽限、BFF 路由与阶段校验、审计读写 |
+| `tests/test_notify.py` | 卡片结构、加签、投递模式、回调解析（v2/旧版）、操作者提取、处置结果卡 |
+| `tests/test_auth.py` / `test_bff.py` | 令牌鉴权/轮换/宽限、BFF 路由与阶段校验、审计读写、回调网关（豁免/三态/审批防重/OpenAPI） |
 | `tests/test_mode_db.py` / `test_store_db.py` | 双模判定、fail-fast、DB 引擎与建表、存储分派双后端 |
 | `tests/test_metrics.py` / `test_audit_report.py` | 指标口径（标签集/状态字符串化）、指标服务、审计聚合报表 |
 | `tests/test_monitored_apps.py` | 应用清单 CRUD 双后端 |
@@ -573,7 +584,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 | `tests/test_app_manifest.py` / `test_changes.py` / `test_release_direct.py` / `test_worker_registry.py` | Manifest 校验与探测、变更关联、直连发布、活动注册表防回归 |
 | `tests/test_deploy_manifests.py` | K8s 清单 39 项静态校验（命名空间/镜像/副本/PDB/HPA/探针/PVC/策略/告警名集合对齐）+ compose profiles + Dockerfile |
 
-> 2026-10-13 单机生产化整改后全量回归复核：**Ran 1290 tests — OK（skipped=6）**（49 个测试文件；发现式运行必须带 `-t .`）。整改新增套件包括：`test_production_safety` / `test_chatops` / `test_mcp_server` / `test_alert_store` / `test_release_safety` / `test_release_replay` / `test_backup` / `test_readiness` / `test_startup_mode` / `test_production_deploy` / `test_topology`。同日 IM 流程通知补齐（接收/需求接收/进入修复，activity 13→16）后同口径复核通过；`test_notify` / `test_worker_registry` / `test_release_replay` 覆盖新卡片、活动注册与重放守护。同日生产档切换全链路执行（`release-gate-policy.yaml` 显式 `shadow_mode: false`；统一启动门禁改为「档位必须显式声明」，缺失即拒绝启动）后再次全量复核通过；`test_startup_mode` / `test_readiness` 按放行/拦截双侧更新。同日影子建议续接落地（`resume_patch` 快照键 + `resume-shadow` 端点 + 发布层门禁按档位判定，见 3.1）后再次全量复核：**Ran 1305 tests — OK（skipped=6）**；`test_requirement_workflow`（续接纯函数）/ `test_requirement_analyses`（`apply_resumed`）/ `test_bff_requirements`（端点分支）/ `test_release_safety`（门禁双侧）覆盖。
+> 2026-10-13 单机生产化整改后全量回归复核：**Ran 1290 tests — OK（skipped=6）**（49 个测试文件；发现式运行必须带 `-t .`）。整改新增套件包括：`test_production_safety` / `test_chatops` / `test_mcp_server` / `test_alert_store` / `test_release_safety` / `test_release_replay` / `test_backup` / `test_readiness` / `test_startup_mode` / `test_production_deploy` / `test_topology`。同日 IM 流程通知补齐（接收/需求接收/进入修复，activity 13→16）后同口径复核通过；`test_notify` / `test_worker_registry` / `test_release_replay` 覆盖新卡片、活动注册与重放守护。同日生产档切换全链路执行（`release-gate-policy.yaml` 显式 `shadow_mode: false`；统一启动门禁改为「档位必须显式声明」，缺失即拒绝启动）后再次全量复核通过；`test_startup_mode` / `test_readiness` 按放行/拦截双侧更新。同日影子建议续接落地（`resume_patch` 快照键 + `resume-shadow` 端点 + 发布层门禁按档位判定，见 3.1）后再次全量复核：**Ran 1305 tests — OK（skipped=6）**；`test_requirement_workflow`（续接纯函数）/ `test_requirement_analyses`（`apply_resumed`）/ `test_bff_requirements`（端点分支）/ `test_release_safety`（门禁双侧）覆盖。2026-10-14 飞书卡片回调网关落地（审批交互闭环）后全量复核：**Ran 1331 tests — OK（skipped=6）**；新增 26 用例分布于 `test_notify`（v2 回调解析 / 操作者提取 / 真实 wf_id 注入 / 处置结果卡渲染）与 `test_bff`（middleware 豁免守卫 / 端点三态响应 / 双级审批 / 防重复点击 / 旧版 v1 兼容 / OpenAPI 注册）。
 
 ### 8.2 triage 离线评测（`eval_triage.py`）
 
@@ -611,7 +622,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 | MR 创建 | **已实现**三平台真实创建（GitLab/GitHub/Gitee）+ 降级链（见 4.8） | 按需扩展 Bitbucket 等平台 |
 | K8s 沙箱 | manifest 渲染就绪，本机用 Docker 对齐 | 集群接线：apply Job → 轮询状态 → 读 pod 日志 |
 | WebSocket 公告 | 卡片投递 + 留痕（语义对齐） | 接真实 WS 网关向在线会话推送 |
-| 回调服务端 | `parse_callback` 解析就绪 | 部署 HTTP 回调网关：解析 → 校验 → 转发 signal |
+| 回调服务端 | **已落地**（2026-10-14）：飞书卡片回调网关 `POST /api/im/card-callback`，含验签/角色/写守卫/kill switch/审计全链（见 4.6.1） | 钉钉按钮回调网关切换：actionURL 契约经外置转发器至等价校验后发信号 |
 | 向量库 | FAISS（精确检索，演示规模充分） | 数据规模增长后升级 Milvus 等托管向量库 |
 | 修复引擎 | 默认 Ollama（模型随 triage，`qwen3.8:27b-mlx`） | 可切 `AIOPS_FIX_PROVIDER=qoder`（CLI 无头）/ `AIOPS_FIX_MODEL` 换模 |
 | 感知数据源 | 复用本机监控栈（Loki/Alertmanager） | 接生产 Prometheus/OTel/Filebeat，接口不变 |
@@ -685,7 +696,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 
 ### 10.8 BFF 分层
 
-`bff/routes/`（按域拆分为 13 域：`health` / `flows` / `approvals` / `chatops` / `escalations` / `ops_metrics` / `audit` / `tokens` / `system` / `systems` / `monitored_apps` / `requirements` / `users`）+ `services` 聚合逻辑（`aggregator` / `temporal_gateway` / `runs_store`）+ `middleware`（鉴权/限速/指标/安全头）+ `deps`（依赖注入）。写操作路由保持 stage 前置校验（不满足 409）与操作审计钩子；前端 SPA（`web/`）由 BFF 同源托管，`--host 0.0.0.0` 时局域网可访问。
+`bff/routes/`（按域拆分为 14 域：`health` / `flows` / `approvals` / `chatops` / `im_callback` / `escalations` / `ops_metrics` / `audit` / `tokens` / `system` / `systems` / `monitored_apps` / `requirements` / `users`）+ `services` 聚合逻辑（`aggregator` / `temporal_gateway` / `runs_store`）+ `middleware`（鉴权/限速/指标/安全头）+ `deps`（依赖注入）。写操作路由保持 stage 前置校验（不满足 409）与操作审计钩子；前端 SPA（`web/`）由 BFF 同源托管，`--host 0.0.0.0` 时局域网可访问。
 
 ### 10.9 部署面
 

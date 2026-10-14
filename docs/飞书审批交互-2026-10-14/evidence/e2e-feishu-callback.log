@@ -1,0 +1,15 @@
+[07:51:27] PASS: admin 登录（HTTP 200）：{"server_time": "2026-10-13T23:51:27.826678+00:00", "token": "<redacted>", "user": "admin", "role": "admin", "expires_at": "2026-10-14T11:51:27+00:00", "ttl_seconds": 
+[07:51:27] 会话令牌 user=admin role=admin
+[07:51:27] PASS: 创建需求分析 e2e-cb-1（HTTP 200）：{"server_time": "2026-10-13T23:51:27.849232+00:00", "analysis": {"id": "ra-app-d42214-e2e-cb-1", "app_id": "app-d42214", "service": "nl2sql", "entry_id": "e2e-cb-1", "entry_title": "审批回调链路端到端验证（自动化）", "entry_kind": "feature", "entry_priority": "P2", "entry_snapshot": {"id": "e2e-cb-1", "kind": "feat
+[07:51:27] analysis_id=ra-app-d42214-e2e-cb-1 started=True
+[07:51:48] 分析完成：version=1 status=analyzed
+[07:51:48] PASS: 批准启动修复流程（HTTP 200）：{"server_time": "2026-10-13T23:51:48.154801+00:00", "analysis": {"id": "ra-app-d42214-e2e-cb-1", "app_id": "app-d42214", "service": "nl2sql", "entry_id": "e2e-cb-1", "entry_title": "审批回调链路端到端验证（自动化）", "entry_kind": "feature", "entry_priority": "P2", "entry_snapshot": {"id": "e2e-cb-1", "kind": "feat
+[07:51:48] wf_id=aiops-req-ra-app-d42214-e2e-cb-1-v1
+[07:57:20] PASS: 补丁已生成：patch_id=p-req-e2e-cb-1-r0
+[07:57:20] PASS: 审批卡片已落盘：approval-p-req-e2e-cb-1-r0.json
+[07:57:20] PASS: 卡片含按钮区（action）
+[07:57:20] PASS: 按钮 wf_id == 运行中真实流程 ID（aiops-req-ra-app-d42214-e2e-cb-1-v1）
+[07:57:20] PASS: 回调 HTTP 200（200）：{"toast": {"type": "success", "content": "一级审批已批准（操作者 demo-ops）"}, "card": {"type": "raw", "data": {"header": {"title": {"tag": "plain_text", "content": "AI 修复审批处置结果 · aiops-req-ra-app-d42214-e2e-cb-1-v1"}, "template": "green"}, "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "✅ **
+[07:57:20] PASS: toast.success：一级审批已批准（操作者 demo-ops）
+[07:57:20] PASS: 响应携带处置结果卡（card.type=raw）
+[07:57:20] FAIL: 结果卡标题含「一级审批已批准」：{"title": {"tag": "plain_text", "content": "AI 修复审批处置结果 · aiops-req-ra-app-d42214-e2e-cb-1-v1"}, "template": "green"}

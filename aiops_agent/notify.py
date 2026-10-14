@@ -10,10 +10,17 @@
     NotificationSender.send   配置 webhook 时真实 POST（支持飞书/钉钉加签）；
                               未配置时留痕 data/notify/<msg_id>.json（recorded）；
                               投递失败或机器人应答非零（如加签不符）降级为 failed，不阻断修复主流程
-    parse_callback            卡片按钮回调解析（飞书 action.value / 钉钉 actionURL 查询参数），
-                              返回 (workflow_id, gate, decision)，供回调服务端校验后转发 signal
+    parse_callback            卡片按钮回调解析（飞书 v2 卡片动作事件 / v1 action.value /
+                              钉钉 actionURL 查询参数），返回 (workflow_id, gate, decision)，
+                              供回调服务端校验后转发 signal
+    extract_callback_operator 回调触发者提取（飞书 v2 event.operator / v1 open_id），
+                              用于审批人身份与命令级权限判定
+    render_approval_result_card  审批处置结果卡片（卡片回调响应：按钮区替换为处置结果）
 
 回调契约（按钮载荷）：{"wf_id": "aiops-fix-order-a-1", "gate": "approval", "decision": "approve"}
+
+回调网关：BFF ``POST /api/im/card-callback`` 接收飞书卡片动作回调（Verification Token
+校验 fail-closed）→ 解析载荷与操作者 → 转发 Temporal signal → 3 秒内响应 toast + 更新卡片。
 
 环境变量：
     AIOPS_NOTIFY_PROVIDER                       feishu / dingtalk（默认 feishu）
@@ -21,6 +28,8 @@
     AIOPS_NOTIFY_WEBHOOK                        群机器人 webhook（未设置则留痕模式）
     AIOPS_NOTIFY_SECRET                         加签密钥（可选；飞书秒级 / 钉钉毫秒级签名）
     AIOPS_NOTIFY_CALLBACK_BASE                  钉钉按钮回调基址（默认本机演示地址）
+    AIOPS_FEISHU_VERIFY_TOKEN                   飞书卡片回调 Verification Token
+                                                （未配置＝回调通道关闭，BFF 侧读取）
 """
 
 from __future__ import annotations
@@ -74,9 +83,15 @@ def render_approval_card(
     *,
     provider: str = DEFAULT_PROVIDER,
     callback_base: str = DEFAULT_CALLBACK_BASE,
+    wf_id: str | None = None,
 ) -> dict:
-    """审批卡片：根因分析 + 完整 diff + 测试报告 + 回滚预案 + 审批按钮。"""
-    wf_id = _workflow_id(alert)
+    """审批卡片：根因分析 + 完整 diff + 测试报告 + 回滚预案 + 审批按钮。
+
+    ``wf_id`` 为按钮回调载荷中的流程标识：活动层应传入运行中的真实 workflow id
+    （需求流程 / 重跑后缀流程的公式值与实际 ID 不一致，否则点击回调无法定位流程）；
+    缺省按 ``aiops-fix-{service}-{alert_id}`` 公式生成（兼容直接调用场景）。
+    """
+    wf_id = wf_id or _workflow_id(alert)
     title = f"AI 修复待审批 · {alert.service}/{alert.alert_id}"
     test_line = (
         f"单测 {test_report.unit_tests} / 回归 {test_report.regression_tests} / SAST {test_report.sast}"
@@ -507,8 +522,9 @@ class NotificationSender:
 def parse_callback(payload: dict | str) -> tuple[str, str, str] | None:
     """解析卡片按钮回调（回调服务端入口）。
 
-    支持两种结构：
-        飞书：{"action": {"value": {"wf_id": ..., "gate": ..., "decision": ...}}}
+    支持三种结构：
+        飞书 v2：{"event": {"action": {"value": {"wf_id": ..., ...}}}}（card.action.trigger）
+        飞书 v1：{"action": {"value": {"wf_id": ..., ...}}}
         钉钉：actionURL 字符串（查询参数携带同构字段）
     返回 (wf_id, gate, decision)；字段缺失或取值非法返回 None（服务端据此拒绝）。
     """
@@ -516,7 +532,10 @@ def parse_callback(payload: dict | str) -> tuple[str, str, str] | None:
     if isinstance(payload, str):
         data = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(payload).query))
     elif isinstance(payload, dict):
-        action = payload.get("action", payload)
+        # 飞书 v2 卡片动作事件：action.value 位于 event 内；v1 / 通用结构 action 在顶层
+        event = payload.get("event")
+        source = event if isinstance(event, dict) else payload
+        action = source.get("action", source)
         if isinstance(action, dict):
             value = action.get("value", action)
             if isinstance(value, dict):
@@ -531,3 +550,67 @@ def parse_callback(payload: dict | str) -> tuple[str, str, str] | None:
     if not wf_id or gate not in _ALLOWED_GATES or decision not in _ALLOWED_DECISIONS:
         return None
     return wf_id, gate, decision
+
+
+def extract_callback_operator(payload: dict) -> str:
+    """提取卡片回调触发者标识（审批人身份与命令级权限判定的输入）。
+
+    飞书 v2：``event.operator.open_id / user_id / union_id``；
+    旧版 / 通用：顶层 ``open_id / user_id``。未命中返回空串（调用方拒绝并提示）。
+    """
+    if not isinstance(payload, dict):
+        return ""
+    event = payload.get("event")
+    containers = [item for item in (event, payload) if isinstance(item, dict)]
+    for container in containers:
+        operator = container.get("operator")
+        for source in (operator, container):
+            if not isinstance(source, dict):
+                continue
+            for key in ("open_id", "user_id", "union_id"):
+                value = source.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    return ""
+
+
+# 闸门 / 决策中文标签（回调处置结果卡片用）
+_GATE_LABELS = {"approval": "一级审批", "second_approval": "二级审批"}
+_RESULT_LABELS = {"approve": "已批准", "reject": "已驳回"}
+
+
+def render_approval_result_card(
+    wf_id: str, gate: str, decision: str, operator: str, at: str
+) -> dict:
+    """审批处置结果卡片（卡片回调响应：按钮区替换为处置结果，防重复点击与状态不明）。
+
+    返回飞书 1.0 交互卡片消息结构；回调端点取 ``["card"]`` 作为响应 ``type=raw`` 数据。
+    ``at`` 为处置时间（调用方格式化）；渲染层保持纯函数（无时钟依赖）。
+    """
+    icon = "✅" if decision == "approve" else "❌"
+    action_label = f"{_GATE_LABELS.get(gate, gate)}{_RESULT_LABELS.get(decision, decision)}"
+    title = f"AI 修复审批处置结果 · {wf_id}"
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "header": {
+                "title": {"tag": "plain_text", "content": title},
+                "template": "green" if decision == "approve" else "red",
+            },
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": f"{icon} **{action_label}**"}},
+                {"tag": "div", "text": {"tag": "lark_md", "content": f"**流程**：{wf_id}"}},
+                {
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": f"**操作者**：{operator} · {at}"},
+                },
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": "流程将继续推进；后续节点（公告/发布/终态）将另行通知。",
+                    },
+                },
+            ],
+        },
+    }

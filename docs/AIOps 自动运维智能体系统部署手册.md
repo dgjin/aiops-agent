@@ -6,7 +6,7 @@
 | 日期 | 2026-10-12 |
 | 适用对象 | SRE / 实施工程师 / 环境维护人员 |
 | 关联文档 | 《系统设计说明书》、《用户操作手册》 |
-| 修订记录 | v1.1（2026-10-12）：同步最新工程现状——BFF 控制台（0.0.0.0:8600，支持局域网访问）、可用性巡检 / 日志采集 / 组件守护、需求基线闭环、Qoder 修复引擎、模型默认值切换（qwen3.8:27b-mlx）、测试基线 836 用例；v1.2（2026-10-12）：运维治理（沙箱清理 / 日志轮转 / 数据备份与恢复演练 / launchd 开机自启）、watchdog 单实例锁与档位锁定；v1.3（2026-10-12）：P1 生产就绪续轮——Temporal dev server 持久化语义实测文档化（§2.4.1）、watchdog RSS 内存守护（AIOPS_WATCHDOG_RSS_MB，doctor「组件内存」检查项）、沙箱产物独立卷 env 化（AIOPS_SANDBOX_ROOT / AIOPS_QODER_ROOT，代码/清理/doctor/K8s 同源）、测试基线 857 用例；v1.4（2026-10-13）：IM 流程通知补齐（接收/需求接收/进入修复卡片，activity 13→16）、测试基线 1289 用例；v1.5（2026-10-13）：生产档切换全链路执行（`release-gate-policy.yaml` 显式 `shadow_mode: false`；生产档「必须显式声明档位」校验保留），策略变更后须 `./start.sh restart` 受控重启、测试基线 1290 用例；v1.6（2026-10-13）：影子建议续接（`resume-shadow` 端点复用影子档补丁续接完整链路）；发布层门禁按策略档位判定（影子档禁止真实发布 / 全链路放行；已注册直连型应用 `deploy_canary` 放行）、测试基线 1305 用例 |
+| 修订记录 | v1.7（2026-10-14）：飞书卡片回调网关（审批交互落地）——`POST /api/im/card-callback` 接收 `card.action.trigger` 回调并直通 Temporal 审批信号（Verification Token 验签、挑战握手、加密载荷拒绝、200+toast 响应含处置结果卡）；新增环境变量 `AIOPS_FEISHU_VERIFY_TOKEN`（未配置＝通道关闭）与飞书后台配置步骤（见 3.9，原 3.9 MCP 顺延为 3.10）；测试基线 1331 用例；v1.1（2026-10-12）：同步最新工程现状——BFF 控制台（0.0.0.0:8600，支持局域网访问）、可用性巡检 / 日志采集 / 组件守护、需求基线闭环、Qoder 修复引擎、模型默认值切换（qwen3.8:27b-mlx）、测试基线 836 用例；v1.2（2026-10-12）：运维治理（沙箱清理 / 日志轮转 / 数据备份与恢复演练 / launchd 开机自启）、watchdog 单实例锁与档位锁定；v1.3（2026-10-12）：P1 生产就绪续轮——Temporal dev server 持久化语义实测文档化（§2.4.1）、watchdog RSS 内存守护（AIOPS_WATCHDOG_RSS_MB，doctor「组件内存」检查项）、沙箱产物独立卷 env 化（AIOPS_SANDBOX_ROOT / AIOPS_QODER_ROOT，代码/清理/doctor/K8s 同源）、测试基线 857 用例；v1.4（2026-10-13）：IM 流程通知补齐（接收/需求接收/进入修复卡片，activity 13→16）、测试基线 1289 用例；v1.5（2026-10-13）：生产档切换全链路执行（`release-gate-policy.yaml` 显式 `shadow_mode: false`；生产档「必须显式声明档位」校验保留），策略变更后须 `./start.sh restart` 受控重启、测试基线 1290 用例；v1.6（2026-10-13）：影子建议续接（`resume-shadow` 端点复用影子档补丁续接完整链路）；发布层门禁按策略档位判定（影子档禁止真实发布 / 全链路放行；已注册直连型应用 `deploy_canary` 放行）、测试基线 1305 用例 |
 
 ---
 
@@ -75,7 +75,7 @@ export AIOPS_POLICY_PATH=./demo-policy.yaml
 .venv/bin/python -m aiops_agent.worker
 
 # ⑧ 冒烟（另开终端，同样 export 策略）
-.venv/bin/python -m unittest discover -s tests -t . -v       # 期望 1290 用例全绿
+.venv/bin/python -m unittest discover -s tests -t . -v       # 期望 1331 用例全绿
 .venv/bin/python demo_cli.py start --service order --alert-id smoke-001
 ```
 
@@ -254,7 +254,7 @@ nohup .venv/bin/python -m uvicorn bff.app:app --host 0.0.0.0 --port 8600 > bff.l
 ### 2.11 冒烟验证
 
 ```bash
-# ① 单元测试（期望：Ran 1290 tests ... OK；必须带 -t .，防止误收集 data/ 下演示样例）
+# ① 单元测试（期望：Ran 1331 tests ... OK；必须带 -t .，防止误收集 data/ 下演示样例）
 .venv/bin/python -m unittest discover -s tests -t . -v
 
 # ② 向量检索冒烟（FAISS/Python 双后端一致性）
@@ -405,7 +405,36 @@ curl -X POST http://127.0.0.1:8600/api/im/command \
 
 回复契约：命令级失败（权限不足 / 未找到流程 / 前置校验不过）也返回 200 + `ok:false`（`reply` 含原因，由网桥转回群）；仅「载荷无法解析 = 400」「系统级故障（kill switch / Temporal 不可达）= 5xx」走错误状态码。审批执行复用流程域同款写守卫；写命令受 kill switch 阻断（查询命令保留可用），操作审计 actor 记为 `im:<sender>`。
 
-### 3.9 MCP server（能力对外暴露，可选）
+### 3.9 飞书卡片回调网关（审批交互，2026-10-14 落地）
+
+审批卡片上的「批准 / 驳回」按钮点击后由飞书服务器回调本系统内置网关（**无需新增进程**，BFF 域 `bff/routes/im_callback.py`），全链：验签 → 解析按钮载荷与操作者身份 → 角色判定 → 写守卫 → Temporal 审批信号 → 响应 toast + 处置结果卡（就地替换按钮区，防重复点击）。
+
+```bash
+# .env：Verification Token（必填；未配置＝通道关闭 503）。
+# 取值 = 飞书开放平台：事件与回调 → 加密策略 → Verification Token（卡片回调需明文模式，Encrypt Key 不启用）
+AIOPS_FEISHU_VERIFY_TOKEN=<openssl rand -hex 24 或飞书后台既有 Token>
+```
+
+**飞书后台配置（开发者后台 → 应用 → 事件与回调 → 回调配置）**：
+
+1. 订阅方式选「将回调发送至开发者服务器」，请求地址填 `https://<本机IP>:8643/api/im/card-callback`（生产档经 Caddy，见第 9 章；本机演示可填 `http://127.0.0.1:8600/api/im/card-callback`）；
+2. 加密策略保持**明文模式**（启用 Encrypt Key 会被网关明确拒绝 400）；
+3. 保存时飞书发起 `url_verification` 挑战握手，网关校验 Token 后回显 `challenge`——若报校验失败，先核对 `AIOPS_FEISHU_VERIFY_TOKEN` 与后台一致性再重启 BFF；
+4. 仅需订阅新版卡片回调（`card.action.trigger`）；飞书后台「回调订阅」自动对卡片生效，无需额外订阅事件。
+
+审批人身份取自回调载荷 `event.operator`（open_id/user_id/union_id 依次尝试），角色按 `AIOPS_IM_USERS` 映射判定——**未映射＝viewer（仅可查询），仅 operator 可审批**；审批只认发卡时嵌入的运行中真实流程 ID（旧卡片含公式 ID 的，走控制台/ChatOps 兼容）。手工验证：
+
+```bash
+TOKEN=$AIOPS_FEISHU_VERIFY_TOKEN; WF=aiops-fix-nl2sql-demo-1
+curl -X POST http://127.0.0.1:8600/api/im/card-callback -H "Content-Type: application/json" -d "{
+  \"schema\":\"2.0\",\"header\":{\"event_type\":\"card.action.trigger\",\"token\":\"$TOKEN\"},
+  \"event\":{\"operator\":{\"open_id\":\"ou_xxx\"},\"action\":{\"tag\":\"button\",\"value\":{\"wf_id\":\"$WF\",\"gate\":\"approval\",\"decision\":\"approve\"}}}}"
+# → {"toast":{"type":"success","content":"一级审批已批准（操作者 ou_xxx）"},"card":{"type":"raw",...}}（业务拒绝为 toast.error + HTTP 200）
+```
+
+> 响应策略：除凭证/格式错误（401/400）与通道关闭（503）外一律 HTTP 200 + toast（协议要求 3 秒内响应，5xx 会触发飞书重试）；业务拒绝（权限不足 / 阶段不符 / 重复提交 / kill switch）在 toast 中说明。操作审计 `actor=im:<operator>`、`action=card-callback:*`。
+
+### 3.10 MCP server（能力对外暴露，可选）
 
 把控制台能力以 MCP 工具形态暴露给外部 Agent 平台（Claude Desktop / Cursor 等）。实现为薄 HTTP 适配层（仓库根 `mcp_server.py`），全部调用转发 BFF `/api/*`——**不绕过**控制台鉴权 / 写守卫 / 审计 / kill switch；独立可选依赖，不装不影响主链路。
 
@@ -491,8 +520,9 @@ export AIOPS_MCP_TOKEN=<控制台令牌>                 # 透传 BFF 鉴权；�
 | `AIOPS_QODER_ROOT` | `./data/qoder` | worker（qoder） | Qoder 隔离工作区根目录 |
 | `AIOPS_IM_TOKEN` | 空（通道关闭） | BFF | IM 通道（ChatOps）鉴权令牌，见 3.8 |
 | `AIOPS_IM_USERS` | 空（全员 viewer） | BFF | 发送者角色映射 JSON（`{"<sender>":"operator"}` 或 `{"<sender>":{"role":"admin"}}`） |
-| `AIOPS_MCP_BASE_URL` | `http://127.0.0.1:8600` | mcp_server | MCP server 转发的 BFF 地址，见 3.9 |
-| `AIOPS_MCP_TOKEN` | 空（工具调用 401） | mcp_server | MCP 侧透传的控制台令牌（决定能力边界），见 3.9 |
+| `AIOPS_FEISHU_VERIFY_TOKEN` | 空（通道关闭 503） | BFF | 飞书卡片回调验签 Token（= 飞书后台 Verification Token，明文模式），见 3.9 |
+| `AIOPS_MCP_BASE_URL` | `http://127.0.0.1:8600` | mcp_server | MCP server 转发的 BFF 地址，见 3.10 |
+| `AIOPS_MCP_TOKEN` | 空（工具调用 401） | mcp_server | MCP 侧透传的控制台令牌（决定能力边界），见 3.10 |
 
 > 快照语义提醒：`AIOPS_TRIAGE_MODEL` / `AIOPS_FIX_MODEL` / `AIOPS_EMBED_MODEL` / `AIOPS_LOKI_URL` 在模块 import 时读取，**修改后需重启 worker**。
 >
@@ -634,7 +664,7 @@ docker compose --profile obs up -d    # Prometheus http://127.0.0.1:9095 / Grafa
 - 一致性：`workflow_runs` 表与 Temporal 工作流记录 1:1（同步任务实测）；
 - SAST：Bandit HIGH=0（16 个 Medium 均为已知误报 / 设计需要，见 `scripts/security-scan.sh` 头注）；
 - 镜像构建实测：`docker build` 成功（753MB / 压缩 168MB）；容器内：非 root（uid=10001）、`cleanup --dry-run` 正常、BFF `/metrics` 200 / 无令牌 401 / 带令牌 200（Temporal connected=true）、SPA 首页 200；
-- 全量单测零回归（b9 验收时 471 用例；当前全量基线 1290 用例 / 49 个测试文件，含部署清单 39 项静态校验）。
+- 全量单测零回归（b9 验收时 471 用例；当前全量基线 1331 用例 / 49 个测试文件，含部署清单 39 项静态校验）。
 
 ### 5.5 生产接线点清单（按需启用）
 
@@ -642,7 +672,7 @@ docker compose --profile obs up -d    # Prometheus http://127.0.0.1:9095 / Grafa
 | --- | --- | --- | --- |
 | 1 | 沙箱 | Docker 容器真实隔离已落地；K8s Job manifest 渲染保留 | 集群内切换 gVisor runtimeClass 提交 `batch/v1 Job` |
 | 2 | 发布 | ArgoCD 真实提交 + Docker 滚动金丝雀已落地 | 配置 `AIOPS_ARGOCD_URL/TOKEN`；镜像前缀指向制品仓库 |
-| 3 | 通知 | 飞书/钉钉交互卡片 + 回调解析已落地 | 部署回调网关（`notify.parse_callback` → 校验 → Temporal 信号） |
+| 3 | 通知 | 飞书/钉钉交互卡片 + **钉钉**回调解析已落地 | 飞书卡片回调网关**已落地**（`POST /api/im/card-callback`，见 3.9）；钉钉按钮回调需外置网关转发等价信号 |
 | 4 | 公告 | 卡片投递 + 留痕已落地 | 接 WebSocket 网关推送站内弹窗 |
 | 5 | 感知层 | 本机 Loki/Alertmanager 实测链路 | 接生产 Prometheus/Alertmanager/Loki/OTel；`aiops_demo` 标签改专用 receiver |
 | 6 | MR | **已实现**三平台真实创建（GitLab/GitHub/Gitee，`aiops_agent/git_integration.py`） | 策略 `git:` 段配置 `repo_url` + `AIOPS_GIT_TOKEN` 注入 |
@@ -656,7 +686,7 @@ docker compose --profile obs up -d    # Prometheus http://127.0.0.1:9095 / Grafa
 
 | # | 验证项 | 方法 | 通过标准 |
 | --- | --- | --- | --- |
-| 1 | 单元测试 | `.venv/bin/python -m unittest discover -s tests -t .` | 1290 用例全绿 |
+| 1 | 单元测试 | `.venv/bin/python -m unittest discover -s tests -t .` | 1331 用例全绿 |
 | 2 | 策略校验 | 启动 worker | 打印策略快照；非法 YAML 启动即失败 |
 | 3 | 向量检索 | `index_codebase.py --query ...` | 返回相似度有序的代码块/工单 |
 | 4 | 双后端一致性（可选） | 分别以 `AIOPS_VECTOR_BACKEND=faiss/python` 检索同一 query | 结果与相似度一致 |
@@ -992,13 +1022,14 @@ aiops-agent/
 │   ├── app_manifest.py / app_registry.py / changes.py
 │   └── db.py / kill_switch.py / metrics.py / cleanup.py / tracing.py
 ├── bff/                        # 控制台 BFF（FastAPI :8600；聚合 Temporal + 磁盘留痕）
-│   └── routes/                 # 11 域路由：flows / approvals / audit / health / monitored_apps /
-│                               # system / tokens / escalations / requirements / users / ops_metrics
+│   └── routes/                 # 14 域路由：flows / approvals / audit / health / monitored_apps /
+│                               # system / tokens / escalations / requirements / users / ops_metrics /
+│                               # chatops / systems / im_callback（飞书卡片回调网关）
 ├── web/                        # React SPA（vite build → web/dist，由 BFF 同源托管）
 ├── demo-app/                   # 演示被修复的服务（源码 + tests + Dockerfile + http_server）
 ├── scripts/                    # demo-up.sh（一键编排）/ aiops-watchdog.py（组件守护）/
 │                               # production-smoke.py / security-scan.sh / scenarios/**（8 场景剧本）
-├── tests/                      #  单元测试（49 个测试文件 / 1290 用例）
+├── tests/                      #  单元测试（49 个测试文件 / 1331 用例）
 ├── monitoring/                 # Alertmanager 路由注入脚本
 ├── prometheus/                 # 告警规则样例
 ├── data/                       # 索引 / 留痕 / 沙箱工作区 / 评测报告（运行期生成）

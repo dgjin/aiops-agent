@@ -425,6 +425,9 @@ async def notify_approvers(
     from . import notify
 
     sender = notify.NotificationSender()
+    # 按钮回调载荷须携带运行中的真实 workflow id（公式值与需求/重跑流程的实际 ID
+    # 不一致，会导致点击回调无法定位流程）；活动上下文外（单测直调）回落公式。
+    wf_id = activity.info().workflow_id if activity.in_activity() else None
     card = notify.render_approval_card(
         alert,
         root_cause,
@@ -433,6 +436,7 @@ async def notify_approvers(
         needs_second,
         provider=sender.provider,
         callback_base=sender.callback_base,
+        wf_id=wf_id,
     )
     delivery = sender.send(card, msg_id=f"approval-{patch.patch_id}")
     log.info("================= 审批卡片 =================")
