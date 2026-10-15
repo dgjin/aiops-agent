@@ -407,6 +407,18 @@ export interface RequirementsApp {
   enabled: boolean
 }
 
+/** 跨系统聚合（app_id=all）的单系统拉取状态（逐系统容错；失败携中文原因）。 */
+export interface RequirementSourceSummary {
+  id: string
+  name: string
+  service: string
+  /** 系统名（导出响应 system，缺失回退应用名）。 */
+  system: string
+  ok: boolean
+  error: string
+  returned: number
+}
+
 /** 需求评估历史条目（被监控系统 v0.9.102：继续评估的每次结论；时间升序）。 */
 export interface RequirementRevision {
   id: number
@@ -437,6 +449,11 @@ export interface RequirementsEntry {
   updatedAt: string | null
   /** 评估历史（可能缺省：老版本被监控系统不带该字段）。 */
   revisions?: RequirementRevision[]
+  /** 聚合模式（app_id=all）来源标注：条目所属被监控应用 / 系统（单系统模式缺省）。 */
+  _source_app_id?: string
+  _source_app_name?: string
+  _source_service?: string
+  _source_system?: string
 }
 
 /** 需求基线读接口响应（BFF 代拉标准导出接口；ok=false 时 error 为中文原因）。 */
@@ -446,6 +463,8 @@ export interface RequirementsResp extends Timed {
   warnings: string[]
   apps: RequirementsApp[]
   app: RequirementsApp | null
+  /** 聚合模式标识（app_id=all；单系统模式缺省）。 */
+  aggregated?: boolean
   url: string
   service: string
   system: string
@@ -453,6 +472,8 @@ export interface RequirementsResp extends Timed {
   filter: Record<string, unknown>
   returned: number
   entries: RequirementsEntry[]
+  /** 各系统拉取状态（聚合模式有意义；单系统模式为空数组）。 */
+  sources: RequirementSourceSummary[]
 }
 
 /** ===== 需求智能分析闭环（查看 / 反馈再分析 / 批准进入修复工作流）===== */

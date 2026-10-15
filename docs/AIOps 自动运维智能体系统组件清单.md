@@ -111,7 +111,7 @@
 | `FlowDetail` | 流程详情（阶段条、倒计时、Diff 视图、事件时间线、审批操作） |
 | `Approvals` | 审批中心（待办过滤语义：仅展示可写阶段） |
 | `WindowPage` | 发布窗口/倒计时管理 |
-| `Requirements` | 需求基线（状态徽标、智能分析入口） |
+| `Requirements` | 需求基线（状态徽标、智能分析入口；数据源支持「全部系统」跨系统聚合与来源系统筛选/统计） |
 | `Escalations` | 升级人工队列 |
 | `Audit` | 审计回看（流程审计 Tab + 操作审计） |
 | `MonitoredApps` | 被监控应用管理 |

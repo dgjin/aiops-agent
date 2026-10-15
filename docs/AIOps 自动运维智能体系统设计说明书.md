@@ -435,7 +435,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 - **分析**（`requirement_agent.analyze_requirement`）：需求原文 + 管理员历次反馈 + 上一版分析（迭代注入）+ Code RAG 引用 → 本地 LLM（JSON 模式，模型 `AIOPS_REQUIREMENT_MODEL`，缺省复用 triage 默认模型）→ pydantic 校验；失败降级为 degraded 分析（confidence=0），不抛异常；
 - **安全侧原则**：分析结果只进入「展示 + 待批准」链路，LLM 不直接触发执行——能否进入修复工作流由管理员批准决定；
 - **CLI**（`analyze_requirements.py`）：拉取 + 汇总（类型/优先级/版本分布、P0/P1 高优提示）→ Markdown 报告或 `--json` 输出；
-- **控制台**：BFF `routes/requirements` 提供界面（应用选择/令牌指引/拉取透传），`bff/requirement_analyses.py` 双模存储分析闭环状态。
+- **控制台**：BFF `routes/requirements` 提供界面（应用选择/令牌指引/拉取透传），`bff/requirement_analyses.py` 双模存储分析闭环状态；数据源支持**跨系统聚合**（`app_id=all` 哨兵）——对全部启用应用 `asyncio.gather` 并行拉取、条目合并并以 `_source_app_id/_source_app_name/_source_service/_source_system` 标注来源（前端「来源系统」列 / 筛选 / 统计的口径），`sources` 逐系统状态 + `warnings` 中文提示实现**逐系统容错**（单系统失败不影响其余条目，全部失败才 `ok=false`）；聚合视图下智能分析 / 审批按条目来源应用归口（分析映射键 `app_id:entry_id`，防跨系统 id 撞车）。
 
 ---
 

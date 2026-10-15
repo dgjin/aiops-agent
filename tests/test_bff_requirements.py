@@ -81,6 +81,7 @@ class RequirementsRouteTest(unittest.TestCase):
         self.assertEqual(data["entries"], [_ENTRY])
         self.assertEqual(data["system"], "被监控系统")
         self.assertEqual(data["exported_at"], "2026-10-09T00:00:00+00:00")
+        self.assertEqual(data["sources"], [])  # 单系统模式：无来源聚合
 
     def test_explicit_app_id_respected_even_if_disabled(self) -> None:
         data = self._call(app_id="app-a")
@@ -137,6 +138,128 @@ class RequirementsRouteTest(unittest.TestCase):
         self.assertEqual(kwargs["kind"], "BUG")
         self.assertEqual(kwargs["since"], "2026-10-01")
         self.assertEqual(kwargs["limit"], 50)
+
+
+class AggregateRouteTest(unittest.TestCase):
+    """跨系统聚合（app_id=all）：启用项并行拉取、来源标注、逐系统容错与失败汇总。"""
+
+    def setUp(self) -> None:
+        apps_patcher = mock.patch.object(routes.store, "list_all", return_value=list(_APPS))
+        self.list_all = apps_patcher.start()
+        self.addCleanup(apps_patcher.stop)
+
+        env_patcher = mock.patch.dict(os.environ, {requirements_client.TOKEN_ENV: "tok-x"})
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
+
+    def _call(self, **overrides):
+        params = dict(app_id="all", status="BASELINED", kind="", since="", limit=200)
+        params.update(overrides)
+        return asyncio.run(routes.api_requirements(**params))
+
+    @staticmethod
+    def _result(
+        url: str, *, system: str = "", entry_id: int = 0, ok: bool = True, error: str = ""
+    ) -> dict:
+        """按 URL 定制的拉取结果（成功带 1 条可区分条目；失败空条目）。"""
+        return {
+            "url": url,
+            "ok": ok,
+            "error": error,
+            "warnings": [],
+            "spec_version": "1.0",
+            "service": "svc",
+            "system": system,
+            "exported_at": "2026-10-09T00:00:00+00:00",
+            "filter": {},
+            "returned": 0 if not ok else 1,
+            "entries": [] if not ok else [dict(_ENTRY, id=entry_id)],
+        }
+
+    def _fetch_mock(self, *results: dict) -> mock.Mock:
+        patcher = mock.patch.object(
+            requirements_client, "fetch_requirements", side_effect=list(results)
+        )
+        fetch = patcher.start()
+        self.addCleanup(patcher.stop)
+        return fetch
+
+    def test_all_pulls_enabled_apps_and_annotates_source(self) -> None:
+        fetch = self._fetch_mock(self._result("http://b.test/", system="系统B", entry_id=7))
+        data = self._call()
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["aggregated"])
+        self.assertIsNone(data["app"])
+        fetch.assert_called_once()  # app-a 已停用：不拉取
+        self.assertEqual(fetch.call_args[0][0], "http://b.test/")
+        self.assertEqual(fetch.call_args.kwargs["token"], "tok-x")
+        entry = data["entries"][0]
+        self.assertEqual(entry["id"], 7)
+        self.assertEqual(entry["_source_app_id"], "app-b")
+        self.assertEqual(entry["_source_app_name"], "应用B")
+        self.assertEqual(entry["_source_service"], "svc-b")
+        self.assertEqual(entry["_source_system"], "系统B")
+        self.assertEqual(data["sources"][0]["id"], "app-b")
+        self.assertTrue(data["sources"][0]["ok"])
+        self.assertEqual(data["returned"], 1)
+
+    def test_all_merges_multiple_systems(self) -> None:
+        self.list_all.return_value = [dict(_APPS[0], enabled=True), _APPS[1]]
+        self._fetch_mock(
+            self._result("http://a.test/", system="系统A", entry_id=1),
+            self._result("http://b.test/", system="系统B", entry_id=7),
+        )
+        data = self._call()
+        self.assertTrue(data["ok"])
+        self.assertEqual(
+            [(e["_source_app_id"], e["id"]) for e in data["entries"]],
+            [("app-a", 1), ("app-b", 7)],
+        )
+        self.assertEqual([s["id"] for s in data["sources"]], ["app-a", "app-b"])
+        self.assertEqual(data["filter"]["app_ids"], ["app-a", "app-b"])
+
+    def test_all_system_name_falls_back_to_app_name(self) -> None:
+        self._fetch_mock(self._result("http://b.test/", entry_id=7))  # system 为空
+        data = self._call()
+        self.assertEqual(data["sources"][0]["system"], "应用B")
+        self.assertEqual(data["entries"][0]["_source_system"], "应用B")
+
+    def test_all_partial_failure_keeps_success(self) -> None:
+        self.list_all.return_value = [dict(_APPS[0], enabled=True), _APPS[1]]
+        self._fetch_mock(
+            self._result("http://a.test/", ok=False, error="connection refused"),
+            self._result("http://b.test/", system="系统B", entry_id=7),
+        )
+        data = self._call()
+        self.assertTrue(data["ok"])
+        self.assertEqual([e["_source_app_id"] for e in data["entries"]], ["app-b"])
+        failed = next(s for s in data["sources"] if s["id"] == "app-a")
+        self.assertFalse(failed["ok"])
+        self.assertIn("connection refused", failed["error"])
+        self.assertTrue(any("应用A" in w and "connection refused" in w for w in data["warnings"]))
+
+    def test_all_total_failure_returns_not_ok(self) -> None:
+        self._fetch_mock(self._result("http://b.test/", ok=False, error="boom"))
+        data = self._call()
+        self.assertFalse(data["ok"])
+        self.assertIn("均失败", data["error"])
+        self.assertEqual(data["entries"], [])
+        self.assertEqual(data["sources"][0]["error"], "boom")
+
+    def test_all_no_enabled_apps_guides(self) -> None:
+        self.list_all.return_value = [_APPS[0]]  # 唯一应用已停用
+        fetch = self._fetch_mock()
+        data = self._call()
+        self.assertFalse(data["ok"])
+        self.assertIn("启用", data["error"])
+        fetch.assert_not_called()
+
+    def test_all_missing_token_guides_env(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(requirements_client.TOKEN_ENV, None)
+            data = self._call()
+        self.assertFalse(data["ok"])
+        self.assertIn(requirements_client.TOKEN_ENV, data["error"])
 
 
 class WiringTest(unittest.TestCase):

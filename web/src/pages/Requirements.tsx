@@ -4,7 +4,9 @@
  * 客户端 aiops_agent.requirements_client，令牌环境变量 NL2SQL_OPS_TOKEN）。
  * - 自动获取：页面可见时 30s 自动轮询（失焦自动暂停），被监控系统侧新纳入基线 /
  *   「继续评估」的条目自动出现；打开分析弹窗时立即重拉一次，右上角「刷新」可手动重拉；
- * - 多应用时顶部下拉切换（app_id 显式指定）；单应用直接展示；
+ * - 多应用时顶部下拉切换（app_id 显式指定）；单应用直接展示；「全部系统」为跨系统聚合
+ *   （app_id=all）——各启用系统并行拉取合并展示，条目带来源标注（来源列 / 筛选 /
+ *   搜索），智能分析仍按条目所属系统归口；
  * - BFF 未配置令牌 / 应用不可达 / 401 时返回 ok=false + 中文原因：
  *   原文展示并补充部署侧配置指引，不影响其余功能；
  * - P0 / P1 高优条目置顶卡片突出，全清单表格展示（评估意见随标题小字展示）；
@@ -55,6 +57,14 @@ const kindLabel = (entry: RequirementsEntry) => KIND_LABELS[entry.kind] ?? (entr
 const priorityLabel = (entry: RequirementsEntry) => entry.priority || '未定级'
 const departmentLabel = (entry: RequirementsEntry) => entry.department || '未标注'
 
+/** 条目来源系统标签（聚合模式来源列 / 筛选 / 搜索共用）。
+ *
+ * 优先应用名：同被监控系统的多实例 / 多环境场景下导出响应的 system 相同，
+ * 应用名（清单内唯一）才是管理侧区分口径；仅特例场景回退 system 名。
+ */
+const sourceLabelOf = (entry: RequirementsEntry) =>
+  entry._source_app_name || entry._source_system || ''
+
 /** 时间戳（缺失按 0，排序兜底稳定）。 */
 const tsOf = (value: string | null | undefined): number => (value ? Date.parse(value) : 0)
 
@@ -64,6 +74,7 @@ type ColumnKey =
   | 'kind'
   | 'priority'
   | 'title'
+  | 'source'
   | 'baselineVersion'
   | 'submitter'
   | 'updatedAt'
@@ -89,6 +100,8 @@ function sortValue(entry: RequirementsEntry, key: ColumnKey): string | number {
       return PRIORITY_RANK[entry.priority] ?? 9
     case 'title':
       return entry.title || ''
+    case 'source':
+      return sourceLabelOf(entry)
     case 'baselineVersion':
       return entry.baselineVersion || ''
     case 'submitter':
@@ -239,10 +252,12 @@ export function Requirements() {
   const [filterKind, setFilterKind] = useState('')
   const [filterPriority, setFilterPriority] = useState('')
   const [filterDept, setFilterDept] = useState('')
+  const [filterSource, setFilterSource] = useState('')
   const [sort, setSort] = useState<SortState>(DEFAULT_SORT)
   const [analysisTarget, setAnalysisTarget] = useState<{
     entry: RequirementsEntry
     analysisId: string | null
+    appId: string
   } | null>(null)
 
   /** 重置全部内容管理条件（数据源切换 / 空态按钮共用）。 */
@@ -251,6 +266,7 @@ export function Requirements() {
     setFilterKind('')
     setFilterPriority('')
     setFilterDept('')
+    setFilterSource('')
     setSort(DEFAULT_SORT)
   }
 
@@ -273,26 +289,39 @@ export function Requirements() {
   })
 
   const current = data?.app ?? null
-  const analysisAppId = current?.id ?? ''
+  const aggregate = appId === 'all'
+  const enabledApps = data?.apps.filter((app) => app.enabled) ?? []
+  const failedSources = (data?.sources ?? []).filter((source) => !source.ok)
+  // 分析会话归口：聚合模式拉取全部（复合键区分来源系统）；单系统模式按当前应用过滤
+  const analysesAppId = aggregate ? '' : current?.id ?? ''
   const analysesQuery = useQuery({
-    queryKey: ['requirement-analyses', analysisAppId],
-    queryFn: () => api.requirementAnalyses(analysisAppId ? { app_id: analysisAppId } : {}),
-    enabled: !!analysisAppId,
+    queryKey: ['requirement-analyses', aggregate ? 'all' : analysesAppId],
+    queryFn: () => api.requirementAnalyses(analysesAppId ? { app_id: analysesAppId } : {}),
+    enabled: aggregate || !!analysesAppId,
     // 有分析执行中时 3 秒轮询（全部完成后自动停止）
     refetchInterval: (query) =>
       (query.state.data?.analyses ?? []).some((item) => item.status === 'analyzing') ? 3000 : false,
     // 与条目列表同：切回窗口立即刷新会话状态
     refetchOnWindowFocus: true,
   })
+  // 复合键 app_id:entry_id——聚合模式下不同系统条目 ID 可能重复，必须按来源归口
   const analysisMap = useMemo(() => {
     const map = new Map<string, RequirementAnalysisSummary>()
-    for (const item of analysesQuery.data?.analyses ?? []) map.set(String(item.entry_id), item)
+    for (const item of analysesQuery.data?.analyses ?? []) {
+      map.set(`${item.app_id}:${String(item.entry_id)}`, item)
+    }
     return map
   }, [analysesQuery.data])
+  /** 条目所属应用 ID（聚合模式取来源标注；单系统模式取当前数据源）。 */
+  const entryAppId = (entry: RequirementsEntry): string =>
+    String(entry._source_app_id || (aggregate ? '' : current?.id ?? ''))
+  /** 条目的分析会话（发起 / 查看 / 状态徽标共用）。 */
+  const analysisFor = (entry: RequirementsEntry) =>
+    analysisMap.get(`${entryAppId(entry)}:${String(entry.id)}`)
 
   const openAnalysis = (entry: RequirementsEntry) => {
-    const summary = analysisMap.get(String(entry.id))
-    setAnalysisTarget({ entry, analysisId: summary?.id ?? null })
+    const summary = analysisFor(entry)
+    setAnalysisTarget({ entry, analysisId: summary?.id ?? null, appId: entryAppId(entry) })
     // 打开即重拉：弹窗内的新鲜度检测（自动同步）基于本次最新数据，不等 30s 轮询
     void refetch()
   }
@@ -301,7 +330,11 @@ export function Requirements() {
   // 弹窗条目传入「列表实时数据」（随 30s 轮询自动更新；拿不到时回退打开时快照）——
   // 被监控系统「继续评估」后弹窗据此自动检测更新并同步（见 RequirementAnalysisModal）
   const analysisEntry = analysisTarget
-    ? entries.find((item) => String(item.id) === String(analysisTarget.entry.id)) ??
+    ? entries.find(
+        (item) =>
+          String(item.id) === String(analysisTarget.entry.id) &&
+          entryAppId(item) === analysisTarget.appId,
+      ) ??
       analysisTarget.entry
     : null
 
@@ -311,8 +344,9 @@ export function Requirements() {
     if (filterKind && kindLabel(entry) !== filterKind) return false
     if (filterPriority && priorityLabel(entry) !== filterPriority) return false
     if (filterDept && departmentLabel(entry) !== filterDept) return false
+    if (filterSource && sourceLabelOf(entry) !== filterSource) return false
     if (!q) return true
-    // 命中范围：ID / 标题 / 内容 / 评估意见 / 提交人 / 部门 / 基线版本 / 类型 / 优先级
+    // 命中范围：ID / 标题 / 内容 / 评估意见 / 提交人 / 部门 / 来源系统 / 基线版本 / 类型 / 优先级
     const haystack = [
       entry.id,
       entry.title,
@@ -320,6 +354,7 @@ export function Requirements() {
       entry.assessment,
       entry.submitter,
       departmentLabel(entry),
+      sourceLabelOf(entry),
       entry.baselineVersion,
       kindLabel(entry),
       entry.priority,
@@ -339,11 +374,12 @@ export function Requirements() {
   const kindPairs = countBy(entries, kindLabel)
   const priorityOptions = priorityPairs(entries)
   const deptPairs = countBy(entries, departmentLabel)
+  const sourcePairs = countBy(entries, sourceLabelOf)
   // 高优区跟随筛选（搜索结果中的高优同样置顶展示）
   const high = sorted.filter((entry) => entry.priority === 'P0' || entry.priority === 'P1')
   const isDefaultSort = sort.key === DEFAULT_SORT.key && sort.dir === DEFAULT_SORT.dir
   const hasConditions = Boolean(
-    q || filterKind || filterPriority || filterDept || !isDefaultSort,
+    q || filterKind || filterPriority || filterDept || filterSource || !isDefaultSort,
   )
 
   // ---- 分页：条件 / 数据源变化回到第 1 页（越界页码自动夹取）；高优区不受分页影响 ----
@@ -351,7 +387,7 @@ export function Requirements() {
   const { setPage } = pg
   useEffect(() => {
     setPage(1)
-  }, [appId, query, filterKind, filterPriority, filterDept, sort, setPage])
+  }, [appId, query, filterKind, filterPriority, filterDept, filterSource, sort, setPage])
   const paged = sorted.slice(pg.start, pg.start + pg.pageSize)
 
   return (
@@ -389,6 +425,9 @@ export function Requirements() {
                 }}
                 className="rounded-lg border border-line bg-canvas px-2 py-1 text-xs text-ink focus:border-accent/50 focus:outline-none"
               >
+                {enabledApps.length > 1 && (
+                  <option value="all">全部系统（{enabledApps.length}）</option>
+                )}
                 {data.apps.map((app) => (
                   <option key={app.id} value={app.id}>
                     {app.name}
@@ -405,9 +444,18 @@ export function Requirements() {
               </span>
             )
           )}
-          {current?.url && <span className="font-mono">{current.url}</span>}
-          {data.system && <span>系统：{data.system}</span>}
-          {data.exported_at && <span>导出时间：{fmtDateTime(data.exported_at)}</span>}
+          {aggregate && failedSources.length > 0 && (
+            <span className="text-warn">
+              拉取失败：{failedSources.map((source) => source.name).join('、')}
+            </span>
+          )}
+          {!aggregate && current?.url && <span className="font-mono">{current.url}</span>}
+          {!aggregate && data.system && <span>系统：{data.system}</span>}
+          {data.exported_at && (
+            <span>
+              {aggregate ? '最近导出' : '导出时间'}：{fmtDateTime(data.exported_at)}
+            </span>
+          )}
         </div>
       )}
 
@@ -422,6 +470,13 @@ export function Requirements() {
         <div className="mt-5 rounded-xl border border-warn/40 bg-warn/10 p-4 text-xs">
           <div className="font-medium text-warn">暂无法获取需求基线数据</div>
           <div className="mt-1.5 text-muted">{data.error}</div>
+          {data.warnings.length > 0 && (
+            <ul className="mt-1.5 list-disc space-y-0.5 pl-4 text-warn">
+              {data.warnings.map((warning, index) => (
+                <li key={index}>{warning}</li>
+              ))}
+            </ul>
+          )}
           <div className="mt-1.5 text-idle">
             部署侧配置：被监控应用需部署「需求收集与反馈」能力并开放标准导出接口
             （GET /api/requirements/export）；BFF 环境变量{' '}
@@ -447,7 +502,11 @@ export function Requirements() {
                 onKeyDown={(event) => {
                   if (event.key === 'Escape') setQuery('')
                 }}
-                placeholder="搜索标题 / 内容 / 评估 / 提交人 / ID"
+                placeholder={
+                  aggregate
+                    ? '搜索标题 / 内容 / 评估 / 来源系统 / ID'
+                    : '搜索标题 / 内容 / 评估 / 提交人 / ID'
+                }
                 className="w-72 rounded-lg border border-line bg-panel py-1.5 pl-8 pr-7 text-xs text-ink placeholder:text-idle focus:border-accent/50 focus:outline-none"
               />
               {query && (
@@ -503,6 +562,20 @@ export function Requirements() {
                 ))}
               </select>
             )}
+            {aggregate && sourcePairs.length > 1 && (
+              <select
+                value={filterSource}
+                onChange={(event) => setFilterSource(event.target.value)}
+                className={SELECT_CLS}
+              >
+                <option value="">全部来源系统</option>
+                {sourcePairs.map(([label, count]) => (
+                  <option key={label} value={label}>
+                    {label}（{count}）
+                  </option>
+                ))}
+              </select>
+            )}
             {hasConditions && (
               <button
                 type="button"
@@ -521,6 +594,7 @@ export function Requirements() {
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
             <span className={cn(p0 > 0 && 'text-danger')}>P0 高优 {p0}</span>
             <span className={cn(p1 > 0 && 'text-warn')}>P1 高优 {p1}</span>
+            {aggregate && <span>来源系统 {sourcePairs.length} 个</span>}
             {analysisMap.size > 0 && <span>智能分析 {analysisMap.size} 条</span>}
             {data.warnings.map((warning) => (
               <span key={warning} className="text-warn">
@@ -534,13 +608,24 @@ export function Requirements() {
               <h2 className="text-sm font-medium text-ink">高优条目（P0 / P1）</h2>
               <div className="mt-2 grid gap-3 lg:grid-cols-2">
                 {high.map((entry) => (
-                  <div key={String(entry.id)} className="rounded-xl border border-line bg-panel p-4">
+                  <div
+                    key={`${entryAppId(entry)}:${String(entry.id)}`}
+                    className="rounded-xl border border-line bg-panel p-4"
+                  >
                     <div className="flex flex-wrap items-center gap-2.5">
                       <PriorityBadge priority={entry.priority} />
                       <span className="text-sm font-medium">{entry.title}</span>
                       <span className="rounded border border-line px-1.5 py-0.5 text-[10px] text-muted">
                         {KIND_LABELS[entry.kind] ?? (entry.kind || '—')}
                       </span>
+                      {aggregate && sourceLabelOf(entry) && (
+                        <span
+                          className="max-w-[10rem] truncate rounded border border-line px-1.5 py-0.5 text-[10px] text-idle"
+                          title={sourceLabelOf(entry)}
+                        >
+                          {sourceLabelOf(entry)}
+                        </span>
+                      )}
                     </div>
                     {entry.content && <p className="mt-2 text-xs text-muted">{entry.content}</p>}
                     {entry.assessment && (
@@ -563,7 +648,7 @@ export function Requirements() {
                       {entry.updatedAt && <span>更新 {fmtDateTime(entry.updatedAt)}</span>}
                       <span className="ml-auto">
                         <AnalysisButton
-                          summary={analysisMap.get(String(entry.id))}
+                          summary={analysisFor(entry)}
                           onOpen={() => openAnalysis(entry)}
                         />
                       </span>
@@ -608,6 +693,14 @@ export function Requirements() {
                         onToggle={toggleSort}
                       />
                       <SortableTh label="标题" colKey="title" sort={sort} onToggle={toggleSort} />
+                      {aggregate && (
+                        <SortableTh
+                          label="来源系统"
+                          colKey="source"
+                          sort={sort}
+                          onToggle={toggleSort}
+                        />
+                      )}
                       <SortableTh
                         label="基线版本"
                         colKey="baselineVersion"
@@ -631,7 +724,10 @@ export function Requirements() {
                   </thead>
                   <tbody>
                     {paged.map((entry) => (
-                      <tr key={String(entry.id)} className="border-b border-line/60 last:border-0">
+                      <tr
+                        key={`${entryAppId(entry)}:${String(entry.id)}`}
+                        className="border-b border-line/60 last:border-0"
+                      >
                         <td className="whitespace-nowrap px-3 py-2 font-mono text-muted">{entry.id}</td>
                         <td className="whitespace-nowrap px-3 py-2 text-muted">
                           {KIND_LABELS[entry.kind] ?? (entry.kind || '—')}
@@ -639,8 +735,12 @@ export function Requirements() {
                         <td className="whitespace-nowrap px-3 py-2">
                           <PriorityBadge priority={entry.priority} />
                         </td>
-                        {/* 标题列上限 20rem：保证表格在 1280 宽视口无横向滚动（超长省略 + 悬停看全） */}
-                        <td className="max-w-[20rem] px-3 py-2">
+                        {/* 标题列上限 20rem（聚合模式含来源列，收窄至 13rem）：1280 宽视口零横滚 */}
+                        <td
+                          className={
+                            aggregate ? 'max-w-[13rem] px-3 py-2' : 'max-w-[20rem] px-3 py-2'
+                          }
+                        >
                           <div className="truncate" title={entry.title}>
                             {entry.title}
                           </div>
@@ -650,6 +750,16 @@ export function Requirements() {
                             </div>
                           )}
                         </td>
+                        {aggregate && (
+                          <td className="px-3 py-2 text-muted">
+                            <div
+                              className="max-w-[7.5rem] truncate"
+                              title={sourceLabelOf(entry) || '—'}
+                            >
+                              {sourceLabelOf(entry) || '—'}
+                            </div>
+                          </td>
+                        )}
                         <td className="whitespace-nowrap px-3 py-2 text-muted">
                           {entry.baselineVersion || '—'}
                         </td>
@@ -670,7 +780,7 @@ export function Requirements() {
                         </td>
                         <td className="whitespace-nowrap px-3 py-2">
                           <AnalysisButton
-                            summary={analysisMap.get(String(entry.id))}
+                            summary={analysisFor(entry)}
                             onOpen={() => openAnalysis(entry)}
                           />
                         </td>
@@ -687,17 +797,21 @@ export function Requirements() {
             <div className="mt-5">
               <EmptyState
                 title="暂无已纳入基线的需求"
-                hint="被监控系统管理员在「需求收集与反馈」中评估条目并「纳入基线」后，这里即可看到"
+                hint={
+                  aggregate
+                    ? '各被监控系统管理员在「需求收集与反馈」中评估条目并「纳入基线」后，这里即可看到'
+                    : '被监控系统管理员在「需求收集与反馈」中评估条目并「纳入基线」后，这里即可看到'
+                }
               />
             </div>
           )}
         </>
       )}
 
-      {analysisTarget && current && (
+      {analysisTarget && (
         <RequirementAnalysisModal
           open
-          appId={current.id}
+          appId={analysisTarget.appId}
           entry={analysisEntry}
           existingId={analysisTarget.analysisId}
           onClose={() => setAnalysisTarget(null)}

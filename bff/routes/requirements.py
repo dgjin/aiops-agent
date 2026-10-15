@@ -5,7 +5,9 @@
 :mod:`aiops_agent.requirements_client`）。本域把该接口包装成控制台读接口：
 
 - 数据源（被监控应用）沿用「被监控应用」清单：``app_id`` 显式指定优先，缺省取第一个
-  启用项；响应同时回带清单摘要（``apps``），供前端下拉切换；
+  启用项；``app_id=all`` 为**跨系统聚合**——全部启用应用并行拉取、条目合并并附加
+  ``_source_*`` 来源标注（逐系统容错，失败系统进 ``sources`` / ``warnings``）；
+  响应同时回带清单摘要（``apps``），供前端下拉切换；
 - 令牌取环境变量 ``NL2SQL_OPS_TOKEN``（值 = 被监控系统的 ``OPS_API_TOKEN``）；
   未配置时**不发请求**、直接返回中文配置指引；
 - 拉取失败是常态（未部署 / 未配置令牌 / 网络不可达），一律 ``ok=False + error``
@@ -47,6 +49,7 @@ def _empty(error: str, *, apps: list[dict], app: dict | None) -> dict:
             "warnings": [],
             "apps": apps,
             "app": app,
+            "sources": [],
             "url": "",
             "service": "",
             "system": "",
@@ -58,16 +61,137 @@ def _empty(error: str, *, apps: list[dict], app: dict | None) -> dict:
     )
 
 
+# 聚合模式的哨兵应用 ID（前端数据源下拉「全部系统」）
+_AGG_SENTINEL = "all"
+
+
+async def _fetch_target(
+    target: dict, *, status: str, kind: str, since: str, limit: int, token: str
+) -> dict:
+    """单应用拉取（fetch_requirements 绝不抛异常——逐系统容错的基础）。"""
+    return await asyncio.to_thread(
+        requirements_client.fetch_requirements,
+        str(target.get("url") or ""),
+        status=status,
+        kind=kind or None,
+        since=since or None,
+        limit=limit,
+        token=token,
+    )
+
+
+async def _aggregate_requirements(
+    apps: list[dict], *, status: str, kind: str, since: str, limit: int
+) -> dict:
+    """跨系统聚合（app_id=all）：全部**启用**应用并行拉取，条目合并 + 来源标注。
+
+    - 逐系统容错：单系统失败不影响其余（原因进 ``sources`` 与 ``warnings``），
+      全部失败才 ``ok=False``；
+    - 条目附加 ``_source_app_id / _source_app_name / _source_service / _source_system``
+      （系统名取导出响应 ``system``，缺失回退应用名）——前端据此展示来源列、按来源
+      筛选，并把分析 / 审批归口到条目所属系统（零跨仓改动）；
+    - ``app=None``（无单一目标）；``exported_at`` 取各系统最晚导出时点。
+    """
+    targets = [app for app in apps if app.get("enabled")]
+    if not targets:
+        return _empty(
+            "被监控应用清单中没有启用项：请先在「被监控应用」页添加并启用应用"
+            "（该应用需部署需求收集与反馈能力）",
+            apps=apps,
+            app=None,
+        )
+    token = (os.environ.get(requirements_client.TOKEN_ENV) or "").strip()
+    if not token:
+        return _empty(
+            f"未配置令牌：请设置环境变量 {requirements_client.TOKEN_ENV}"
+            "（值 = 被监控系统的 OPS_API_TOKEN）并重启 BFF",
+            apps=apps,
+            app=None,
+        )
+
+    results = await asyncio.gather(
+        *(
+            _fetch_target(target, status=status, kind=kind, since=since, limit=limit, token=token)
+            for target in targets
+        )
+    )
+    sources: list[dict] = []
+    warnings: list[str] = []
+    entries: list[dict] = []
+    ok_count = 0
+    exported_at = ""
+    for target, result in zip(targets, results):
+        name = str(target.get("name") or target.get("id") or "")
+        system = str(result.get("system") or name)  # 系统名缺失回退应用名
+        sources.append(
+            {
+                "id": target.get("id"),
+                "name": name,
+                "service": target.get("service") or "",
+                "system": system,
+                "ok": bool(result.get("ok")),
+                "error": str(result.get("error") or ""),
+                "returned": int(result.get("returned") or 0),
+            }
+        )
+        if not result.get("ok"):
+            warnings.append(f"{name}：{result.get('error') or '拉取失败'}")
+            continue
+        ok_count += 1
+        exported_at = max(exported_at, str(result.get("exported_at") or ""))
+        for item in result.get("entries") or []:
+            entry = dict(item)
+            entry["_source_app_id"] = target.get("id")
+            entry["_source_app_name"] = name
+            entry["_source_service"] = target.get("service") or ""
+            entry["_source_system"] = system
+            entries.append(entry)
+        warnings.extend(f"{name}：{warning}" for warning in result.get("warnings") or [])
+
+    return ok(
+        {
+            "ok": ok_count > 0,
+            "error": (
+                "" if ok_count else f"全部 {len(targets)} 个系统的需求拉取均失败（详见各系统状态）"
+            ),
+            "warnings": warnings,
+            "apps": apps,
+            "app": None,
+            "aggregated": True,
+            "url": "",
+            "service": "",
+            "system": "",
+            "exported_at": exported_at,
+            "filter": {
+                "status": status,
+                "kind": kind or "",
+                "since": since,
+                "limit": limit,
+                "app_ids": [str(target.get("id") or "") for target in targets],
+            },
+            "returned": len(entries),
+            "entries": entries,
+            "sources": sources,
+        }
+    )
+
+
 @router.get("/api/requirements")
 async def api_requirements(
-    app_id: str = Query("", max_length=64, description="被监控应用 ID；缺省取清单中第一个启用项"),
+    app_id: str = Query(
+        "", max_length=64, description="被监控应用 ID；缺省取清单中第一个启用项；all=跨系统聚合"
+    ),
     status: str = Query("BASELINED", pattern="^(BASELINED|PENDING|REJECTED|ALL)$"),
     kind: str = Query("", max_length=32),
     since: str = Query("", max_length=40, description="增量游标（上次导出的 exportedAt，>= 语义）"),
     limit: int = Query(200, ge=1, le=500),
 ) -> dict:
-    """拉取需求基线条目（读接口：viewer 起可访问）。"""
+    """拉取需求基线条目（读接口：viewer 起可访问；app_id=all 为跨系统聚合）。"""
     apps = [_app_summary(app) for app in store.list_all()]
+    if app_id == _AGG_SENTINEL:
+        return await _aggregate_requirements(
+            apps, status=status, kind=kind, since=since, limit=limit
+        )
     if app_id:
         target = next((app for app in apps if app.get("id") == app_id), None)
         if target is None:
@@ -90,14 +214,8 @@ async def api_requirements(
             app=target,
         )
 
-    result = await asyncio.to_thread(
-        requirements_client.fetch_requirements,
-        str(target.get("url") or ""),
-        status=status,
-        kind=kind or None,
-        since=since or None,
-        limit=limit,
-        token=token,
+    result = await _fetch_target(
+        target, status=status, kind=kind, since=since, limit=limit, token=token
     )
     return ok(
         {
@@ -113,6 +231,7 @@ async def api_requirements(
             "filter": result["filter"],
             "returned": result["returned"],
             "entries": result["entries"],
+            "sources": [],
         }
     )
 

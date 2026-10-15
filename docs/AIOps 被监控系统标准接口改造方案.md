@@ -322,6 +322,8 @@ cd aiops-agent
 
 实现：`aiops_agent/requirements_client.py`（标准库零依赖，`fetch_requirements()` 永不抛异常）；报告给出下次增量游标（本次 `exportedAt`，`>=` 语义）。
 
+控制台「需求基线」页同源消费本接口：BFF `GET /api/requirements?app_id=all` 对全部启用应用**并行拉取**、合并展示（条目带来源系统标注、可按来源筛选/统计），**逐系统容错**（单系统拉取失败仅体现在该系统的来源状态与页面提示中，不影响其余系统条目的展示与统计）。
+
 ### 7.3 验收清单
 
 - [ ] `GET <应用>/.well-known/aiops.json` 含 `requirements_path` 且取值为导出端点路径；
