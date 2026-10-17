@@ -17,6 +17,7 @@ import { EventTimeline } from '../components/EventTimeline'
 import { FlowStateMachine } from '../components/charts/FlowStateMachine'
 import { ReleasePipeline } from '../components/charts/ReleasePipeline'
 import { JsonBlock } from '../components/JsonBlock'
+import { LogEvidence } from '../components/LogEvidence'
 import { PermissionGate } from '../components/PermissionGate'
 import { QueuePatchDialog } from '../components/QueuePatchDialog'
 import { StageBadge } from '../components/StageBadge'
@@ -25,6 +26,7 @@ import type { ResultPayload, StatusPayload } from '../lib/types'
 
 const TABS = [
   { key: 'overview', label: '概览' },
+  { key: 'evidence', label: '日志证据' },
   { key: 'timeline', label: '事件时间线' },
   { key: 'approvals', label: '审批记录' },
   { key: 'artifacts', label: '留痕文件' },
@@ -469,6 +471,12 @@ export function FlowDetail() {
               {data.close_time && <span>结束 {fmtDateTime(data.close_time)}</span>}
               {result && <span>耗时 {fmtDuration(result.duration_seconds)}</span>}
               {result?.confidence != null && <span>置信度 {result.confidence.toFixed(2)}</span>}
+              {data.evidence && (
+                <span>
+                  日志证据 <span className="text-ink">{data.evidence.stored_lines}</span> 行
+                  {data.evidence.loki_available ? '' : '（Loki 不可用）'}
+                </span>
+              )}
             </div>
           </div>
           <button
@@ -527,6 +535,12 @@ export function FlowDetail() {
               <EmptyState title="暂无状态数据" hint="工作流状态读取失败" />
             )}
           </div>
+        )}
+
+        {tab === 'evidence' && (
+          <Panel title="日志证据（转人工核对）">
+            <LogEvidence wfId={wfId} />
+          </Panel>
         )}
 
         {tab === 'timeline' &&

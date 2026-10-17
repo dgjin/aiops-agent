@@ -8,6 +8,7 @@ import type {
   DiscoverMonitoredAppResp,
   EscalationsResp,
   EscalationWriteResp,
+  EvidenceResp,
   FlowsResp,
   FlowDetailResp,
   HealthResp,
@@ -188,6 +189,9 @@ export const api = {
     request<FlowDetailResp>(`/api/flows/${encodeURIComponent(wfId)}`),
   flowResult: (wfId: string) =>
     request<ResultResp>(`/api/flows/${encodeURIComponent(wfId)}/result`),
+  /** 日志证据详情（转人工核对）：原始日志行 + 模板聚类（TRIAGING 阶段归档）。 */
+  flowEvidence: (wfId: string) =>
+    request<EvidenceResp>(`/api/flows/${encodeURIComponent(wfId)}/evidence`),
   approvals: () => request<ApprovalsResp>('/api/approvals'),
   window: () => request<WindowResp>('/api/window'),
   audit: (params: { q?: string; stage?: string; days?: number } = {}) =>
