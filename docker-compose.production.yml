@@ -61,6 +61,7 @@ services:
       mysql:
         condition: service_healthy
     restart: unless-stopped
+    mem_limit: 512m
     read_only: true
     tmpfs: ["/tmp:mode=1777"]
     security_opt: ["no-new-privileges:true"]

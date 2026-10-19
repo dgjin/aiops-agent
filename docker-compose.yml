@@ -31,6 +31,7 @@ services:
   temporal:
     image: temporalio/temporal:latest
     container_name: aiops-temporal
+    mem_limit: 512m
     command: server start-dev --ip 0.0.0.0 --ui-port 8233 --db-filename /home/temporal/temporal.db
     ports:
       - "7233:7233"   # gRPC（worker / BFF / demo_cli 连接）
@@ -42,6 +43,7 @@ services:
   loki:
     image: grafana/loki:latest
     container_name: aiops-loki
+    mem_limit: 384m
     ports:
       - "3101:3100"   # 宿主机 3101 → 容器 3100（避开本栈 Grafana 的 3100）
     command: -config.file=/etc/loki/local-config.yaml
@@ -54,6 +56,7 @@ services:
     profiles: ["prod"]
     image: mysql:8.0
     container_name: aiops-mysql
+    mem_limit: 1g
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     environment:
       MYSQL_DATABASE: aiops
@@ -77,6 +80,7 @@ services:
     profiles: ["prod"]
     image: redis:7-alpine
     container_name: aiops-redis
+    mem_limit: 256m
     command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
     ports:
       # 6380：避开宿主机 Redis 6379（同上；AIOPS_REDIS_URL 记得同步端口）
@@ -88,6 +92,7 @@ services:
     profiles: ["obs"]
     image: prom/prometheus:latest
     container_name: aiops-prometheus
+    mem_limit: 512m
     ports:
       - "9095:9090"   # 宿主机 9095（避开 worker 指标端口 9090）
     volumes:
@@ -103,6 +108,7 @@ services:
     profiles: ["obs"]
     image: grafana/grafana:latest
     container_name: aiops-grafana
+    mem_limit: 384m
     ports:
       - "3200:3000"   # 宿主机 3200（避开 nl2sql-monitoring 栈 Grafana 的 3100）
     environment:
