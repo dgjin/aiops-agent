@@ -194,7 +194,7 @@
 
 | 工具 | 用途 |
 | --- | --- |
-| `start.sh`（根级） | 唯一启动入口（无隐式动作：不灌日志/不起流程/不开浏览器）；子命令 back/up/web/restart/down/stop/status/env/preflight/maintenance/resume/demo/install/uninstall/down-all/sync-ip |
+| `start.sh`（根级） | 唯一启动入口（无隐式动作：不灌日志/不起流程/不开浏览器）；启动前打印档位横幅、校验 `.venv` 并在 `web/dist` 缺失/落后时自动构建控制台；子命令 back/up/web/build/doctor/logs/restart/down/stop/status/env/preflight/maintenance/resume/demo/install/uninstall/down-all/sync-ip |
 | `scripts/demo-up.sh` | 兼容薄壳（13 行，转发 `scripts/aiops-watchdog.py`）；底层命令唯一实现来源为 watchdog：up/down/stop/restart/status/env/preflight/demo/maintenance/resume/install/uninstall/down-all |
 | `scripts/aiops-watchdog.py` | 组件守护（同 §1） |
 | `scripts/backup-data.py` | 数据备份（与 release_journal 协调路径逐字一致） |

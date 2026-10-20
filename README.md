@@ -72,15 +72,18 @@ AIOPS_POLICY_PATH=./demo-policy.yaml .venv/bin/python demo_cli.py start \
 
 ```bash
 cd aiops-agent
-./start.sh                     # 一键启动（受控）：依赖预检 → 6 常驻组件 + 组件守护（配置飞书应用凭证后加挂第 7 个：长连接网关）（无隐式动作：不灌日志/不起流程/不开浏览器）
+./start.sh                     # 一键启动（受控）：档位横幅 → 控制台构建检查 → 依赖预检 → 常驻组件 + 组件守护（无隐式动作：不灌日志/不起流程/不开浏览器）
 ./start.sh web                 # 另在前台启动前端 vite dev（热更 @5273，Ctrl+C 只停前端）
+./start.sh build               # 仅重建控制台静态产物（tsc --noEmit + vite build）
+./start.sh doctor              # 汇总自检：依赖预检 + demo_cli doctor + 组件状态 + 构建新鲜度
+./start.sh logs bff            # 跟踪组件日志（worker/bff/alert_webhook/app_prober/...；默认 watchdog，all 看全部）
 ./start.sh down                # 停止全部（先停组件守护再停组件）
 ./start.sh sync-ip             # 网络地址变化后同步生产部署（Caddyfile/settings/监控片段 + 重签 TLS、reload Caddy；--dry-run 预览）
 
 bash scripts/demo-up.sh        # 等价底层脚本（子命令 up/env/down/status/install 等；start.sh 为其薄封装）
 ```
 
-脚本会先做依赖与端口预检，后台常驻启动 worker / BFF / 告警接入 / 可用性巡检 / **日志采集（ship_app_logs --follow）** / **错误日志突增检测（log_surge_detector）**，随后启动**组件守护（aiops-watchdog.py）**：每 30 秒巡检已注册常驻组件（默认 6 个；`.env` 配置飞书应用凭证后加挂长连接网关 `feishu_gateway.py` 共 7 个），任一崩溃自动拉起；同一组件在窗口内反复崩溃时自动冷却（防拉起风暴）。守护启动时获取**单实例锁**（`data/aiops-watchdog.lock`，防双守护）并**锁定生效档位**（环境变量 > .env > production，启动日志如实打印配置快照）显式传给被拉起组件。无隐式动作：演示播种需显式执行 `bash scripts/demo-up.sh demo`（灌演示日志并发起修复流程，仅 demo 档）。状态可用 `./start.sh status` 查看；可选 `./start.sh install` 交由 launchd 托管（登录自启、崩溃自动重启）。
+启动时会先打印**档位横幅**（production 红色警告 / demo 黄色提示，取值优先级：环境变量 > `.env` > production），并检查 `web/dist` 是否存在且不落后于 `web/src`、`web/package.json` 等源文件——缺失或落后时自动 `npm ci`（无 lock 时为 `npm install`）+ `npm run build`，构建失败即停止启动（可用 `AIOPS_SKIP_WEB_BUILD=1` 跳过检查）。随后做依赖与端口预检，后台常驻启动 worker / BFF / 告警接入 / 可用性巡检 / **日志采集（ship_app_logs --follow）** / **错误日志突增检测（log_surge_detector）**，再启动**组件守护（aiops-watchdog.py）**：每 30 秒巡检已注册常驻组件（默认 6 个；`.env` 配置飞书应用凭证后加挂长连接网关 `feishu_gateway.py` 共 7 个），任一崩溃自动拉起；同一组件在窗口内反复崩溃时自动冷却（防拉起风暴）。守护启动时获取**单实例锁**（`data/aiops-watchdog.lock`，防双守护）并**锁定生效档位**显式传给被拉起组件。无隐式动作：演示播种需显式执行 `./start.sh demo`（灌演示日志并发起修复流程，仅 demo 档）。启动完成后打印控制台（`https://127.0.0.1:8643`）、BFF 与告警接入地址；可选 `./start.sh install` 交由 launchd 托管（登录自启、崩溃自动重启）。
 
 ---
 

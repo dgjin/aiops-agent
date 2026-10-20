@@ -562,9 +562,12 @@ curl -X POST http://127.0.0.1:8600/api/system/kill-switch \
 ## 附录 A 命令速查卡
 
 ```bash
-# 一键启动（受控）：依赖预检 + 常驻组件（默认 6 个，含 BFF 控制台；配飞书应用凭证后加挂长连接网关）+ 组件守护（不自动灌日志/起流程）
+# 一键启动（受控）：档位横幅 + 控制台构建检查 + 依赖预检 + 常驻组件（默认 6 个，含 BFF 控制台；配飞书应用凭证后加挂长连接网关）+ 组件守护（不自动灌日志/起流程）
 ./start.sh                         # 无隐式动作；./start.sh web 加前端热更；底层即 demo-up.sh
 ./start.sh status                  # 查看组件与守护状态、生效档位快照
+./start.sh build                   # 仅重建控制台静态产物（web/dist）
+./start.sh doctor                  # 汇总自检：依赖预检 + 环境自检 + 组件状态 + 构建新鲜度
+./start.sh logs bff                # 跟踪组件日志（默认 watchdog，all 看全部）
 ./start.sh sync-ip                 # 网络地址变化后同步生产部署（Caddyfile/settings/监控片段 + 重签 TLS、reload Caddy）
 
 # 控制台：demo 档本机 http://127.0.0.1:8600、局域网 http://<本机IP>:8600；production 经 Caddy https://<本机IP>:8643
