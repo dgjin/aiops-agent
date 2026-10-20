@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 
-from aiops_agent import evidence_store
+from aiops_agent import app_registry
 from aiops_agent.models import Alert
 
 from .. import audit, escalations, requirement_analyses
@@ -40,9 +40,6 @@ class CloseBody(BaseModel):
 # 需求来源识别：需求流的 alert_id 固定为 ``req-<条目ID>``（workflows.build_requirement_context），
 # 级联重试会追加 ``-retryN`` 后缀（req-19 → req-19-retry1 → req-19-retry1-retry1）。
 _REQUIREMENT_ALERT_ID = re.compile(r"^req-(?P<entry_id>.+?)(?:-retry\d+)*$")
-
-# _decorate 的哨兵：区分「未传（需单查）」与「批量查过但没有证据（None）」
-_EVIDENCE_UNSET = object()
 
 
 def _looks_requirement(entry: dict) -> bool:
@@ -82,11 +79,20 @@ def resolve_requirement_session(entry: dict) -> dict | None:
     )
 
 
-def _decorate(entry: dict, evidence: object = _EVIDENCE_UNSET) -> dict:
-    """附加 SLA 派生状态（前端展示「已超时未处置」）、需求来源标识与证据摘要。
+def _system_map() -> dict[str, dict]:
+    """被监控系统清单（service → 应用），供待办按「监控系统」展示与筛选。
 
-    evidence 可由列表侧批量取好传入（避免逐条读盘），缺省时按 wf_id 单查。
+    读侧每次请求加载一次（清单热生效）；未纳管服务（如 node / redis 等基础设施）回退服务名。
     """
+    return {
+        str(app.get("service") or "").strip().lower(): app
+        for app in app_registry.load_apps()
+        if str(app.get("service") or "").strip()
+    }
+
+
+def _decorate(entry: dict, systems: dict[str, dict] | None = None) -> dict:
+    """附加 SLA 派生状态、需求来源标识与所属监控系统（展示 / 筛选同一口径）。"""
     overdue = False
     if entry.get("status") != "closed":
         try:
@@ -97,14 +103,16 @@ def _decorate(entry: dict, evidence: object = _EVIDENCE_UNSET) -> dict:
             overdue = age_min > escalations.sla_minutes()
         except (ValueError, TypeError):
             overdue = False
-    if evidence is _EVIDENCE_UNSET:
-        evidence = evidence_store.summary(str(entry.get("wf_id") or ""))
+    service = str(entry.get("service") or "")
+    app = (systems if systems is not None else _system_map()).get(service.strip().lower())
     return {
         **entry,
         "overdue": overdue,
         "sla_minutes": escalations.sla_minutes(),
         "requirement": _looks_requirement(entry),
-        "evidence": evidence,
+        # 监控系统展示名：纳管应用取应用名，未纳管回退服务名（前端分组 / 筛选 / 搜索共用）
+        "system": str(app.get("name") or service) if app else service,
+        "system_managed": app is not None,
     }
 
 
@@ -114,13 +122,9 @@ async def api_escalations(
 ) -> dict:
     flows = await gw.list_flows(limit=200)
     added = escalations.sync_from_flows(flows)
-    items = escalations.list_all(status)
-    # 证据摘要一次取齐：转人工卡片直接展示「可核对日志行数」，不必逐条读盘
-    summaries = evidence_store.summaries_for([str(e.get("wf_id") or "") for e in items])
-    decorated = [
-        _decorate(entry, summaries.get(str(entry.get("wf_id") or ""))) for entry in items
-    ]
-    return ok({"escalations": decorated, "stats": escalations.stats(), "registered": added})
+    systems = _system_map()  # 单次加载，避免逐条查库
+    items = [_decorate(entry, systems) for entry in escalations.list_all(status)]
+    return ok({"escalations": items, "stats": escalations.stats(), "registered": added})
 
 
 @router.post("/api/escalations/{esc_id}/assign")

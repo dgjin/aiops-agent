@@ -5,15 +5,17 @@
  *   前端以「已超时未处置 / 已再升级」标记提示值班同学；
  * - 处置路径：指派责任人 → 手动关闭（备注留档）或「重试修复」（新幂等键重启完整修复链路）；
  *   需求来源的待办（entry.requirement）重试时重启需求修复流（批准版方案 → 沙箱 → 审批 → 发布）。
- * - 内容管理：关键词搜索（服务 / 升级原因 / 告警 / 工作流 / 责任人 / 备注）+ 来源筛选
- *   （告警 / 需求）+ 仅看超时 + 排序（待处置优先 / 最近登记 / 最早登记）；状态页签带全量
- *   计数；卡片双列布局（超长原因截断，悬停看全文）——均前端内存计算，状态页签仍走服务端。
+ * - 内容管理：关键词搜索（监控系统 / 服务 / 升级原因 / 告警 / 工作流 / 责任人 / 备注）+ 监控系统
+ *   筛选（按当前数据动态生成选项与计数；纳管应用显示应用名，node / redis 等未纳管服务回退服务名
+ *   并标注）+ 来源筛选（告警 / 需求）+ 仅看超时 + 排序（待处置优先 / 最近登记 / 最早登记）；
+ *   状态页签带全量计数；列表按监控系统分组展示（组头带待办数），卡片在组内双列布局
+ *   （超长原因截断，悬停看全文）——均前端内存计算，状态页签仍走服务端。
  */
 
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { FileText, Search, X } from 'lucide-react'
+import { Search, X } from 'lucide-react'
 import { api, describeError } from '../lib/api'
 import { cn, fmtDateTime } from '../lib/format'
 import { useWriteAction } from '../lib/actions'
@@ -21,7 +23,6 @@ import { ActionButton } from '../components/ActionButton'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { CopyableId } from '../components/CopyableId'
 import { EmptyState } from '../components/EmptyState'
-import { LogEvidence } from '../components/LogEvidence'
 import {
   Modal,
   fieldClass,
@@ -225,12 +226,12 @@ export function Escalations() {
   const write = useWriteAction()
   const [status, setStatus] = useState<StatusFilter>('all')
   const [query, setQuery] = useState('')
+  const [filterSystem, setFilterSystem] = useState('')
   const [filterSource, setFilterSource] = useState('')
   const [onlyOverdue, setOnlyOverdue] = useState(false)
   const [sort, setSort] = useState<SortKey>('default')
   const [assignTarget, setAssignTarget] = useState<EscalationEntry | null>(null)
   const [closeTarget, setCloseTarget] = useState<EscalationEntry | null>(null)
-  const [evidenceTarget, setEvidenceTarget] = useState<EscalationEntry | null>(null)
 
   const { data, isError, error } = useQuery({
     queryKey: ['escalations', status],
@@ -241,6 +242,7 @@ export function Escalations() {
   /** 重置全部内容管理条件。 */
   const resetConditions = () => {
     setQuery('')
+    setFilterSystem('')
     setFilterSource('')
     setOnlyOverdue(false)
     setSort('default')
@@ -248,14 +250,18 @@ export function Escalations() {
 
   // ---- 内容管理：搜索 + 筛选 + 排序（前端内存计算；状态页签仍走服务端过滤）----
   const items = data?.escalations ?? []
+  /** 待办所属监控系统（服务端派生：纳管取应用名，未纳管回退服务名；分组 / 筛选 / 搜索同一口径） */
+  const systemLabelOf = (entry: EscalationEntry) => entry.system || entry.service || '未标注系统'
   const q = query.trim().toLowerCase()
   const matched = items.filter((entry) => {
+    if (filterSystem && systemLabelOf(entry) !== filterSystem) return false
     if (filterSource === 'requirement' && !entry.requirement) return false
     if (filterSource === 'alert' && entry.requirement) return false
     if (onlyOverdue && !entry.overdue) return false
     if (!q) return true
-    // 命中范围：服务 / 升级原因 / 告警 / 工作流 / 责任人 / 备注 / 来源标签
+    // 命中范围：监控系统 / 服务 / 升级原因 / 告警 / 工作流 / 责任人 / 备注 / 来源标签
     const haystack = [
+      systemLabelOf(entry),
       entry.service,
       entry.auto_reason,
       entry.alert_id,
@@ -271,15 +277,47 @@ export function Escalations() {
   })
   const sorted = [...matched].sort((a, b) => compareEscalations(a, b, sort))
   const overdueCount = items.filter((entry) => entry.overdue).length
-  const hasConditions = Boolean(q || filterSource || onlyOverdue || sort !== 'default')
+
+  // ---- 监控系统维度：动态选项（按当前页签数据的系统计数降序）+ 分组 ----
+  const systemCounts = new Map<string, number>()
+  for (const entry of items) {
+    const label = systemLabelOf(entry)
+    systemCounts.set(label, (systemCounts.get(label) ?? 0) + 1)
+  }
+  const systemPairs = [...systemCounts.entries()].sort(
+    (a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh'),
+  )
+  const matchedCounts = new Map<string, number>()
+  for (const entry of matched) {
+    const label = systemLabelOf(entry)
+    matchedCounts.set(label, (matchedCounts.get(label) ?? 0) + 1)
+  }
+  /** 分组顺序：按筛选后的待办数降序（组头计数与分组共用）。 */
+  const groupOrder = [...matchedCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh'))
+    .map(([label]) => label)
+
+  const hasConditions = Boolean(q || filterSystem || filterSource || onlyOverdue || sort !== 'default')
 
   // ---- 分页：状态页签 / 条件变化回到第 1 页（越界页码自动夹取）----
   const pg = usePagination(sorted.length, 10)
   const { setPage } = pg
   useEffect(() => {
     setPage(1)
-  }, [status, query, filterSource, onlyOverdue, sort, setPage])
+  }, [status, query, filterSystem, filterSource, onlyOverdue, sort, setPage])
   const paged = sorted.slice(pg.start, pg.start + pg.pageSize)
+
+  // ---- 当前页按监控系统分组（组序与组头计数取自筛选后的全量口径）----
+  const pageGroups = new Map<string, EscalationEntry[]>()
+  for (const entry of paged) {
+    const label = systemLabelOf(entry)
+    const bucket = pageGroups.get(label)
+    if (bucket) bucket.push(entry)
+    else pageGroups.set(label, [entry])
+  }
+  const visibleGroups = groupOrder
+    .map((label) => [label, pageGroups.get(label) ?? []] as const)
+    .filter(([, list]) => list.length > 0)
 
   /** 页签计数（stats 为全量口径，不随 status 变化）。 */
   const tabCount = (tab: StatusFilter): number => {
@@ -379,6 +417,21 @@ export function Escalations() {
                 </button>
               )}
             </div>
+            {systemPairs.length > 0 && (
+              <select
+                value={filterSystem}
+                onChange={(event) => setFilterSystem(event.target.value)}
+                className={SELECT_CLS}
+                title="按监控系统筛选：选项随当前待办动态生成（未纳管服务回退服务名）"
+              >
+                <option value="">全部监控系统</option>
+                {systemPairs.map(([label, count]) => (
+                  <option key={label} value={label}>
+                    {label}（{count}）
+                  </option>
+                ))}
+              </select>
+            )}
             <select
               value={filterSource}
               onChange={(event) => setFilterSource(event.target.value)}
@@ -456,8 +509,19 @@ export function Escalations() {
             </div>
           ) : (
           <>
-          <div className="mt-5 grid gap-3 lg:grid-cols-2">
-            {paged.map((entry) => {
+          <div className="mt-5">
+            {visibleGroups.map(([label, groupItems]) => (
+              <div key={label} className="mt-5 first:mt-0">
+                {/* 组头：监控系统 + 待办数（筛选后全量口径，跨页保持稳定） */}
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="font-medium text-ink">{label}</span>
+                  <span className="text-idle">
+                    {matchedCounts.get(label) ?? groupItems.length} 条
+                  </span>
+                  <span className="h-px flex-1 bg-line" />
+                </div>
+                <div className="mt-2 grid gap-3 lg:grid-cols-2">
+            {groupItems.map((entry) => {
               const meta = STATUS_META[entry.status]
               const open = entry.status !== 'closed'
               return (
@@ -465,7 +529,28 @@ export function Escalations() {
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-3">
-                        <span className="text-sm font-medium">{entry.service || '未知服务'}</span>
+                        <span
+                          className="text-sm font-medium"
+                          title={`监控系统：${systemLabelOf(entry)}`}
+                        >
+                          {systemLabelOf(entry)}
+                        </span>
+                        {entry.service && entry.service !== systemLabelOf(entry) && (
+                          <span
+                            className="font-mono text-[10px] text-idle"
+                            title="服务标识（告警 service）"
+                          >
+                            {entry.service}
+                          </span>
+                        )}
+                        {!entry.system_managed && (
+                          <span
+                            className="rounded border border-line px-1.5 py-0.5 text-[10px] text-idle"
+                            title="未在「被监控系统」清单中纳管"
+                          >
+                            未纳管
+                          </span>
+                        )}
                         <span className={cn('rounded border px-1.5 py-0.5 text-[10px]', meta.cls)}>
                           {meta.label}
                         </span>
@@ -508,25 +593,6 @@ export function Escalations() {
                           <span>备注：{entry.note}</span>
                         )}
                       </div>
-                      {/* 日志证据入口：值班同学无需跳页即可核对当时的报错日志 */}
-                      <div className="mt-2 flex flex-wrap items-center gap-2">
-                        {entry.evidence?.available ? (
-                          <button
-                            type="button"
-                            onClick={() => setEvidenceTarget(entry)}
-                            title="查看该流程 TRIAGING 阶段采集的原始日志与模板聚类"
-                            className="inline-flex items-center gap-1 rounded border border-accent/40 px-1.5 py-0.5 text-[11px] text-accent transition-colors hover:bg-accent/10"
-                          >
-                            <FileText size={12} />
-                            日志证据 {entry.evidence.stored_lines} 行 · {entry.evidence.template_count}{' '}
-                            模板{entry.evidence.truncated ? '（已截断）' : ''}
-                          </button>
-                        ) : (
-                          <span className="text-[11px] text-idle">
-                            {entry.requirement ? '需求来源（无日志）' : '未归档日志证据'}
-                          </span>
-                        )}
-                      </div>
                     </div>
                     <Link
                       to={`/flows/${encodeURIComponent(entry.wf_id)}`}
@@ -551,6 +617,9 @@ export function Escalations() {
                 </div>
               )
             })}
+                </div>
+              </div>
+            ))}
           </div>
           <Pagination pg={pg} />
           </>
@@ -573,27 +642,6 @@ export function Escalations() {
       )}
       {closeTarget && (
         <CloseDialog key={closeTarget.id} entry={closeTarget} onClose={() => setCloseTarget(null)} />
-      )}
-      {evidenceTarget && (
-        <Modal
-          open
-          size="lg"
-          title={`日志证据 · ${evidenceTarget.service || '未知服务'}`}
-          onClose={() => setEvidenceTarget(null)}
-        >
-          <div className="mb-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted">
-            <span>
-              告警 <span className="font-mono">{evidenceTarget.alert_id || '—'}</span>
-            </span>
-            <span>
-              工作流 <span className="font-mono">{evidenceTarget.wf_id}</span>
-            </span>
-            <span className="min-w-0 truncate" title={evidenceTarget.auto_reason}>
-              升级原因：{evidenceTarget.auto_reason}
-            </span>
-          </div>
-          <LogEvidence wfId={evidenceTarget.wf_id} />
-        </Modal>
       )}
 
       <ConfirmDialog

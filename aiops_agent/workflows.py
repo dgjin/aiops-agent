@@ -138,8 +138,6 @@ class AIOpsFixWorkflow:
         # 控制台只能通过 status 查询拿到 diff（评估报告 B4：审批点缺判断依据）。
         self._patch: Patch | None = None
         self._root_cause: RootCause | None = None
-        # 日志证据归档摘要（转人工核对）：TRIAGING 后即产出，供 status/result 展示
-        self._evidence_summary: dict | None = None
         self._approval: str | None = None
         self._second_approval: str | None = None
         self._deploy_command: str | None = None
@@ -190,7 +188,6 @@ class AIOpsFixWorkflow:
             "patch": dataclasses.asdict(self._patch) if self._patch else None,
             "test_report": dataclasses.asdict(self._test_report) if self._test_report else None,
             "root_cause": dataclasses.asdict(self._root_cause) if self._root_cause else None,
-            "evidence": self._evidence_summary,
             "approval": self._approval,
             "second_approval": self._second_approval,
             "deploy_command": self._deploy_command,
@@ -222,12 +219,6 @@ class AIOpsFixWorkflow:
         self.stage = "TRIAGING"
         evidence = await self._call(activities.collect_evidence, alert)
         clustered = await self._call(activities.cluster_logs, evidence)
-        # 证据归档（转人工核对）：必须在 LLM 之前落库——即使 triage 降级/超时转人工，
-        # 原始日志也已可查；patched 门确保在途旧流程的历史重放不受影响。
-        if workflow.patched("evidence-archive-g1"):
-            self._evidence_summary = await self._call(
-                activities.archive_evidence, evidence, clustered
-            )
         root_cause: RootCause = await self._call(
             activities.analyze_root_cause, alert, clustered, evidence["trace_ids"]
         )
@@ -540,7 +531,6 @@ class AIOpsFixWorkflow:
             "service": alert.service,
             "stage": self.stage,
             "root_cause": dataclasses.asdict(root_cause) if root_cause else None,
-            "evidence": self._evidence_summary,
             "confidence": root_cause.confidence if root_cause else None,
             "patch_id": patch.patch_id if patch else None,
             "model_version": patch.model_version if patch else None,

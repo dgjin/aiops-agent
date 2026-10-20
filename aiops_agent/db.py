@@ -30,7 +30,6 @@ workflow_runs   流程执行速查（BFF 汇总时 upsert，供报表与历史�
 alert_domains   告警故障域（C 批次）：当前聚合事件指针与窗口起点（跨实例唯一）
 alert_events    告警聚合事件（C 批次）：代表告警/流程 + pending/started + 租约认领
 alert_members   事件成员（C 批次）：(domain_key, alert_id) 唯一去重，跨实例幂等计数
-log_evidence    日志证据归档（转人工核对）：流程 TRIAGING 采集的原始日志 + 模板聚类
 =============== ============================================================
 """
 
@@ -291,30 +290,6 @@ alert_events = Table(
     Column("updated_at", DateTime, nullable=False),
     Index("idx_alert_events_status", "status", "retry_at"),
     Index("idx_alert_events_domain", "domain_key"),
-)
-
-# ---- 日志证据归档（转人工核对，语义见 aiops_agent/evidence_store.py）----
-# 一个 workflow 一条证据：原始日志行只保留末尾 MAX_STORED_LINES 行，
-# 行数与截断标记一并落库，避免截断后的视图被误当成全量。
-log_evidence = Table(
-    "log_evidence",
-    metadata,
-    Column("wf_id", String(255), primary_key=True),
-    Column("alert_id", String(255), nullable=False, server_default=""),
-    Column("service", String(128), nullable=False, server_default=""),
-    Column("collected_at", DateTime, nullable=False),
-    Column("archived_at", DateTime, nullable=False),
-    Column("loki_available", Boolean, nullable=False, server_default=text("0")),
-    Column("total_lines", Integer, nullable=False, server_default=text("0")),
-    Column("stored_lines", Integer, nullable=False, server_default=text("0")),
-    Column("truncated", Boolean, nullable=False, server_default=text("0")),
-    Column("trace_ids", JSON, nullable=False),
-    # 模板聚类：Drain3 降噪后的 [{id, pattern, count}]（最多 MAX_TEMPLATES 条）
-    Column("templates", JSON, nullable=False),
-    Column("compression_ratio", Float),
-    # 原始日志行（文本列表；JSON 无 DEFAULT，写入显式提供）
-    Column("lines", JSON, nullable=False),
-    Index("idx_evidence_service", "service"),
 )
 
 alert_members = Table(
