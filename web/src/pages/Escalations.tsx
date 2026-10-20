@@ -7,15 +7,16 @@
  *   需求来源的待办（entry.requirement）重试时重启需求修复流（批准版方案 → 沙箱 → 审批 → 发布）。
  * - 内容管理：关键词搜索（监控系统 / 服务 / 升级原因 / 告警 / 工作流 / 责任人 / 备注）+ 监控系统
  *   筛选（按当前数据动态生成选项与计数；纳管应用显示应用名，node / redis 等未纳管服务回退服务名
- *   并标注）+ 来源筛选（告警 / 需求）+ 仅看超时 + 排序（待处置优先 / 最近登记 / 最早登记）；
- *   状态页签带全量计数；列表按监控系统分组展示（组头带待办数），卡片在组内双列布局
- *   （超长原因截断，悬停看全文）——均前端内存计算，状态页签仍走服务端。
+ *   并标注）+ 来源筛选（告警 / 需求）+ 仅看超时；
+ *   状态页签带全量计数；列表为统一表格（监控系统 / 状态 / 升级原因 / 告警·工作流 / 责任人 /
+ *   登记时间 / SLA / 操作），点击表头自动排序（升降切换，aria-sort 标注），默认按监控系统
+ *   分块 + 待处置优先——均前端内存计算，状态页签仍走服务端。
  */
 
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Search, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, ArrowUpDown, Search, X } from 'lucide-react'
 import { api, describeError } from '../lib/api'
 import { cn, fmtDateTime } from '../lib/format'
 import { useWriteAction } from '../lib/actions'
@@ -53,23 +54,28 @@ const STATUS_META: Record<EscalationEntry['status'], { label: string; cls: strin
 const SELECT_CLS =
   'rounded-lg border border-line bg-panel px-2 py-1.5 text-xs text-ink focus:border-accent/50 focus:outline-none'
 
-/** 排序方式：待处置优先（默认）/ 最近登记 / 最早登记。 */
-const SORT_OPTIONS = [
-  { key: 'default', label: '待处置优先' },
-  { key: 'escalated_desc', label: '最近登记' },
-  { key: 'escalated_asc', label: '最早登记' },
-] as const
-type SortKey = (typeof SORT_OPTIONS)[number]['key']
+/** 可排序列（「告警 / 工作流」与操作列不参与排序；default 为「监控系统分块 + 待处置优先」）。 */
+type ColumnKey = 'system' | 'status' | 'reason' | 'assignee' | 'escalated_at' | 'overdue'
+type SortKey = ColumnKey | 'default'
+
+interface SortState {
+  key: SortKey
+  dir: 'asc' | 'desc'
+}
+
+/** 默认排序：按监控系统分块（组内待处置优先）；点击表头后切换为按列排序。 */
+const DEFAULT_SORT: SortState = { key: 'default', dir: 'asc' }
 
 /** 状态权重（默认排序组内：open → assigned → closed）。 */
 const STATUS_RANK: Record<EscalationEntry['status'], number> = { open: 0, assigned: 1, closed: 2 }
 
 const tsOf = (value: string | null | undefined): number => (value ? Date.parse(value) : 0)
 
-/** 默认排序：未关闭在前 → 超时在前 → 状态权重 → 早登记先处置。 */
-function compareEscalations(a: EscalationEntry, b: EscalationEntry, sort: SortKey): number {
-  if (sort === 'escalated_desc') return tsOf(b.escalated_at) - tsOf(a.escalated_at)
-  if (sort === 'escalated_asc') return tsOf(a.escalated_at) - tsOf(b.escalated_at)
+/** 待办所属监控系统（服务端派生：纳管取应用名，未纳管回退服务名；分块 / 筛选 / 搜索同一口径）。 */
+const systemLabelOf = (entry: EscalationEntry) => entry.system || entry.service || '未标注系统'
+
+/** 待处置优先：未关闭在前 → 超时在前 → 状态权重 → 早登记先处置。 */
+function compareUrgency(a: EscalationEntry, b: EscalationEntry): number {
   const closed = Number(a.status === 'closed') - Number(b.status === 'closed')
   if (closed) return closed
   const overdue = Number(b.overdue) - Number(a.overdue)
@@ -77,6 +83,83 @@ function compareEscalations(a: EscalationEntry, b: EscalationEntry, sort: SortKe
   const rank = STATUS_RANK[a.status] - STATUS_RANK[b.status]
   if (rank) return rank
   return tsOf(a.escalated_at) - tsOf(b.escalated_at)
+}
+
+/** 列排序取值（状态 / SLA 用权重或布尔，其余字符串化）。 */
+function sortValue(entry: EscalationEntry, key: ColumnKey): string | number {
+  switch (key) {
+    case 'system':
+      return systemLabelOf(entry)
+    case 'status':
+      return STATUS_RANK[entry.status]
+    case 'reason':
+      return entry.auto_reason || ''
+    case 'assignee':
+      return entry.assignee || ''
+    case 'escalated_at':
+      return tsOf(entry.escalated_at)
+    case 'overdue':
+      return Number(entry.status !== 'closed' && entry.overdue)
+  }
+}
+
+/** 列排序比较器（同类型数值直接比较，其余按中文排序；结果按方向取反，同值按登记时间升序兜底）。 */
+function compareByColumn(
+  a: EscalationEntry,
+  b: EscalationEntry,
+  key: ColumnKey,
+  dir: SortState['dir'],
+): number {
+  const va = sortValue(a, key)
+  const vb = sortValue(b, key)
+  const result =
+    typeof va === 'number' && typeof vb === 'number'
+      ? va - vb
+      : String(va).localeCompare(String(vb), 'zh')
+  return (dir === 'asc' ? result : -result) || tsOf(a.escalated_at) - tsOf(b.escalated_at)
+}
+
+/** 可排序表头：点击切换升 / 降序；当前排序列箭头常显，其余悬停提示可点。 */
+function SortableTh({
+  label,
+  colKey,
+  sort,
+  onToggle,
+}: {
+  label: string
+  colKey: ColumnKey
+  sort: SortState
+  onToggle: (key: ColumnKey) => void
+}) {
+  const active = sort.key === colKey
+  const Icon = active ? (sort.dir === 'asc' ? ArrowUp : ArrowDown) : ArrowUpDown
+  return (
+    <th
+      className="whitespace-nowrap px-3 py-2 font-medium"
+      aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : undefined}
+    >
+      <button
+        type="button"
+        onClick={() => onToggle(colKey)}
+        title={active ? (sort.dir === 'asc' ? '点击改为降序' : '点击改为升序') : '点击按此列排序'}
+        className={cn(
+          'group inline-flex items-center gap-1 transition-colors hover:text-ink',
+          active && 'text-ink',
+        )}
+      >
+        {label}
+        <Icon
+          size={11}
+          className={cn(
+            'shrink-0',
+            active
+              ? 'text-accent'
+              : 'text-idle opacity-0 transition-opacity group-hover:opacity-100',
+          )}
+        />
+      </button>
+    </th>
+  )
 }
 
 /** 指派/改派责任人（提交即热生效，落操作审计）。 */
@@ -229,7 +312,7 @@ export function Escalations() {
   const [filterSystem, setFilterSystem] = useState('')
   const [filterSource, setFilterSource] = useState('')
   const [onlyOverdue, setOnlyOverdue] = useState(false)
-  const [sort, setSort] = useState<SortKey>('default')
+  const [sort, setSort] = useState<SortState>(DEFAULT_SORT)
   const [assignTarget, setAssignTarget] = useState<EscalationEntry | null>(null)
   const [closeTarget, setCloseTarget] = useState<EscalationEntry | null>(null)
 
@@ -245,13 +328,20 @@ export function Escalations() {
     setFilterSystem('')
     setFilterSource('')
     setOnlyOverdue(false)
-    setSort('default')
+    setSort(DEFAULT_SORT)
+  }
+
+  /** 点击表头：同列翻转升降；换列按直觉默认方向（登记时间 / SLA 降序，其余升序）。 */
+  const toggleSort = (key: ColumnKey) => {
+    setSort((prev) =>
+      prev.key === key
+        ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+        : { key, dir: key === 'escalated_at' || key === 'overdue' ? 'desc' : 'asc' },
+    )
   }
 
   // ---- 内容管理：搜索 + 筛选 + 排序（前端内存计算；状态页签仍走服务端过滤）----
   const items = data?.escalations ?? []
-  /** 待办所属监控系统（服务端派生：纳管取应用名，未纳管回退服务名；分组 / 筛选 / 搜索同一口径） */
-  const systemLabelOf = (entry: EscalationEntry) => entry.system || entry.service || '未标注系统'
   const q = query.trim().toLowerCase()
   const matched = items.filter((entry) => {
     if (filterSystem && systemLabelOf(entry) !== filterSystem) return false
@@ -275,10 +365,7 @@ export function Escalations() {
       .toLowerCase()
     return haystack.includes(q)
   })
-  const sorted = [...matched].sort((a, b) => compareEscalations(a, b, sort))
-  const overdueCount = items.filter((entry) => entry.overdue).length
-
-  // ---- 监控系统维度：动态选项（按当前页签数据的系统计数降序）+ 分组 ----
+  // ---- 监控系统维度：筛选下拉的动态选项与计数（按当前页签数据的系统计数降序）----
   const systemCounts = new Map<string, number>()
   for (const entry of items) {
     const label = systemLabelOf(entry)
@@ -287,17 +374,19 @@ export function Escalations() {
   const systemPairs = [...systemCounts.entries()].sort(
     (a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh'),
   )
-  const matchedCounts = new Map<string, number>()
-  for (const entry of matched) {
-    const label = systemLabelOf(entry)
-    matchedCounts.set(label, (matchedCounts.get(label) ?? 0) + 1)
-  }
-  /** 分组顺序：按筛选后的待办数降序（组头计数与分组共用）。 */
-  const groupOrder = [...matchedCounts.entries()]
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh'))
-    .map(([label]) => label)
+  /** 默认排序的系统分块次序（与下拉选项同序：条数降序，切换筛选时保持稳定）。 */
+  const systemRank = new Map(systemPairs.map(([label], index) => [label, index] as const))
+  const sorted = [...matched].sort((a, b) => {
+    if (sort.key !== 'default') return compareByColumn(a, b, sort.key, sort.dir)
+    const bySystem =
+      (systemRank.get(systemLabelOf(a)) ?? 0) - (systemRank.get(systemLabelOf(b)) ?? 0)
+    return bySystem || compareUrgency(a, b)
+  })
+  const overdueCount = items.filter((entry) => entry.overdue).length
 
-  const hasConditions = Boolean(q || filterSystem || filterSource || onlyOverdue || sort !== 'default')
+  const hasConditions = Boolean(
+    q || filterSystem || filterSource || onlyOverdue || sort.key !== 'default',
+  )
 
   // ---- 分页：状态页签 / 条件变化回到第 1 页（越界页码自动夹取）----
   const pg = usePagination(sorted.length, 10)
@@ -306,18 +395,6 @@ export function Escalations() {
     setPage(1)
   }, [status, query, filterSystem, filterSource, onlyOverdue, sort, setPage])
   const paged = sorted.slice(pg.start, pg.start + pg.pageSize)
-
-  // ---- 当前页按监控系统分组（组序与组头计数取自筛选后的全量口径）----
-  const pageGroups = new Map<string, EscalationEntry[]>()
-  for (const entry of paged) {
-    const label = systemLabelOf(entry)
-    const bucket = pageGroups.get(label)
-    if (bucket) bucket.push(entry)
-    else pageGroups.set(label, [entry])
-  }
-  const visibleGroups = groupOrder
-    .map((label) => [label, pageGroups.get(label) ?? []] as const)
-    .filter(([, list]) => list.length > 0)
 
   /** 页签计数（stats 为全量口径，不随 status 变化）。 */
   const tabCount = (tab: StatusFilter): number => {
@@ -456,17 +533,6 @@ export function Escalations() {
                 仅看超时（{overdueCount}）
               </button>
             )}
-            <select
-              value={sort}
-              onChange={(event) => setSort(event.target.value as SortKey)}
-              className={SELECT_CLS}
-            >
-              {SORT_OPTIONS.map((option) => (
-                <option key={option.key} value={option.key}>
-                  排序：{option.label}
-                </option>
-              ))}
-            </select>
             {hasConditions && (
               <button
                 type="button"
@@ -509,117 +575,148 @@ export function Escalations() {
             </div>
           ) : (
           <>
-          <div className="mt-5">
-            {visibleGroups.map(([label, groupItems]) => (
-              <div key={label} className="mt-5 first:mt-0">
-                {/* 组头：监控系统 + 待办数（筛选后全量口径，跨页保持稳定） */}
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="font-medium text-ink">{label}</span>
-                  <span className="text-idle">
-                    {matchedCounts.get(label) ?? groupItems.length} 条
-                  </span>
-                  <span className="h-px flex-1 bg-line" />
-                </div>
-                <div className="mt-2 grid gap-3 lg:grid-cols-2">
-            {groupItems.map((entry) => {
-              const meta = STATUS_META[entry.status]
-              const open = entry.status !== 'closed'
-              return (
-                <div key={entry.id} className="rounded-xl border border-line bg-panel p-4">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-3">
-                        <span
-                          className="text-sm font-medium"
-                          title={`监控系统：${systemLabelOf(entry)}`}
-                        >
-                          {systemLabelOf(entry)}
-                        </span>
-                        {entry.service && entry.service !== systemLabelOf(entry) && (
+          <div className="mt-5 overflow-x-auto rounded-xl border border-line bg-panel">
+            <table className="w-full min-w-[1000px] text-xs">
+              <thead>
+                <tr className="border-b border-line text-left text-muted">
+                  <SortableTh label="监控系统" colKey="system" sort={sort} onToggle={toggleSort} />
+                  <SortableTh label="状态" colKey="status" sort={sort} onToggle={toggleSort} />
+                  <SortableTh label="升级原因" colKey="reason" sort={sort} onToggle={toggleSort} />
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">告警 / 工作流</th>
+                  <SortableTh label="责任人" colKey="assignee" sort={sort} onToggle={toggleSort} />
+                  <SortableTh
+                    label="登记时间"
+                    colKey="escalated_at"
+                    sort={sort}
+                    onToggle={toggleSort}
+                  />
+                  <SortableTh label="SLA" colKey="overdue" sort={sort} onToggle={toggleSort} />
+                  <th className="whitespace-nowrap px-3 py-2 text-right font-medium">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {paged.map((entry) => {
+                  const meta = STATUS_META[entry.status]
+                  const open = entry.status !== 'closed'
+                  return (
+                    <tr
+                      key={entry.id}
+                      className="border-b border-line/60 last:border-0 hover:bg-elevated/40"
+                    >
+                      <td className="px-3 py-2.5 align-top">
+                        <div className="flex flex-wrap items-center gap-1.5">
                           <span
-                            className="font-mono text-[10px] text-idle"
+                            className="font-medium text-ink"
+                            title={`监控系统：${systemLabelOf(entry)}`}
+                          >
+                            {systemLabelOf(entry)}
+                          </span>
+                          {!entry.system_managed && (
+                            <span
+                              className="rounded border border-line px-1 py-0.5 text-[10px] text-idle"
+                              title="未在「被监控系统」清单中纳管"
+                            >
+                              未纳管
+                            </span>
+                          )}
+                        </div>
+                        {entry.service && entry.service !== systemLabelOf(entry) && (
+                          <div
+                            className="mt-0.5 font-mono text-[10px] text-idle"
                             title="服务标识（告警 service）"
                           >
                             {entry.service}
-                          </span>
+                          </div>
                         )}
-                        {!entry.system_managed && (
+                      </td>
+                      <td className="px-3 py-2.5 align-top">
+                        <div className="flex flex-wrap items-center gap-1.5">
                           <span
-                            className="rounded border border-line px-1.5 py-0.5 text-[10px] text-idle"
-                            title="未在「被监控系统」清单中纳管"
+                            className={cn('rounded border px-1.5 py-0.5 text-[10px]', meta.cls)}
                           >
-                            未纳管
+                            {meta.label}
                           </span>
+                          {entry.requirement && (
+                            <span className="rounded border border-accent/40 px-1.5 py-0.5 text-[10px] text-accent">
+                              需求
+                            </span>
+                          )}
+                          {entry.re_escalated && (
+                            <span className="rounded border border-line px-1.5 py-0.5 text-[10px] text-idle">
+                              已再升级
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="max-w-[22rem] px-3 py-2.5 align-top">
+                        <div className="truncate text-ink" title={entry.auto_reason}>
+                          {entry.auto_reason || '—'}
+                        </div>
+                        {!open && entry.note && (
+                          <div className="mt-0.5 truncate text-[10px] text-idle" title={entry.note}>
+                            备注：{entry.note}
+                          </div>
                         )}
-                        <span className={cn('rounded border px-1.5 py-0.5 text-[10px]', meta.cls)}>
-                          {meta.label}
-                        </span>
-                        {entry.requirement && (
-                          <span className="rounded border border-accent/40 px-1.5 py-0.5 text-[10px] text-accent">
-                            需求
-                          </span>
+                      </td>
+                      <td className="px-3 py-2.5 align-top">
+                        <div className="space-y-0.5 text-muted">
+                          <div>
+                            告警 <CopyableId value={entry.alert_id || '—'} />
+                          </div>
+                          <div>
+                            工作流 <CopyableId value={entry.wf_id} />
+                          </div>
+                        </div>
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-2.5 align-top">
+                        {entry.assignee ? (
+                          <span className="text-ink">{entry.assignee}</span>
+                        ) : (
+                          <span className="text-idle">未指派</span>
                         )}
-                        {open && entry.overdue && (
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-2.5 align-top text-muted">
+                        {fmtDateTime(entry.escalated_at)}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-2.5 align-top">
+                        {!open ? (
+                          <span className="text-idle">—</span>
+                        ) : entry.overdue ? (
                           <span className="rounded border border-danger/40 bg-danger/10 px-1.5 py-0.5 text-[10px] text-danger">
                             已超时未处置
                           </span>
+                        ) : (
+                          <span className="text-ok">正常</span>
                         )}
-                        {entry.re_escalated && (
-                          <span className="rounded border border-line px-1.5 py-0.5 text-[10px] text-idle">
-                            已再升级
-                          </span>
-                        )}
-                      </div>
-                      <div className="mt-2 flex gap-1 text-xs text-muted">
-                        <span className="shrink-0">升级原因：</span>
-                        <span className="line-clamp-2 text-ink" title={entry.auto_reason}>
-                          {entry.auto_reason}
-                        </span>
-                      </div>
-                      <div className="mt-1.5 flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-muted">
-                        <span>
-                          告警 <CopyableId value={entry.alert_id || '—'} />
-                        </span>
-                        <span>
-                          工作流 <CopyableId value={entry.wf_id} />
-                        </span>
-                        <span>登记 {fmtDateTime(entry.escalated_at)}</span>
-                        {entry.assignee && (
-                          <span>
-                            责任人 <span className="text-ink">{entry.assignee}</span>
-                          </span>
-                        )}
-                        {entry.status === 'closed' && entry.note && (
-                          <span>备注：{entry.note}</span>
-                        )}
-                      </div>
-                    </div>
-                    <Link
-                      to={`/flows/${encodeURIComponent(entry.wf_id)}`}
-                      className="shrink-0 text-xs text-accent hover:underline"
-                    >
-                      流程详情 →
-                    </Link>
-                  </div>
-                  {open && (
-                    <PermissionGate require="operator" fallback={null}>
-                      <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-line/60 pt-3">
-                        <ActionButton onClick={() => setAssignTarget(entry)}>
-                          {entry.assignee ? '改派' : '指派'}
-                        </ActionButton>
-                        <ActionButton onClick={() => setCloseTarget(entry)}>处置关闭</ActionButton>
-                        <ActionButton tone="accent" onClick={() => openRetry(entry)}>
-                          重试修复
-                        </ActionButton>
-                      </div>
-                    </PermissionGate>
-                  )}
-                </div>
-              )
-            })}
-                </div>
-              </div>
-            ))}
+                      </td>
+                      <td className="px-3 py-2.5 align-top">
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
+                          {open && (
+                            <PermissionGate require="operator" fallback={null}>
+                              <ActionButton size="sm" onClick={() => setAssignTarget(entry)}>
+                                {entry.assignee ? '改派' : '指派'}
+                              </ActionButton>
+                              <ActionButton size="sm" onClick={() => setCloseTarget(entry)}>
+                                关闭
+                              </ActionButton>
+                              <ActionButton size="sm" tone="accent" onClick={() => openRetry(entry)}>
+                                重试
+                              </ActionButton>
+                            </PermissionGate>
+                          )}
+                          <Link
+                            to={`/flows/${encodeURIComponent(entry.wf_id)}`}
+                            className="whitespace-nowrap text-accent hover:underline"
+                          >
+                            详情 →
+                          </Link>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
           </div>
           <Pagination pg={pg} />
           </>
