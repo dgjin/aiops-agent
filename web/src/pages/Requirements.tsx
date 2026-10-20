@@ -21,9 +21,10 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowDown, ArrowUp, ArrowUpDown, RefreshCw, Search, X } from 'lucide-react'
+import { RefreshCw, Search, X } from 'lucide-react'
 import { api, describeError } from '../lib/api'
 import { cn, fmtDateTime } from '../lib/format'
+import { compareValues, type SortState } from '../lib/sort'
 import { EmptyState } from '../components/EmptyState'
 import { Pagination, usePagination } from '../components/Pagination'
 import { PermissionGate } from '../components/PermissionGate'
@@ -32,6 +33,7 @@ import {
   RELEASE_STATUS_META,
   RequirementAnalysisModal,
 } from '../components/RequirementAnalysisModal'
+import { SortableTh } from '../components/SortableTh'
 import type { RequirementAnalysisSummary, RequirementsEntry } from '../lib/types'
 
 const KIND_LABELS: Record<string, string> = {
@@ -79,13 +81,8 @@ type ColumnKey =
   | 'submitter'
   | 'updatedAt'
 
-interface SortState {
-  key: ColumnKey
-  dir: 'asc' | 'desc'
-}
-
 /** 默认排序：更新时间降序（最新条目在前）。 */
-const DEFAULT_SORT: SortState = { key: 'updatedAt', dir: 'desc' }
+const DEFAULT_SORT: SortState<ColumnKey> = { key: 'updatedAt', dir: 'desc' }
 
 /** 列排序取值（ID 数字优先数值比较，混合值由比较器字符串化兜底）。 */
 function sortValue(entry: RequirementsEntry, key: ColumnKey): string | number {
@@ -112,14 +109,12 @@ function sortValue(entry: RequirementsEntry, key: ColumnKey): string | number {
 }
 
 /** 列排序比较器（同类型数值直接比较，其余按中文排序；结果按方向取反）。 */
-function compareByColumn(a: RequirementsEntry, b: RequirementsEntry, sort: SortState): number {
-  const va = sortValue(a, sort.key)
-  const vb = sortValue(b, sort.key)
-  const result =
-    typeof va === 'number' && typeof vb === 'number'
-      ? va - vb
-      : String(va).localeCompare(String(vb), 'zh')
-  return sort.dir === 'asc' ? result : -result
+function compareByColumn(
+  a: RequirementsEntry,
+  b: RequirementsEntry,
+  sort: SortState<ColumnKey>,
+): number {
+  return compareValues(sortValue(a, sort.key), sortValue(b, sort.key), sort.dir)
 }
 
 /** 优先级徽标（P0 红 / P1 橙 / 其余中性；空值「未定级」）。 */
@@ -134,49 +129,6 @@ function PriorityBadge({ priority }: { priority: string }) {
     >
       {priority}
     </span>
-  )
-}
-
-/** 可排序表头：点击切换升 / 降序；当前排序列箭头常显，其余悬停提示可点。 */
-function SortableTh({
-  label,
-  colKey,
-  sort,
-  onToggle,
-}: {
-  label: string
-  colKey: ColumnKey
-  sort: SortState
-  onToggle: (key: ColumnKey) => void
-}) {
-  const active = sort.key === colKey
-  const Icon = active ? (sort.dir === 'asc' ? ArrowUp : ArrowDown) : ArrowUpDown
-  return (
-    <th
-      className="whitespace-nowrap px-3 py-2 font-medium"
-      aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : undefined}
-    >
-      <button
-        type="button"
-        onClick={() => onToggle(colKey)}
-        title={active ? (sort.dir === 'asc' ? '点击改为降序' : '点击改为升序') : '点击按此列排序'}
-        className={cn(
-          'group inline-flex items-center gap-1 transition-colors hover:text-ink',
-          active && 'text-ink',
-        )}
-      >
-        {label}
-        <Icon
-          size={11}
-          className={cn(
-            'shrink-0',
-            active
-              ? 'text-accent'
-              : 'text-idle opacity-0 transition-opacity group-hover:opacity-100',
-          )}
-        />
-      </button>
-    </th>
   )
 }
 
@@ -253,7 +205,7 @@ export function Requirements() {
   const [filterPriority, setFilterPriority] = useState('')
   const [filterDept, setFilterDept] = useState('')
   const [filterSource, setFilterSource] = useState('')
-  const [sort, setSort] = useState<SortState>(DEFAULT_SORT)
+  const [sort, setSort] = useState<SortState<ColumnKey>>(DEFAULT_SORT)
   const [analysisTarget, setAnalysisTarget] = useState<{
     entry: RequirementsEntry
     analysisId: string | null

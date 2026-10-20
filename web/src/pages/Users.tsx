@@ -4,6 +4,8 @@
  * - 不能删除 / 降级 / 禁用自己（本页对当前登录行隐藏相应操作）；
  * - 至少保留一个启用管理员（操作失败由确认框内错误提示兜底）；
  * - 禁用 / 删除 / 重置密码后会话即时失效或强制下线（resolve 以用户表为准）。
+ *
+ * 列表支持点击表头排序（默认更新时间降序）。
  */
 
 import { useState } from 'react'
@@ -11,18 +13,47 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus } from 'lucide-react'
 import { api, describeError } from '../lib/api'
 import { cn, fmtDateTime } from '../lib/format'
+import { compareValues, nextSort, type SortState } from '../lib/sort'
 import { useWriteAction } from '../lib/actions'
 import { hasRole, useSelf } from '../lib/permission'
 import { ActionButton } from '../components/ActionButton'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { EmptyState } from '../components/EmptyState'
 import { Modal, fieldClass, secondaryButtonClass } from '../components/Modal'
+import { SortableTh } from '../components/SortableTh'
 import { Toast } from '../components/Toast'
 import { roleLabel } from '../components/UserMenu'
 import type { SessionItem, UserItem } from '../lib/types'
 
 /** 与服务端 USERNAME_PATTERN 一致的本地校验。 */
 const USERNAME_RE = /^[A-Za-z0-9_.-]{2,32}$/
+
+/** 用户表可排序列（操作为按钮组，不参与排序）。 */
+type ColumnKey = 'username' | 'role' | 'state' | 'created_at' | 'updated_at'
+
+const DEFAULT_SORT: SortState<ColumnKey> = { key: 'updated_at', dir: 'desc' }
+
+/** 角色排序权重：按权限从低到高，未知角色排最后。 */
+const ROLE_RANK: Record<string, number> = { viewer: 0, operator: 1, admin: 2 }
+
+/** 时间戳（缺失按 0，排序兜底稳定）。 */
+const tsOf = (value: string | null | undefined): number => (value ? Date.parse(value) : 0)
+
+/** 列排序取值（状态「启用」在前）。 */
+function sortValue(user: UserItem, key: ColumnKey): string | number {
+  switch (key) {
+    case 'username':
+      return user.username
+    case 'role':
+      return ROLE_RANK[user.role] ?? 9
+    case 'state':
+      return user.state === 'active' ? 0 : 1
+    case 'created_at':
+      return tsOf(user.created_at)
+    case 'updated_at':
+      return tsOf(user.updated_at)
+  }
+}
 
 const ROLE_OPTIONS: { value: string; label: string; desc: string }[] = [
   { value: 'viewer', label: '观察者', desc: '只读：看板 / 流程 / 审计 / 帮助' },
@@ -316,6 +347,7 @@ export function Users() {
   const [resetTarget, setResetTarget] = useState<UserItem | null>(null)
   const [sessionsTarget, setSessionsTarget] = useState<UserItem | null>(null)
   const [toast, setToast] = useState<string | null>(null)
+  const [sort, setSort] = useState<SortState<ColumnKey>>(DEFAULT_SORT)
 
   // 越权拦截：非管理员给出说明（/api/users 服务端同样强制 admin）
   if (self && !hasRole(self.role, 'admin')) {
@@ -333,6 +365,14 @@ export function Users() {
   const adminCount = users.filter(
     (user) => user.role === 'admin' && user.state === 'active',
   ).length
+
+  /** 点击表头：同列翻转升降；换列按直觉默认方向（时间降序，其余升序）。 */
+  const toggleSort = (key: ColumnKey) => {
+    setSort((prev) => nextSort(prev, key, key === 'created_at' || key === 'updated_at' ? 'desc' : 'asc'))
+  }
+  const sortedUsers = [...users].sort((a, b) =>
+    compareValues(sortValue(a, sort.key), sortValue(b, sort.key), sort.dir),
+  )
 
   const notify = (message: string) => {
     setToast(message)
@@ -412,16 +452,28 @@ export function Users() {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-line text-left text-xs text-muted">
-              <th className="px-4 py-3 font-medium">用户名</th>
-              <th className="px-4 py-3 font-medium">角色</th>
-              <th className="px-4 py-3 font-medium">状态</th>
-              <th className="px-4 py-3 font-medium">创建时间</th>
-              <th className="px-4 py-3 font-medium">更新时间</th>
+              <SortableTh label="用户名" colKey="username" sort={sort} onToggle={toggleSort} padding="px-4 py-3" />
+              <SortableTh label="角色" colKey="role" sort={sort} onToggle={toggleSort} padding="px-4 py-3" />
+              <SortableTh label="状态" colKey="state" sort={sort} onToggle={toggleSort} padding="px-4 py-3" />
+              <SortableTh
+                label="创建时间"
+                colKey="created_at"
+                sort={sort}
+                onToggle={toggleSort}
+                padding="px-4 py-3"
+              />
+              <SortableTh
+                label="更新时间"
+                colKey="updated_at"
+                sort={sort}
+                onToggle={toggleSort}
+                padding="px-4 py-3"
+              />
               <th className="px-4 py-3 text-right font-medium">操作</th>
             </tr>
           </thead>
           <tbody>
-            {users.map((user) => {
+            {sortedUsers.map((user) => {
               const isSelf = user.username === me
               return (
                 <tr key={user.username} className="border-b border-line/60 last:border-0">

@@ -1,18 +1,24 @@
-/** 审计回看：终态流程审计 + 控制台操作审计（设计方案 7.5）。 */
+/** 审计回看：终态流程审计 + 控制台操作审计（设计方案 7.5）。
+ *
+ * 两张表均支持点击表头排序（前端内存排序，默认按时间降序）。
+ */
 
 import { Fragment, useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api, describeError } from '../lib/api'
 import { cn, downloadJson, fmtDateTime } from '../lib/format'
+import { compareValues, nextSort, type SortState } from '../lib/sort'
 import { useWriteAction } from '../lib/actions'
 import { ActionButton } from '../components/ActionButton'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { EmptyState } from '../components/EmptyState'
 import { EventTimeline } from '../components/EventTimeline'
 import { Pagination, usePagination } from '../components/Pagination'
-import { StageBadge } from '../components/StageBadge'
+import { SortableTh } from '../components/SortableTh'
+import { StageBadge, stageRank } from '../components/StageBadge'
 import { Toast } from '../components/Toast'
+import type { FlowItem, OpsAuditRow } from '../lib/types'
 
 const INPUT_CLS =
   'rounded-lg border border-line bg-panel px-3 py-1.5 text-sm text-ink placeholder:text-idle focus:border-accent/50 focus:outline-none'
@@ -35,6 +41,52 @@ function actionCls(action: string): string {
 
 /** 可回滚的配置变更动作（回滚依据：该记录 changed[*].from）。 */
 const ROLLBACKABLE = ['monitored-app:update', 'monitored-app:toggle']
+
+/** 时间戳（缺失按 0，排序兜底稳定）。 */
+const tsOf = (value: string | null | undefined): number => (value ? Date.parse(value) : 0)
+
+/** 流程审计可排序列（「事件流」为操作列，不参与排序）。 */
+type FlowColumnKey = 'close_time' | 'service' | 'alert_id' | 'stage' | 'patch_id' | 'confidence'
+
+/** 操作审计可排序列（参数为 JSON 快照、操作为回滚按钮，均不参与排序）。 */
+type OpsColumnKey = 'ts' | 'actor' | 'action' | 'object' | 'result'
+
+const DEFAULT_FLOW_SORT: SortState<FlowColumnKey> = { key: 'close_time', dir: 'desc' }
+const DEFAULT_OPS_SORT: SortState<OpsColumnKey> = { key: 'ts', dir: 'desc' }
+
+/** 流程审计列排序取值（阶段按推进顺序，置信度空值排最后）。 */
+function flowSortValue(item: FlowItem, key: FlowColumnKey): string | number {
+  switch (key) {
+    case 'close_time':
+      return tsOf(item.close_time)
+    case 'service':
+      return item.alert?.service ?? ''
+    case 'alert_id':
+      return item.alert?.alert_id ?? ''
+    case 'stage':
+      return stageRank(item.stage)
+    case 'patch_id':
+      return item.patch_id ?? ''
+    case 'confidence':
+      return item.confidence ?? -1
+  }
+}
+
+/** 操作审计列排序取值（对象列按实际展示文本：target 优先，回退工作流 ID）。 */
+function opsSortValue(row: OpsAuditRow, key: OpsColumnKey): string | number {
+  switch (key) {
+    case 'ts':
+      return tsOf(row.ts)
+    case 'actor':
+      return row.actor
+    case 'action':
+      return row.action
+    case 'object':
+      return row.target ?? row.wf_id
+    case 'result':
+      return row.result
+  }
+}
 
 /** 操作审计汇总条（P3-07）：近 N 天按操作者 / 动作 / 日趋势聚合。 */
 function OpsSummary({ days }: { days: number }) {
@@ -130,6 +182,8 @@ export function Audit() {
   const [days, setDays] = useState(7)
   const [tab, setTab] = useState<'flows' | 'ops'>('flows')
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [flowSort, setFlowSort] = useState<SortState<FlowColumnKey>>(DEFAULT_FLOW_SORT)
+  const [opsSort, setOpsSort] = useState<SortState<OpsColumnKey>>(DEFAULT_OPS_SORT)
   const write = useWriteAction()
 
   const { data, isError, error } = useQuery({
@@ -138,15 +192,29 @@ export function Audit() {
     refetchInterval: 15000,
   })
 
-  // ---- 分页：q / 时间范围 / 页签变化回到第 1 页；流程审计与操作审计各自独立 ----
-  const flowsPg = usePagination(data?.items.length ?? 0, 20)
-  const opsPg = usePagination(data?.ops.length ?? 0, 20)
+  /** 点击表头：同列翻转升降；换列按直觉默认方向（时间降序，其余升序）。 */
+  const toggleFlowSort = (key: FlowColumnKey) => {
+    setFlowSort((prev) => nextSort(prev, key, key === 'close_time' ? 'desc' : 'asc'))
+  }
+  const toggleOpsSort = (key: OpsColumnKey) => {
+    setOpsSort((prev) => nextSort(prev, key, key === 'ts' ? 'desc' : 'asc'))
+  }
+
+  // ---- 排序 + 分页：q / 时间范围 / 页签 / 排序变化回到第 1 页；两张表各自独立 ----
+  const sortedFlows = [...(data?.items ?? [])].sort(
+    (a, b) => compareValues(flowSortValue(a, flowSort.key), flowSortValue(b, flowSort.key), flowSort.dir),
+  )
+  const sortedOps = [...(data?.ops ?? [])].sort(
+    (a, b) => compareValues(opsSortValue(a, opsSort.key), opsSortValue(b, opsSort.key), opsSort.dir),
+  )
+  const flowsPg = usePagination(sortedFlows.length, 20)
+  const opsPg = usePagination(sortedOps.length, 20)
   const { setPage: setFlowsPage } = flowsPg
   const { setPage: setOpsPage } = opsPg
   useEffect(() => {
     setFlowsPage(1)
     setOpsPage(1)
-  }, [q, days, tab, setFlowsPage, setOpsPage])
+  }, [q, days, tab, flowSort, opsSort, setFlowsPage, setOpsPage])
 
   return (
     <div>
@@ -214,17 +282,29 @@ export function Audit() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-line text-left text-xs text-muted">
-                  <th className="px-4 py-2.5 font-medium">结束时间</th>
-                  <th className="px-4 py-2.5 font-medium">服务</th>
-                  <th className="px-4 py-2.5 font-medium">告警</th>
-                  <th className="px-4 py-2.5 font-medium">阶段</th>
-                  <th className="px-4 py-2.5 font-medium">补丁</th>
-                  <th className="px-4 py-2.5 font-medium">置信度</th>
+                  <SortableTh
+                    label="结束时间"
+                    colKey="close_time"
+                    sort={flowSort}
+                    onToggle={toggleFlowSort}
+                    padding="px-4 py-2.5"
+                  />
+                  <SortableTh label="服务" colKey="service" sort={flowSort} onToggle={toggleFlowSort} padding="px-4 py-2.5" />
+                  <SortableTh label="告警" colKey="alert_id" sort={flowSort} onToggle={toggleFlowSort} padding="px-4 py-2.5" />
+                  <SortableTh label="阶段" colKey="stage" sort={flowSort} onToggle={toggleFlowSort} padding="px-4 py-2.5" />
+                  <SortableTh label="补丁" colKey="patch_id" sort={flowSort} onToggle={toggleFlowSort} padding="px-4 py-2.5" />
+                  <SortableTh
+                    label="置信度"
+                    colKey="confidence"
+                    sort={flowSort}
+                    onToggle={toggleFlowSort}
+                    padding="px-4 py-2.5"
+                  />
                   <th className="px-4 py-2.5 font-medium" />
                 </tr>
               </thead>
               <tbody>
-                {data.items.slice(flowsPg.start, flowsPg.start + flowsPg.pageSize).map((item) => (
+                {sortedFlows.slice(flowsPg.start, flowsPg.start + flowsPg.pageSize).map((item) => (
                   <Fragment key={item.wf_id}>
                   <tr className="border-b border-line/60 last:border-0 hover:bg-elevated/60">
                     <td className="px-4 py-2.5 text-xs text-muted">{fmtDateTime(item.close_time)}</td>
@@ -285,17 +365,17 @@ export function Audit() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-line text-left text-xs text-muted">
-                  <th className="px-4 py-2.5 font-medium">时间</th>
-                  <th className="px-4 py-2.5 font-medium">操作者</th>
-                  <th className="px-4 py-2.5 font-medium">动作</th>
-                  <th className="px-4 py-2.5 font-medium">对象</th>
+                  <SortableTh label="时间" colKey="ts" sort={opsSort} onToggle={toggleOpsSort} padding="px-4 py-2.5" />
+                  <SortableTh label="操作者" colKey="actor" sort={opsSort} onToggle={toggleOpsSort} padding="px-4 py-2.5" />
+                  <SortableTh label="动作" colKey="action" sort={opsSort} onToggle={toggleOpsSort} padding="px-4 py-2.5" />
+                  <SortableTh label="对象" colKey="object" sort={opsSort} onToggle={toggleOpsSort} padding="px-4 py-2.5" />
                   <th className="px-4 py-2.5 font-medium">参数</th>
-                  <th className="px-4 py-2.5 font-medium">结果</th>
+                  <SortableTh label="结果" colKey="result" sort={opsSort} onToggle={toggleOpsSort} padding="px-4 py-2.5" />
                   <th className="px-4 py-2.5 text-right font-medium">操作</th>
                 </tr>
               </thead>
               <tbody>
-                {data.ops.slice(opsPg.start, opsPg.start + opsPg.pageSize).map((row, index) => {
+                {sortedOps.slice(opsPg.start, opsPg.start + opsPg.pageSize).map((row, index) => {
                   // 仅「工作流 ID」才可跳转；配置类操作的对象（target）不是工作流，渲染为纯文本。
                   // 用前缀判断而非依赖新字段，历史记录同样不再产生坏链。
                   const isWorkflow = row.wf_id.startsWith('aiops-fix-')

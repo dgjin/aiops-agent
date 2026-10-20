@@ -6,13 +6,17 @@
  * - flows?service=X（后端已支持按系统过滤）
  * - systems/{appId}/timeline（P3⑨ 服务端聚合：gate_events 翻译 + 快照推导）
  * - requirements/analyses?app_id=X（后端已支持按系统过滤）
+ *
+ * 流程历史表支持点击表头排序（默认开始时间降序）。
  */
 
+import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowUpRight, Wrench } from 'lucide-react'
 import { api, describeError } from '../lib/api'
 import { cn, fmtDateTime, fmtDuration, fmtTime } from '../lib/format'
+import { compareValues, nextSort, type SortState } from '../lib/sort'
 import {
   AppHealthDot,
   ProbeBadge,
@@ -23,7 +27,8 @@ import {
 import { CountdownText } from '../components/CountdownText'
 import { EmptyState } from '../components/EmptyState'
 import { RELEASE_STATUS_META } from '../components/RequirementAnalysisModal'
-import { StageBadge } from '../components/StageBadge'
+import { SortableTh } from '../components/SortableTh'
+import { StageBadge, stageRank } from '../components/StageBadge'
 import type { FlowItem, MonitoredApp, RequirementAnalysisSummary, TimelineTone } from '../lib/types'
 
 /** 发布结果 → 工作台纯文本颜色（徽标配色见 RELEASE_STATUS_META，此处只取文字色）。 */
@@ -52,6 +57,31 @@ const TONE_TEXT: Record<TimelineTone, string> = {
   danger: 'text-danger',
   idle: 'text-idle',
   muted: 'text-idle',
+}
+
+/** 流程历史可排序列（「详情」为链接列，不参与排序）。 */
+type ColumnKey = 'wf_id' | 'alert_id' | 'stage' | 'duration' | 'start_time'
+
+/** 默认排序：开始时间降序（最新流程在前）。 */
+const DEFAULT_SORT: SortState<ColumnKey> = { key: 'start_time', dir: 'desc' }
+
+/** 时间戳（缺失按 0，排序兜底稳定）。 */
+const tsOf = (value: string | null | undefined): number => (value ? Date.parse(value) : 0)
+
+/** 列排序取值（阶段按推进顺序；运行中流程耗时按 0 兜底）。 */
+function sortValue(item: FlowItem, key: ColumnKey): string | number {
+  switch (key) {
+    case 'wf_id':
+      return item.wf_id
+    case 'alert_id':
+      return item.alert?.alert_id ?? ''
+    case 'stage':
+      return stageRank(item.stage)
+    case 'duration':
+      return item.duration_seconds ?? 0
+    case 'start_time':
+      return tsOf(item.start_time)
+  }
 }
 
 /** 侧区卡片壳（统一标题 + 内容节奏）。 */
@@ -166,6 +196,12 @@ export function SystemWorkbench() {
     enabled: Boolean(appId),
     refetchInterval: 20000,
   })
+  const [flowSort, setFlowSort] = useState<SortState<ColumnKey>>(DEFAULT_SORT)
+
+  /** 点击表头：同列翻转升降；换列按直觉默认方向（开始时间降序，其余升序）。 */
+  const toggleFlowSort = (key: ColumnKey) => {
+    setFlowSort((prev) => nextSort(prev, key, key === 'start_time' ? 'desc' : 'asc'))
+  }
 
   if (apps.isError) {
     return <EmptyState title="无法加载被监控系统清单" hint={describeError(apps.error)} />
@@ -181,6 +217,9 @@ export function SystemWorkbench() {
   }
 
   const items: FlowItem[] = flows.data?.items ?? []
+  const sortedItems = [...items].sort((a, b) =>
+    compareValues(sortValue(a, flowSort.key), sortValue(b, flowSort.key), flowSort.dir),
+  )
   const running = items.filter((item) => item.exec_status === 'RUNNING')
   const timelineGroups = timeline.data?.groups ?? []
   // 浅拓扑（P2-2）：上游依赖（清单声明）+ 下游调用方（反查全量清单）
@@ -347,16 +386,46 @@ export function SystemWorkbench() {
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="border-b border-line text-left text-muted">
-                      <th className="px-4 py-2.5 font-medium">工作流</th>
-                      <th className="px-4 py-2.5 font-medium">告警</th>
-                      <th className="px-4 py-2.5 font-medium">阶段</th>
-                      <th className="px-4 py-2.5 font-medium">耗时</th>
-                      <th className="px-4 py-2.5 font-medium">开始时间</th>
+                      <SortableTh
+                        label="工作流"
+                        colKey="wf_id"
+                        sort={flowSort}
+                        onToggle={toggleFlowSort}
+                        padding="px-4 py-2.5"
+                      />
+                      <SortableTh
+                        label="告警"
+                        colKey="alert_id"
+                        sort={flowSort}
+                        onToggle={toggleFlowSort}
+                        padding="px-4 py-2.5"
+                      />
+                      <SortableTh
+                        label="阶段"
+                        colKey="stage"
+                        sort={flowSort}
+                        onToggle={toggleFlowSort}
+                        padding="px-4 py-2.5"
+                      />
+                      <SortableTh
+                        label="耗时"
+                        colKey="duration"
+                        sort={flowSort}
+                        onToggle={toggleFlowSort}
+                        padding="px-4 py-2.5"
+                      />
+                      <SortableTh
+                        label="开始时间"
+                        colKey="start_time"
+                        sort={flowSort}
+                        onToggle={toggleFlowSort}
+                        padding="px-4 py-2.5"
+                      />
                       <th className="px-4 py-2.5 text-right font-medium">详情</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {items.slice(0, 15).map((item) => (
+                    {sortedItems.slice(0, 15).map((item) => (
                       <tr key={item.wf_id} className="border-b border-line/60 last:border-0">
                         <td className="max-w-[14rem] px-4 py-2.5">
                           <span className="block truncate font-mono text-[11px] text-muted" title={item.wf_id}>

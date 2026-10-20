@@ -24,6 +24,13 @@ export const STAGE_META: Record<string, StageMeta> = {
   FAILED: { label: '执行失败', tone: 'danger' },
 }
 
+/** 阶段排序权重：按流程推进顺序，未知阶段排最后（列表表头排序共用）。 */
+const STAGE_ORDER = Object.keys(STAGE_META)
+export const stageRank = (stage: string | null): number => {
+  const index = stage ? STAGE_ORDER.indexOf(stage) : -1
+  return index >= 0 ? index : STAGE_ORDER.length
+}
+
 const TONE_CLS: Record<StageMeta['tone'], string> = {
   info: 'border-info/30 bg-info/10 text-info',
   warn: 'border-warn/30 bg-warn/10 text-warn',

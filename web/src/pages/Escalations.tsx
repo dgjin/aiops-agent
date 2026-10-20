@@ -16,9 +16,10 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowDown, ArrowUp, ArrowUpDown, Search, X } from 'lucide-react'
+import { Search, X } from 'lucide-react'
 import { api, describeError } from '../lib/api'
 import { cn, fmtDateTime } from '../lib/format'
+import { compareValues, nextSort, type SortState } from '../lib/sort'
 import { useWriteAction } from '../lib/actions'
 import { ActionButton } from '../components/ActionButton'
 import { ConfirmDialog } from '../components/ConfirmDialog'
@@ -32,6 +33,7 @@ import {
 } from '../components/Modal'
 import { Pagination, usePagination } from '../components/Pagination'
 import { PermissionGate } from '../components/PermissionGate'
+import { SortableTh } from '../components/SortableTh'
 import { Toast } from '../components/Toast'
 import type { EscalationEntry } from '../lib/types'
 
@@ -58,13 +60,8 @@ const SELECT_CLS =
 type ColumnKey = 'system' | 'status' | 'reason' | 'assignee' | 'escalated_at' | 'overdue'
 type SortKey = ColumnKey | 'default'
 
-interface SortState {
-  key: SortKey
-  dir: 'asc' | 'desc'
-}
-
 /** 默认排序：按监控系统分块（组内待处置优先）；点击表头后切换为按列排序。 */
-const DEFAULT_SORT: SortState = { key: 'default', dir: 'asc' }
+const DEFAULT_SORT: SortState<SortKey> = { key: 'default', dir: 'asc' }
 
 /** 状态权重（默认排序组内：open → assigned → closed）。 */
 const STATUS_RANK: Record<EscalationEntry['status'], number> = { open: 0, assigned: 1, closed: 2 }
@@ -103,62 +100,16 @@ function sortValue(entry: EscalationEntry, key: ColumnKey): string | number {
   }
 }
 
-/** 列排序比较器（同类型数值直接比较，其余按中文排序；结果按方向取反，同值按登记时间升序兜底）。 */
+/** 列排序比较器（同值按登记时间升序兜底）。 */
 function compareByColumn(
   a: EscalationEntry,
   b: EscalationEntry,
   key: ColumnKey,
   dir: SortState['dir'],
 ): number {
-  const va = sortValue(a, key)
-  const vb = sortValue(b, key)
-  const result =
-    typeof va === 'number' && typeof vb === 'number'
-      ? va - vb
-      : String(va).localeCompare(String(vb), 'zh')
-  return (dir === 'asc' ? result : -result) || tsOf(a.escalated_at) - tsOf(b.escalated_at)
-}
-
-/** 可排序表头：点击切换升 / 降序；当前排序列箭头常显，其余悬停提示可点。 */
-function SortableTh({
-  label,
-  colKey,
-  sort,
-  onToggle,
-}: {
-  label: string
-  colKey: ColumnKey
-  sort: SortState
-  onToggle: (key: ColumnKey) => void
-}) {
-  const active = sort.key === colKey
-  const Icon = active ? (sort.dir === 'asc' ? ArrowUp : ArrowDown) : ArrowUpDown
   return (
-    <th
-      className="whitespace-nowrap px-3 py-2 font-medium"
-      aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : undefined}
-    >
-      <button
-        type="button"
-        onClick={() => onToggle(colKey)}
-        title={active ? (sort.dir === 'asc' ? '点击改为降序' : '点击改为升序') : '点击按此列排序'}
-        className={cn(
-          'group inline-flex items-center gap-1 transition-colors hover:text-ink',
-          active && 'text-ink',
-        )}
-      >
-        {label}
-        <Icon
-          size={11}
-          className={cn(
-            'shrink-0',
-            active
-              ? 'text-accent'
-              : 'text-idle opacity-0 transition-opacity group-hover:opacity-100',
-          )}
-        />
-      </button>
-    </th>
+    compareValues(sortValue(a, key), sortValue(b, key), dir) ||
+    tsOf(a.escalated_at) - tsOf(b.escalated_at)
   )
 }
 
@@ -312,7 +263,7 @@ export function Escalations() {
   const [filterSystem, setFilterSystem] = useState('')
   const [filterSource, setFilterSource] = useState('')
   const [onlyOverdue, setOnlyOverdue] = useState(false)
-  const [sort, setSort] = useState<SortState>(DEFAULT_SORT)
+  const [sort, setSort] = useState<SortState<SortKey>>(DEFAULT_SORT)
   const [assignTarget, setAssignTarget] = useState<EscalationEntry | null>(null)
   const [closeTarget, setCloseTarget] = useState<EscalationEntry | null>(null)
 
@@ -333,11 +284,7 @@ export function Escalations() {
 
   /** 点击表头：同列翻转升降；换列按直觉默认方向（登记时间 / SLA 降序，其余升序）。 */
   const toggleSort = (key: ColumnKey) => {
-    setSort((prev) =>
-      prev.key === key
-        ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
-        : { key, dir: key === 'escalated_at' || key === 'overdue' ? 'desc' : 'asc' },
-    )
+    setSort((prev) => nextSort(prev, key, key === 'escalated_at' || key === 'overdue' ? 'desc' : 'asc'))
   }
 
   // ---- 内容管理：搜索 + 筛选 + 排序（前端内存计算；状态页签仍走服务端过滤）----

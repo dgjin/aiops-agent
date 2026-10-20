@@ -1,4 +1,7 @@
-/** 被监控应用维护：清单增删改 + 启停 + 导入导出 + 批量 + 实时探测（写盘即热生效）。 */
+/** 被监控应用维护：清单增删改 + 启停 + 导入导出 + 批量 + 实时探测（写盘即热生效）。
+ *
+ * 列表支持点击表头排序（默认更新时间降序；勾选 / 操作列不参与）。
+ */
 
 import { useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
@@ -6,6 +9,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Download, MoreHorizontal, Plus, Upload } from 'lucide-react'
 import { api, describeError } from '../lib/api'
 import { cn, downloadJson, fmtDateTime } from '../lib/format'
+import { compareValues, nextSort, type SortState } from '../lib/sort'
 import { useWriteAction } from '../lib/actions'
 import { hasRole, useSelf } from '../lib/permission'
 import { ActionButton } from '../components/ActionButton'
@@ -14,12 +18,40 @@ import { EmptyState } from '../components/EmptyState'
 import { ProbeBadge, ReadinessLine, WatcherLine } from '../components/MonitoredAppStatus'
 import { Pagination, usePagination } from '../components/Pagination'
 import { PermissionGate } from '../components/PermissionGate'
+import { SortableTh } from '../components/SortableTh'
 import { Toast } from '../components/Toast'
 import type { MonitoredApp, MonitoredAppInput } from '../lib/types'
 
 const INPUT_CLS =
   'w-full rounded-lg border border-line bg-canvas px-3 py-2 text-sm text-ink placeholder:text-idle focus:border-accent/50 focus:outline-none'
 const INPUT_ERR_CLS = 'border-danger/60'
+
+/** 清单可排序列（勾选 / 操作为交互列，不参与排序）。 */
+type ColumnKey = 'name' | 'status' | 'updated_at' | 'url' | 'service' | 'log_path'
+
+/** 默认排序：更新时间降序（最近改动在前）。 */
+const DEFAULT_SORT: SortState<ColumnKey> = { key: 'updated_at', dir: 'desc' }
+
+/** 时间戳（缺失按 0，排序兜底稳定）。 */
+const tsOf = (value: string | null | undefined): number => (value ? Date.parse(value) : 0)
+
+/** 列排序取值（状态：启用且探测正常 → 启用异常 → 已停用）。 */
+function sortValue(app: MonitoredApp, key: ColumnKey): string | number {
+  switch (key) {
+    case 'name':
+      return app.name
+    case 'status':
+      return app.enabled ? (app.probe.error ? 1 : 0) : 2
+    case 'updated_at':
+      return tsOf(app.updated_at)
+    case 'url':
+      return app.url
+    case 'service':
+      return app.service
+    case 'log_path':
+      return app.log_path
+  }
+}
 
 const EMPTY_FORM: MonitoredAppInput = {
   name: '',
@@ -397,15 +429,25 @@ export function MonitoredApps() {
   const fileRef = useRef<HTMLInputElement>(null)
   /** 行内「⋯」菜单（fixed 定位，逃逸表格 overflow 裁剪；白屏遮罩点击关闭）。 */
   const [rowMenu, setRowMenu] = useState<{ app: MonitoredApp; x: number; y: number } | null>(null)
+  const [sort, setSort] = useState<SortState<ColumnKey>>(DEFAULT_SORT)
 
-  // ---- 分页（条目增删后越界页码自动夹取）----
-  const pg = usePagination(data?.items.length ?? 0, 10)
+  /** 点击表头：同列翻转升降；换列按直觉默认方向（更新时间降序，其余升序）。 */
+  const toggleSort = (key: ColumnKey) => {
+    setSort((prev) => nextSort(prev, key, key === 'updated_at' ? 'desc' : 'asc'))
+  }
+
+  const items = data?.items ?? []
+  const sortedItems = [...items].sort((a, b) =>
+    compareValues(sortValue(a, sort.key), sortValue(b, sort.key), sort.dir),
+  )
+
+  // ---- 分页（条目增删 / 排序变化后越界页码自动夹取）----
+  const pg = usePagination(sortedItems.length, 10)
 
   if (isError) return <EmptyState title="无法加载被监控应用" hint={describeError(error)} />
   if (!data) return <div className="text-sm text-muted">加载中…</div>
 
-  const items = data.items
-  const paged = items.slice(pg.start, pg.start + pg.pageSize)
+  const paged = sortedItems.slice(pg.start, pg.start + pg.pageSize)
   const names = items.map((item) => item.name)
   const allSelected = items.length > 0 && selected.length === items.length
 
@@ -600,12 +642,54 @@ export function MonitoredApps() {
                     />
                   )}
                 </th>
-                <th className="w-[15.5%] whitespace-nowrap px-3 py-3 font-medium">名称</th>
-                <th className="w-[19%] whitespace-nowrap px-3 py-3 font-medium">状态</th>
-                <th className="w-[12%] whitespace-nowrap px-3 py-3 font-medium">更新时间</th>
-                <th className="w-[12.5%] whitespace-nowrap px-3 py-3 font-medium">地址</th>
-                <th className="w-[7%] whitespace-nowrap px-3 py-3 font-medium">service</th>
-                <th className="w-[17.5%] whitespace-nowrap px-3 py-3 font-medium">日志路径</th>
+                <SortableTh
+                  label="名称"
+                  colKey="name"
+                  sort={sort}
+                  onToggle={toggleSort}
+                  padding="px-3 py-3"
+                  className="w-[15.5%]"
+                />
+                <SortableTh
+                  label="状态"
+                  colKey="status"
+                  sort={sort}
+                  onToggle={toggleSort}
+                  padding="px-3 py-3"
+                  className="w-[19%]"
+                />
+                <SortableTh
+                  label="更新时间"
+                  colKey="updated_at"
+                  sort={sort}
+                  onToggle={toggleSort}
+                  padding="px-3 py-3"
+                  className="w-[12%]"
+                />
+                <SortableTh
+                  label="地址"
+                  colKey="url"
+                  sort={sort}
+                  onToggle={toggleSort}
+                  padding="px-3 py-3"
+                  className="w-[12.5%]"
+                />
+                <SortableTh
+                  label="service"
+                  colKey="service"
+                  sort={sort}
+                  onToggle={toggleSort}
+                  padding="px-3 py-3"
+                  className="w-[7%]"
+                />
+                <SortableTh
+                  label="日志路径"
+                  colKey="log_path"
+                  sort={sort}
+                  onToggle={toggleSort}
+                  padding="px-3 py-3"
+                  className="w-[17.5%]"
+                />
                 <th className="w-[12.5%] sticky right-0 whitespace-nowrap border-l border-line/40 bg-panel px-3 py-3 text-right font-medium">
                   操作
                 </th>
