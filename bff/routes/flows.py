@@ -16,7 +16,7 @@ from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 from temporalio.service import RPCError, RPCStatusCode
 
-from aiops_agent import metrics
+from aiops_agent import evidence_store, metrics
 from aiops_agent.models import Alert
 
 from .. import aggregator, audit, escalations, runs_store
@@ -137,7 +137,25 @@ async def api_flow_detail(wf_id: str) -> dict:
         "patch_id"
     )
     detail["artifacts"] = aggregator.artifacts_for_patch(patch_id) if patch_id else None
+    # 日志证据摘要：终态优先用 result.evidence（已随审批记录返回），运行中读归档；
+    # 详情页据此在「概览」旁给出证据入口，无需额外一次列表请求。
+    detail["evidence"] = (detail.get("result") or {}).get("evidence") or await asyncio.to_thread(
+        evidence_store.summary, wf_id
+    )
     return ok(detail)
+
+
+@router.get("/api/flows/{wf_id}/evidence")
+async def api_flow_evidence(wf_id: str) -> dict:
+    """日志证据详情（转人工核对）：原始日志行 + Drain3 模板聚类。
+
+    证据在 TRIAGING 阶段由 archive_evidence 活动归档（与 workflow_id 绑定），
+    因此跨进程/重启后仍可查；无归档（无告警日志或旧流程）返回 404。
+    """
+    record = await asyncio.to_thread(evidence_store.get, wf_id)
+    if record is None:
+        raise ApiError(404, "该流程未归档日志证据（可能未采集到日志，或在证据归档上线前运行）")
+    return ok({"evidence": record})
 
 
 @router.get("/api/flows/{wf_id}/result")

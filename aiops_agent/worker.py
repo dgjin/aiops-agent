@@ -35,6 +35,7 @@ _WORKFLOW_LIST = [AIOpsFixWorkflow, AIOpsRequirementWorkflow]
 _ACTIVITY_LIST = [
     activities.collect_evidence,
     activities.cluster_logs,
+    activities.archive_evidence,
     activities.analyze_root_cause,
     activities.retrieve_similar_fixes,
     activities.generate_patch,

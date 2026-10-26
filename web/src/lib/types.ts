@@ -182,6 +182,40 @@ export interface ResultPayload {
   deploy_result: DeployResult | null
   duration_seconds: number
   queued_patches: string[]
+  /** 日志证据归档摘要（TRIAGING 阶段落库；需求流为 null） */
+  evidence: EvidenceSummary | null
+}
+
+/** 日志证据摘要（列表徽标 / 详情头部；不含原始日志正文）。 */
+export interface EvidenceSummary {
+  available: boolean
+  wf_id: string
+  alert_id: string
+  service: string
+  /** 证据采集时间（Loki 查询窗口终点） */
+  collected_at: string
+  /** Loki 是否可用；false 表示当时无日志可采集（升级原因常与此相关） */
+  loki_available: boolean
+  /** 原始采集行数 */
+  total_lines: number
+  /** 归档行数（超过上限时保留末尾，少于 total_lines 即截断） */
+  stored_lines: number
+  truncated: boolean
+  template_count: number
+  trace_count: number
+  compression_ratio: number
+}
+
+/** 日志证据全文（流程详情 / 转人工核对弹窗）。 */
+export interface LogEvidenceRecord extends Omit<EvidenceSummary, 'template_count' | 'trace_count' | 'available'> {
+  archived_at: string
+  trace_ids: string[]
+  templates: { id: string; pattern: string; count: number }[]
+  lines: string[]
+}
+
+export interface EvidenceResp extends Timed {
+  evidence: LogEvidenceRecord
 }
 
 export interface Artifacts {
@@ -202,6 +236,8 @@ export interface FlowDetailResp extends Timed {
   result: ResultPayload | null
   errors: string[]
   artifacts: Artifacts | null
+  /** 日志证据摘要（运行中读归档；终态取自 result.evidence） */
+  evidence?: EvidenceSummary | null
 }
 
 export interface ResultResp extends Timed {
@@ -755,6 +791,8 @@ export interface EscalationEntry {
   sla_minutes: number
   /** 需求来源待办（读侧派生；重试修复将重启需求修复流而非告警诊断流） */
   requirement?: boolean
+  /** 日志证据摘要（转人工核对；无归档为 null） */
+  evidence: EvidenceSummary | null
   /** 所属监控系统展示名（命中「被监控系统」清单→应用名；未纳管→服务名） */
   system: string
   /** 是否已在「被监控系统」清单纳管（node / redis 等基础设施服务为 false） */

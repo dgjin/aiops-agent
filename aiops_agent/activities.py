@@ -194,6 +194,35 @@ async def cluster_logs(evidence: dict) -> dict:
 
 
 @activity.defn
+async def archive_evidence(evidence: dict, clustered: dict, wf_id: str = "") -> dict:
+    """日志证据归档（转人工核对）：原始日志 + 模板聚类按 workflow_id 落库。
+
+    紧跟在 cluster_logs 之后执行（早于 LLM 根因）：即使 triage 超时/降级转人工，
+    证据也已在案可查；重复执行按 workflow_id 幂等覆盖。
+    wf_id 缺省取 activity 上下文的 workflow_id（单测可直接传入）。
+    """
+    from . import evidence_store
+
+    target = (wf_id or "").strip()
+    if not target:
+        try:
+            target = activity.info().workflow_id
+        except RuntimeError:  # 非 activity 上下文（单测直调）：按告警维度退避命名
+            target = f"adhoc-{evidence.get('alert_id') or 'unknown'}"
+    summary = await asyncio.to_thread(evidence_store.save, target, evidence, clustered)
+    log.info(
+        "[evidence] 归档 %s：%d 行（原始 %d，截断=%s）/ %d 模板 / loki=%s",
+        target,
+        summary["stored_lines"],
+        summary["total_lines"],
+        summary["truncated"],
+        summary["template_count"],
+        summary["loki_available"],
+    )
+    return summary
+
+
+@activity.defn
 async def analyze_root_cause(
     alert: Alert, clustered: dict, trace_ids: list[str]
 ) -> RootCause:

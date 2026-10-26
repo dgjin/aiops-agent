@@ -16,7 +16,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Search, X } from 'lucide-react'
+import { FileText, Search, X } from 'lucide-react'
 import { api, describeError } from '../lib/api'
 import { cn, fmtDateTime } from '../lib/format'
 import { compareValues, nextSort, type SortState } from '../lib/sort'
@@ -25,6 +25,7 @@ import { ActionButton } from '../components/ActionButton'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { CopyableId } from '../components/CopyableId'
 import { EmptyState } from '../components/EmptyState'
+import { LogEvidence } from '../components/LogEvidence'
 import {
   Modal,
   fieldClass,
@@ -266,6 +267,7 @@ export function Escalations() {
   const [sort, setSort] = useState<SortState<SortKey>>(DEFAULT_SORT)
   const [assignTarget, setAssignTarget] = useState<EscalationEntry | null>(null)
   const [closeTarget, setCloseTarget] = useState<EscalationEntry | null>(null)
+  const [evidenceTarget, setEvidenceTarget] = useState<EscalationEntry | null>(null)
 
   const { data, isError, error } = useQuery({
     queryKey: ['escalations', status],
@@ -523,7 +525,7 @@ export function Escalations() {
           ) : (
           <>
           <div className="mt-5 overflow-x-auto rounded-xl border border-line bg-panel">
-            <table className="w-full min-w-[1000px] text-xs">
+            <table className="w-full min-w-[1120px] text-xs">
               <thead>
                 <tr className="border-b border-line text-left text-muted">
                   <SortableTh label="监控系统" colKey="system" sort={sort} onToggle={toggleSort} />
@@ -538,6 +540,7 @@ export function Escalations() {
                     onToggle={toggleSort}
                   />
                   <SortableTh label="SLA" colKey="overdue" sort={sort} onToggle={toggleSort} />
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">日志证据</th>
                   <th className="whitespace-nowrap px-3 py-2 text-right font-medium">操作</th>
                 </tr>
               </thead>
@@ -636,6 +639,24 @@ export function Escalations() {
                           <span className="text-ok">正常</span>
                         )}
                       </td>
+                      <td className="whitespace-nowrap px-3 py-2.5 align-top">
+                        {entry.evidence?.available ? (
+                          <button
+                            type="button"
+                            onClick={() => setEvidenceTarget(entry)}
+                            title="查看该流程 TRIAGING 阶段采集的原始日志与模板聚类"
+                            className="inline-flex items-center gap-1 rounded border border-accent/40 px-1.5 py-0.5 text-[10px] text-accent transition-colors hover:bg-accent/10"
+                          >
+                            <FileText size={11} />
+                            {entry.evidence.stored_lines} 行 · {entry.evidence.template_count} 模板
+                            {entry.evidence.truncated ? '（已截断）' : ''}
+                          </button>
+                        ) : (
+                          <span className="text-[10px] text-idle">
+                            {entry.requirement ? '需求来源（无日志）' : '未归档'}
+                          </span>
+                        )}
+                      </td>
                       <td className="px-3 py-2.5 align-top">
                         <div className="flex flex-wrap items-center justify-end gap-1.5">
                           {open && (
@@ -686,6 +707,27 @@ export function Escalations() {
       )}
       {closeTarget && (
         <CloseDialog key={closeTarget.id} entry={closeTarget} onClose={() => setCloseTarget(null)} />
+      )}
+      {evidenceTarget && (
+        <Modal
+          open
+          size="lg"
+          title={`日志证据 · ${evidenceTarget.service || '未知服务'}`}
+          onClose={() => setEvidenceTarget(null)}
+        >
+          <div className="mb-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted">
+            <span>
+              告警 <span className="font-mono">{evidenceTarget.alert_id || '—'}</span>
+            </span>
+            <span>
+              工作流 <span className="font-mono">{evidenceTarget.wf_id}</span>
+            </span>
+            <span className="min-w-0 truncate" title={evidenceTarget.auto_reason}>
+              升级原因：{evidenceTarget.auto_reason}
+            </span>
+          </div>
+          <LogEvidence wfId={evidenceTarget.wf_id} />
+        </Modal>
       )}
 
       <ConfirmDialog
