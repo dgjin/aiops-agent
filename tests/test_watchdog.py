@@ -667,13 +667,19 @@ class ShellEntrypointTest(unittest.TestCase):
             python = root / ".venv/bin/python"
             python.write_text('#!/bin/sh\nprintf "%s\\n" "${AIOPS_MODE-unset}" "$@"\n')
             python.chmod(0o700)
+            # 临时仓库没有 web/ 与 npm：跳过前端构建检查，只用例关心档位透传。
+            base_env = {"PATH": "/usr/bin:/bin", "AIOPS_SKIP_WEB_BUILD": "1"}
             for command, expected in (([], "up"), (["back"], "up"), (["restart"], "restart"), (["demo"], "demo")):
                 result = subprocess.run(["/bin/bash", str(root / "start.sh"), *command],
-                    env={"PATH": "/usr/bin:/bin", "AIOPS_MODE": "production"}, capture_output=True, text=True, check=True)
-                self.assertEqual(result.stdout.splitlines(), ["production", str(root / "scripts/aiops-watchdog.py"), expected])
-            result = subprocess.run(["/bin/bash", str(root / "start.sh")], env={"PATH": "/usr/bin:/bin"},
+                    env={**base_env, "AIOPS_MODE": "production"}, capture_output=True, text=True, check=True)
+                # start.sh 会先打印档位横幅/提示，这里只断言假 python 连续输出的三行。
+                self.assertIn(
+                    f"production\n{root / 'scripts/aiops-watchdog.py'}\n{expected}",
+                    result.stdout,
+                )
+            result = subprocess.run(["/bin/bash", str(root / "start.sh")], env=base_env,
                                     capture_output=True, text=True, check=True)
-            self.assertEqual(result.stdout.splitlines()[0], "unset")
+            self.assertIn("unset", result.stdout.splitlines())
 
 
 if __name__ == "__main__":
