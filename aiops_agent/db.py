@@ -36,6 +36,7 @@ log_evidence    日志证据归档（转人工核对）：流程 TRIAGING 采集
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -57,7 +58,7 @@ from sqlalchemy import (
     inspect,
     text,
 )
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.schema import CreateColumn
 
@@ -367,7 +368,7 @@ def get_engine() -> Engine:
     return _engine
 
 
-def ensure_schema(engine: Engine) -> list[str]:
+def ensure_schema(engine: Engine | Connection) -> list[str]:
     """显式 schema 升级入口（幂等）：建缺失表 + 补缺失列，返回执行的补列 DDL。
 
     ``create_all(checkfirst=True)`` 只建缺失表、不补列：老库升级路径必须显式补列
@@ -386,7 +387,9 @@ def ensure_schema(engine: Engine) -> list[str]:
             if column.name in actual or column.primary_key:
                 continue
             ddl = f"ALTER TABLE {name} ADD COLUMN {CreateColumn(column).compile(dialect=engine.dialect)}"
-            with engine.begin() as conn:
+            # Alembic 传入已处于事务中的 Connection；应用启动传入 Engine。
+            context = engine.begin() if isinstance(engine, Engine) else nullcontext(engine)
+            with context as conn:
                 conn.execute(text(ddl))
             statements.append(ddl)
     return statements
