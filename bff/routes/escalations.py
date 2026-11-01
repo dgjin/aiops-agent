@@ -97,7 +97,7 @@ def _system_map() -> dict[str, dict]:
 def _decorate(
     entry: dict, systems: dict[str, dict] | None = None, evidence: object = _EVIDENCE_UNSET
 ) -> dict:
-    """附加 SLA 派生状态、需求来源标识、所属监控系统与日志证据摘要。
+    """附加 SLA 派生状态、需求来源标识、处置分类、所属监控系统与日志证据摘要。
 
     systems / evidence 可由列表侧批量取好传入（避免逐条查库 / 读盘），缺省时按需现查。
     """
@@ -115,8 +115,12 @@ def _decorate(
         evidence = evidence_store.summary(str(entry.get("wf_id") or ""))
     service = str(entry.get("service") or "")
     app = (systems if systems is not None else _system_map()).get(service.strip().lower())
+    # 处置分类：新记录读字段；历史记录按升级原因确定性回填（只读派生，不写库）
+    category = escalations.entry_category(entry)
     return {
         **entry,
+        "category": category,
+        "category_label": escalations.category_label(category),
         "overdue": overdue,
         "sla_minutes": escalations.sla_minutes(),
         "requirement": _looks_requirement(entry),

@@ -16,6 +16,7 @@ import math
 import os
 import re
 import time
+from datetime import datetime, timezone
 
 from . import mode
 
@@ -240,6 +241,78 @@ def observe_bff_request(method: str, path: str, status: int, duration: float) ->
     BFF_REQUEST_DURATION.labels(method=method_label, path=path_label).observe(max(0.0, duration))
 
 
+def _escape_label(value: object) -> str:
+    return str(value).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def _render_log_ship_health() -> bytes:
+    """日志采集心跳（M1）：抓取时读取，避免把进程存活当成日志供给正常。
+
+    指标按 service 标签输出；心跳缺失/过期/失败时 ``aiops_log_ship_healthy=0``。
+    """
+    try:
+        from . import log_health
+
+        items = log_health.snapshot()
+    except Exception as exc:  # noqa: BLE001 - 指标旁路不得影响主服务
+        log.warning("[metrics] 日志采集心跳读取失败：%s", exc)
+        return b"# aiops_log_ship_health unavailable\n"
+    if not items:
+        return b"# aiops_log_ship_health unavailable (no heartbeat)\n"
+
+    rows = [
+        "# HELP aiops_log_ship_last_success_timestamp_seconds 最近一次成功采集（UTC 秒）",
+        "# TYPE aiops_log_ship_last_success_timestamp_seconds gauge",
+    ]
+    for item in items:
+        service = _escape_label(item.get("service") or "unknown")
+        stamp = 0.0
+        try:
+            stamp = datetime.fromisoformat(str(item.get("last_success_at"))).timestamp()
+        except (ValueError, TypeError):
+            stamp = 0.0
+        rows.append(
+            f'aiops_log_ship_last_success_timestamp_seconds{{service="{service}"}} {stamp:.0f}'
+        )
+    rows.extend(
+        [
+            "# HELP aiops_log_ship_last_pushed_lines 最近一次成功采集推送行数",
+            "# TYPE aiops_log_ship_last_pushed_lines gauge",
+        ]
+    )
+    for item in items:
+        service = _escape_label(item.get("service") or "unknown")
+        rows.append(
+            f'aiops_log_ship_last_pushed_lines{{service="{service}"}} '
+            f'{int(item.get("last_pushed_lines") or 0)}'
+        )
+    rows.extend(
+        [
+            "# HELP aiops_log_ship_consecutive_failures 连续推送失败次数",
+            "# TYPE aiops_log_ship_consecutive_failures gauge",
+        ]
+    )
+    for item in items:
+        service = _escape_label(item.get("service") or "unknown")
+        rows.append(
+            f'aiops_log_ship_consecutive_failures{{service="{service}"}} '
+            f'{int(item.get("consecutive_failures") or 0)}'
+        )
+    rows.extend(
+        [
+            "# HELP aiops_log_ship_healthy 采集心跳新鲜且无失败/警告（1=健康，0=不健康）",
+            "# TYPE aiops_log_ship_healthy gauge",
+        ]
+    )
+    for item in items:
+        service = _escape_label(item.get("service") or "unknown")
+        rows.append(
+            f'aiops_log_ship_healthy{{service="{service}"}} '
+            f'{1 if item.get("healthy") else 0}'
+        )
+    return ("\n".join(rows) + "\n").encode()
+
+
 def render() -> tuple[bytes, str]:
     """渲染指标文本，返回 (payload, content_type)。"""
     if not _AVAILABLE:
@@ -247,7 +320,7 @@ def render() -> tuple[bytes, str]:
             b"# prometheus_client not installed; metrics disabled\n",
             "text/plain; charset=utf-8",
         )
-    return generate_latest(), CONTENT_TYPE_LATEST
+    return generate_latest() + _render_log_ship_health(), CONTENT_TYPE_LATEST
 
 
 def start_worker_server() -> int:

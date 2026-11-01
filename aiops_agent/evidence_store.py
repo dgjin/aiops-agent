@@ -32,6 +32,9 @@ MAX_LINE_CHARS = 4000
 MAX_TEMPLATES = 50
 MAX_TRACE_IDS = 20
 
+# 旧归档（质量预检上线前）没有质量字段：摘要统一显示 UNKNOWN，不冒充 OK。
+QUALITY_UNKNOWN = "UNKNOWN"
+
 _SAFE_NAME = re.compile(r"[^\w.:-]")
 
 
@@ -59,6 +62,20 @@ def _clip_line(line: str) -> str:
     if len(line) <= MAX_LINE_CHARS:
         return line
     return line[:MAX_LINE_CHARS] + f"…（已截断，原长 {len(line)} 字符）"
+
+
+def _normalize_quality(value: object, latest_log_at: str = "") -> dict:
+    """质量摘要归一化：旧归档/缺字段一律 UNKNOWN，字段类型固定便于前端消费。"""
+    data = value if isinstance(value, dict) else {}
+    return {
+        "status": str(data.get("status") or QUALITY_UNKNOWN),
+        "detail": str(data.get("detail") or ""),
+        "latest_log_at": str(data.get("latest_log_at") or latest_log_at or ""),
+        "signal_lines": int(data.get("signal_lines") or 0),
+        "lookback_minutes": int(data.get("lookback_minutes") or 0),
+        "stale_after_minutes": int(data.get("stale_after_minutes") or 0),
+        "escalation_reason": str(data.get("escalation_reason") or ""),
+    }
 
 
 def build_record(
@@ -91,6 +108,8 @@ def build_record(
         "collected_at": str(evidence.get("collected_at") or archived_at),
         "archived_at": archived_at,
         "loki_available": bool(evidence.get("loki_available")),
+        # 证据质量摘要（六状态 + 说明）：随归档落库，供转人工核对与前端筛选
+        "quality": _normalize_quality(evidence.get("quality"), str(evidence.get("latest_log_at") or "")),
         "total_lines": total,
         "stored_lines": len(kept),
         "truncated": total > len(kept),
@@ -105,6 +124,7 @@ def summary_of(record: dict | None) -> dict | None:
     """归档记录 → 列表/徽标用摘要（不含原始日志正文）。"""
     if not record:
         return None
+    quality = _normalize_quality(record.get("quality"))
     return {
         "available": True,
         "wf_id": record.get("wf_id") or "",
@@ -112,6 +132,11 @@ def summary_of(record: dict | None) -> dict | None:
         "service": record.get("service") or "",
         "collected_at": record.get("collected_at") or "",
         "loki_available": bool(record.get("loki_available")),
+        # 证据质量：status 为六状态之一，旧归档为 UNKNOWN
+        "quality_status": quality["status"],
+        "quality_detail": quality["detail"],
+        "latest_log_at": quality["latest_log_at"],
+        "signal_lines": quality["signal_lines"],
         "total_lines": int(record.get("total_lines") or 0),
         "stored_lines": int(record.get("stored_lines") or 0),
         "truncated": bool(record.get("truncated")),
@@ -134,6 +159,7 @@ def _row_to_record(row) -> dict:
         "collected_at": db_layer.to_iso(row["collected_at"]) or "",
         "archived_at": db_layer.to_iso(row["archived_at"]) or "",
         "loki_available": bool(row["loki_available"]),
+        "quality": row["quality"] if "quality" in row else None,
         "total_lines": int(row["total_lines"] or 0),
         "stored_lines": int(row["stored_lines"] or 0),
         "truncated": bool(row["truncated"]),
@@ -166,6 +192,7 @@ def _upsert_db(record: dict) -> None:
         "collected_at": db_layer.to_dt(record["collected_at"]) or db_layer.now_dt(),
         "archived_at": db_layer.to_dt(record["archived_at"]) or db_layer.now_dt(),
         "loki_available": record["loki_available"],
+        "quality": record.get("quality"),
         "total_lines": record["total_lines"],
         "stored_lines": record["stored_lines"],
         "truncated": record["truncated"],

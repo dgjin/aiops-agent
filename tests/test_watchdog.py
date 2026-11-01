@@ -226,6 +226,55 @@ class TestMemoryGuard(unittest.TestCase):
         self.assertEqual((n, called), (0, []))  # 关闭时不做任何探测
 
 
+class TestRunStatusLogHealth(unittest.TestCase):
+    """status 退出码纳入日志供给健康：进程活着 ≠ 日志供给正常。"""
+
+    def _run(self, snapshot):
+        with mock.patch.object(watchdog, "is_running", return_value=True), mock.patch.object(
+            watchdog, "maintenance_active", return_value=False
+        ), mock.patch.object(watchdog, "read_state", return_value={"watchdog": {"pid": 1}}), mock.patch.object(
+            watchdog, "verify_identity", return_value=True
+        ), mock.patch(
+            "aiops_agent.log_health.snapshot", return_value=snapshot
+        ):
+            return watchdog.run_status(COMPS, LOGGER)
+
+    def test_healthy_heartbeat_returns_zero(self) -> None:
+        self.assertEqual(
+            self._run([{"service": "nl2sql", "healthy": True, "detail": "心跳新鲜"}]), 0
+        )
+
+    def test_unhealthy_heartbeat_fails_status(self) -> None:
+        self.assertEqual(
+            self._run([{"service": "nl2sql", "healthy": False, "detail": "连续失败 2 次"}]), 1
+        )
+
+    def test_partial_unhealthy_fails_status(self) -> None:
+        self.assertEqual(
+            self._run(
+                [
+                    {"service": "a", "healthy": True, "detail": "心跳新鲜"},
+                    {"service": "b", "healthy": False, "detail": "心跳已停摆 900s"},
+                ]
+            ),
+            1,
+        )
+
+    def test_no_heartbeat_warns_but_does_not_fail(self) -> None:
+        # 首次部署尚无心跳：只告警「不能判定」，不把 status 判红（避免部署即红灯）。
+        self.assertEqual(self._run([]), 0)
+
+    def test_unreadable_heartbeat_fails_status(self) -> None:
+        with mock.patch.object(watchdog, "is_running", return_value=True), mock.patch.object(
+            watchdog, "maintenance_active", return_value=False
+        ), mock.patch.object(watchdog, "read_state", return_value={"watchdog": {"pid": 1}}), mock.patch.object(
+            watchdog, "verify_identity", return_value=True
+        ), mock.patch(
+            "aiops_agent.log_health.snapshot", side_effect=RuntimeError("boom")
+        ):
+            self.assertEqual(watchdog.run_status(COMPS, LOGGER), 1)
+
+
 class TestComponentTable(unittest.TestCase):
     def test_six_components_match_demo_up(self) -> None:
         comps = watchdog.build_components()

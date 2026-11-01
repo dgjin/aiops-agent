@@ -69,6 +69,35 @@ const DEFAULT_SORT: SortState<SortKey> = { key: 'default', dir: 'asc' }
 /** 状态权重（默认排序组内：open → assigned → closed）。 */
 const STATUS_RANK: Record<EscalationEntry['status'], number> = { open: 0, assigned: 1, closed: 2 }
 
+/** 处置分类展示（M1）：服务端已给 category_label，这里补色值；未知分类回退「其他」。 */
+const CATEGORY_META: Record<string, { label: string; cls: string }> = {
+  model: { label: '模型低置信', cls: 'border-danger/40 text-danger' },
+  approval: { label: '审批未通过', cls: 'border-warn/40 text-warn' },
+  sandbox: { label: '测试未通过', cls: 'border-warn/40 text-warn' },
+  release: { label: '发布劣化', cls: 'border-danger/40 text-danger' },
+  observability: { label: '观测异常', cls: 'border-accent/40 text-accent' },
+  evidence: { label: '证据不足', cls: 'border-line text-muted' },
+  requirement: { label: '需求来源', cls: 'border-accent/40 text-accent' },
+  other: { label: '其他', cls: 'border-line text-idle' },
+}
+
+/** 证据质量提示（M1）：仅在非 OK 时显示，避免每行都堆徽标。 */
+const EVIDENCE_HINT: Record<string, { label: string; cls: string }> = {
+  LOKI_UNAVAILABLE: { label: 'Loki 不可用', cls: 'border-danger/40 text-danger' },
+  NO_LOGS: { label: '无日志', cls: 'border-danger/40 text-danger' },
+  STALE_LOGS: { label: '日志过期', cls: 'border-warn/40 text-warn' },
+  UNMAPPED_SERVICE: { label: '标签未映射', cls: 'border-warn/40 text-warn' },
+  INSUFFICIENT_SIGNAL: { label: '信号不足', cls: 'border-warn/40 text-warn' },
+  UNKNOWN: { label: '质量未记录', cls: 'border-line text-idle' },
+}
+
+/** 分类取值（旧数据可能缺字段：按 other 归并，保证筛选不丢条目）。 */
+const categoryOf = (entry: EscalationEntry): string => entry.category || 'other'
+
+/** 分类中文标签（服务端 category_label 已给出，前端仅用于下拉选项排序/回退）。 */
+const categoryLabelOf = (key: string): string =>
+  CATEGORY_META[key]?.label ?? CATEGORY_META.other.label
+
 const tsOf = (value: string | null | undefined): number => (value ? Date.parse(value) : 0)
 
 /** 待办所属监控系统（服务端派生：纳管取应用名，未纳管回退服务名；分块 / 筛选 / 搜索同一口径）。 */
@@ -262,6 +291,7 @@ export function Escalations() {
   const [status, setStatus] = useState<StatusFilter>('all')
   const [query, setQuery] = useState('')
   const [filterSystem, setFilterSystem] = useState('')
+  const [filterCategory, setFilterCategory] = useState('')
   const [filterSource, setFilterSource] = useState('')
   const [onlyOverdue, setOnlyOverdue] = useState(false)
   const [sort, setSort] = useState<SortState<SortKey>>(DEFAULT_SORT)
@@ -279,6 +309,7 @@ export function Escalations() {
   const resetConditions = () => {
     setQuery('')
     setFilterSystem('')
+    setFilterCategory('')
     setFilterSource('')
     setOnlyOverdue(false)
     setSort(DEFAULT_SORT)
@@ -294,11 +325,12 @@ export function Escalations() {
   const q = query.trim().toLowerCase()
   const matched = items.filter((entry) => {
     if (filterSystem && systemLabelOf(entry) !== filterSystem) return false
+    if (filterCategory && categoryOf(entry) !== filterCategory) return false
     if (filterSource === 'requirement' && !entry.requirement) return false
     if (filterSource === 'alert' && entry.requirement) return false
     if (onlyOverdue && !entry.overdue) return false
     if (!q) return true
-    // 命中范围：监控系统 / 服务 / 升级原因 / 告警 / 工作流 / 责任人 / 备注 / 来源标签
+    // 命中范围：监控系统 / 服务 / 升级原因 / 告警 / 工作流 / 责任人 / 备注 / 来源标签 / 处置分类
     const haystack = [
       systemLabelOf(entry),
       entry.service,
@@ -308,6 +340,7 @@ export function Escalations() {
       entry.assignee,
       entry.note,
       entry.requirement ? '需求' : '告警',
+      CATEGORY_META[categoryOf(entry)]?.label ?? '',
     ]
       .map((value) => String(value ?? ''))
       .join('\n')
@@ -323,6 +356,15 @@ export function Escalations() {
   const systemPairs = [...systemCounts.entries()].sort(
     (a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh'),
   )
+  // ---- 处置分类维度：分类筛选项与计数（按当前页签数据；只列出实际出现的分类）----
+  const categoryCounts = new Map<string, number>()
+  for (const entry of items) {
+    const key = categoryOf(entry)
+    categoryCounts.set(key, (categoryCounts.get(key) ?? 0) + 1)
+  }
+  const categoryPairs = [...categoryCounts.entries()].sort(
+    (a, b) => b[1] - a[1] || categoryLabelOf(a[0]).localeCompare(categoryLabelOf(b[0]), 'zh'),
+  )
   /** 默认排序的系统分块次序（与下拉选项同序：条数降序，切换筛选时保持稳定）。 */
   const systemRank = new Map(systemPairs.map(([label], index) => [label, index] as const))
   const sorted = [...matched].sort((a, b) => {
@@ -334,7 +376,7 @@ export function Escalations() {
   const overdueCount = items.filter((entry) => entry.overdue).length
 
   const hasConditions = Boolean(
-    q || filterSystem || filterSource || onlyOverdue || sort.key !== 'default',
+    q || filterSystem || filterCategory || filterSource || onlyOverdue || sort.key !== 'default',
   )
 
   // ---- 分页：状态页签 / 条件变化回到第 1 页（越界页码自动夹取）----
@@ -342,7 +384,7 @@ export function Escalations() {
   const { setPage } = pg
   useEffect(() => {
     setPage(1)
-  }, [status, query, filterSystem, filterSource, onlyOverdue, sort, setPage])
+  }, [status, query, filterSystem, filterCategory, filterSource, onlyOverdue, sort, setPage])
   const paged = sorted.slice(pg.start, pg.start + pg.pageSize)
 
   /** 页签计数（stats 为全量口径，不随 status 变化）。 */
@@ -467,6 +509,21 @@ export function Escalations() {
               <option value="alert">告警来源</option>
               <option value="requirement">需求来源</option>
             </select>
+            {categoryPairs.length > 0 && (
+              <select
+                value={filterCategory}
+                onChange={(event) => setFilterCategory(event.target.value)}
+                className={SELECT_CLS}
+                title="按处置分类筛选：观测异常 / 证据不足与业务闸门分开统计"
+              >
+                <option value="">全部处置分类</option>
+                {categoryPairs.map(([key, count]) => (
+                  <option key={key} value={key}>
+                    {categoryLabelOf(key)}（{count}）
+                  </option>
+                ))}
+              </select>
+            )}
             {overdueCount > 0 && (
               <button
                 type="button"
@@ -592,6 +649,13 @@ export function Escalations() {
               <tbody>
                 {paged.map((entry) => {
                   const meta = STATUS_META[entry.status]
+                  const category = categoryOf(entry)
+                  const categoryMeta = CATEGORY_META[category] ?? CATEGORY_META.other
+                  const qualityHint = (
+                    entry.evidence?.quality_status && entry.evidence.quality_status !== 'OK'
+                      ? EVIDENCE_HINT[entry.evidence.quality_status]
+                      : undefined
+                  )
                   const open = entry.status !== 'closed'
                   return (
                     <tr
@@ -650,6 +714,17 @@ export function Escalations() {
                         </div>
                       </td>
                       <td className="px-2.5 py-2.5 align-top">
+                        {category !== 'requirement' && (
+                          <span
+                            className={cn(
+                              'mb-0.5 inline-flex rounded border px-1 py-0.5 text-[10px]',
+                              categoryMeta.cls,
+                            )}
+                            title={`处置分类：${categoryMeta.label}`}
+                          >
+                            {categoryMeta.label}
+                          </span>
+                        )}
                         <div className="truncate text-ink" title={entry.auto_reason}>
                           {entry.auto_reason || '—'}
                         </div>
@@ -705,18 +780,31 @@ export function Escalations() {
                       </td>
                       <td className="px-2.5 py-2.5 align-top">
                         {entry.evidence?.available ? (
-                          <button
-                            type="button"
-                            onClick={() => setEvidenceTarget(entry)}
-                            title={`查看 TRIAGING 采集的原始日志与模板聚类：共 ${entry.evidence.total_lines} 行，归档 ${entry.evidence.stored_lines} 行${entry.evidence.truncated ? '（超出上限已截断）' : ''}，${entry.evidence.template_count} 个模板`}
-                            className="inline-flex max-w-full items-center gap-1 rounded border border-accent/40 px-1 py-0.5 text-[10px] text-accent transition-colors hover:bg-accent/10"
-                          >
-                            <FileText size={10} className="shrink-0" />
-                            <span className="truncate">
-                              {entry.evidence.stored_lines}
-                              {entry.evidence.truncated ? '+' : ''} 行 / {entry.evidence.template_count} 模板
-                            </span>
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => setEvidenceTarget(entry)}
+                              title={`查看 TRIAGING 采集的原始日志与模板聚类：共 ${entry.evidence.total_lines} 行，归档 ${entry.evidence.stored_lines} 行${entry.evidence.truncated ? '（超出上限已截断）' : ''}，${entry.evidence.template_count} 个模板`}
+                              className="inline-flex max-w-full items-center gap-1 rounded border border-accent/40 px-1 py-0.5 text-[10px] text-accent transition-colors hover:bg-accent/10"
+                            >
+                              <FileText size={10} className="shrink-0" />
+                              <span className="truncate">
+                                {entry.evidence.stored_lines}
+                                {entry.evidence.truncated ? '+' : ''} 行 / {entry.evidence.template_count} 模板
+                              </span>
+                            </button>
+                            {qualityHint && (
+                              <span
+                                className={cn(
+                                  'mt-0.5 inline-flex rounded border px-1 py-0.5 text-[10px]',
+                                  qualityHint.cls,
+                                )}
+                                title={entry.evidence.quality_detail || '证据质量预检结果'}
+                              >
+                                {qualityHint.label}
+                              </span>
+                            )}
+                          </>
                         ) : (
                           <span
                             className="block truncate text-[10px] text-idle"

@@ -465,6 +465,122 @@ class RetryRouteTest(unittest.TestCase):
         self.assertEqual(resolved["id"], "ra-app-19")
 
 
+class CategoryTest(unittest.TestCase):
+    """处置分类（M1）：事件/原因确定性推导 + 历史回填只分类不关闭。
+
+    分类目的：把「观测异常 / 证据不足」与模型低置信、审批、测试等业务闸门分开统计，
+    避免日志供给故障污染模型质量指标；历史待办只回填分类，不改变状态、不批量关闭。
+    """
+
+    def test_category_from_events(self) -> None:
+        cases = {
+            "evidence:blocked:NO_LOGS": "observability",
+            "evidence:blocked:STALE_LOGS": "observability",
+            "evidence:blocked:LOKI_UNAVAILABLE": "observability",
+            "evidence:blocked:UNMAPPED_SERVICE": "observability",
+            "evidence:blocked:INSUFFICIENT_SIGNAL": "evidence",
+            "gate1:blocked:confidence=0.4<0.8": "model",
+            "gate2:rejected": "approval",
+            "gate2b:timeout": "approval",
+            "tests:failed:attempt=2:boom": "sandbox",
+            "canary:degraded:5xx": "release",
+        }
+        for event, expected in cases.items():
+            with self.subTest(event=event):
+                self.assertEqual(esc.category_from_events([event]), expected)
+
+    def test_category_takes_last_meaningful_event(self) -> None:
+        events = ["gate1:blocked:low", "evidence:blocked:NO_LOGS"]
+        self.assertEqual(esc.category_from_events(events), "observability")
+        self.assertEqual(
+            esc.category_from_events(["evidence:blocked:NO_LOGS", "gate2:rejected"]), "approval"
+        )
+
+    def test_category_from_reason_backfill(self) -> None:
+        self.assertEqual(esc.category_from_reason("证据预检：Loki 不可用（LOKI_UNAVAILABLE）"), "observability")
+        self.assertEqual(
+            esc.category_from_reason("证据预检：日志无可分析信号（INSUFFICIENT_SIGNAL）"), "evidence"
+        )
+        self.assertEqual(esc.category_from_reason("闸门1：根因置信度不足（0.4）"), "model")
+        self.assertEqual(esc.category_from_reason("闸门2：人工审批未通过（reject）"), "approval")
+        self.assertEqual(esc.category_from_reason("沙箱测试回炉重试耗尽"), "sandbox")
+        self.assertEqual(esc.category_from_reason("金丝雀劣化自动回滚"), "release")
+        self.assertEqual(esc.category_from_reason("转人工（原因见流程详情）"), "other")
+        self.assertEqual(esc.category_from_reason("", requirement=True), "requirement")
+
+    def test_new_entry_writes_evidence_category(self) -> None:
+        entry = esc.new_entry(_flow(gate_events=["evidence:blocked:NO_LOGS"]))
+        self.assertEqual(entry["category"], "observability")
+        self.assertIn("无服务日志", entry["auto_reason"])
+
+    def test_entry_category_legacy_fallback(self) -> None:
+        legacy = {
+            "wf_id": "aiops-fix-x-1",
+            "alert_id": "a1",
+            "auto_reason": "闸门1：根因置信度不足（0.4）",
+        }
+        self.assertEqual(esc.entry_category(legacy), "model")
+        requirement = {
+            "wf_id": "aiops-req-ra-1-v1",
+            "alert_id": "req-1",
+            "auto_reason": "转人工",
+        }
+        self.assertEqual(esc.entry_category(requirement), "requirement")
+        self.assertEqual(esc.entry_category({"category": "observability"}), "observability")
+        self.assertEqual(esc.category_label("observability"), "观测异常")
+        self.assertEqual(esc.category_label("unknown"), "未分类")
+
+
+class CategoryBackfillTest(unittest.TestCase):
+    """历史待办分类回填：默认 dry-run；落库只写 category，不改状态、不关闭。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "escalations.json"
+        patcher = mock.patch.object(esc, "DATA_PATH", self.path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _seed_legacy(self, wf_id: str, reason: str, status: str = "open") -> dict:
+        entry = esc.new_entry(_flow(wf_id=wf_id))
+        entry.pop("category", None)
+        entry["auto_reason"] = reason
+        entry["status"] = status
+        esc.persist_entry(entry)
+        return entry
+
+    def test_backfill_defaults_to_dry_run(self) -> None:
+        self._seed_legacy("wf-a", "闸门1：根因置信度不足（0.4）")
+        report = esc.backfill_categories()
+        self.assertTrue(report["dry_run"])
+        self.assertEqual(report["changed"], 1)
+        self.assertEqual(report["items"][0]["to"], "model")
+        self.assertNotIn("category", esc.get("esc-wf-a"))
+
+    def test_backfill_apply_persists_category_without_status_change(self) -> None:
+        self._seed_legacy("wf-a", "证据预检：Loki 不可用（LOKI_UNAVAILABLE）")
+        self._seed_legacy("wf-b", "闸门1：根因置信度不足（0.4）", status="assigned")
+        report = esc.backfill_categories(dry_run=False)
+        self.assertFalse(report["dry_run"])
+        self.assertEqual(report["changed"], 2)
+        first = esc.get("esc-wf-a")
+        second = esc.get("esc-wf-b")
+        self.assertEqual(first["category"], "observability")
+        self.assertEqual(first["status"], "open")
+        self.assertEqual(second["category"], "model")
+        self.assertEqual(second["status"], "assigned")
+        self.assertEqual(second["closed_at"], None)
+        self.assertEqual(esc.backfill_categories(dry_run=False)["changed"], 0)
+
+    def test_stats_counts_categories(self) -> None:
+        self._seed_legacy("wf-a", "闸门1：根因置信度不足（0.4）")
+        self._seed_legacy("wf-b", "证据预检：窗口内无服务日志（NO_LOGS）")
+        categories = esc.stats()["categories"]
+        self.assertEqual(categories.get("model"), 1)
+        self.assertEqual(categories.get("observability"), 1)
+
+
 class WiringTest(unittest.TestCase):
     """接线冒烟：路由挂载与角色规则（防遗漏注册导致 404 / 权限错配）。"""
 

@@ -172,6 +172,9 @@ escalations = Table(
     Column("service", String(128), nullable=False, server_default=""),
     # 自动升级原因摘要（由 gate_events 翻译；MySQL TEXT 无 DEFAULT，写入显式提供）
     Column("auto_reason", Text, nullable=False),
+    # 处置分类（M1）：model/approval/sandbox/release/observability/evidence/requirement/other；
+    # 历史待办由 bff.escalations.backfill_categories 回填，只分类不改变状态。
+    Column("category", String(32), nullable=False, server_default=""),
     Column("alert", JSON),
     Column(
         "status",
@@ -315,6 +318,8 @@ log_evidence = Table(
     Column("compression_ratio", Float),
     # 原始日志行（文本列表；JSON 无 DEFAULT，写入显式提供）
     Column("lines", JSON, nullable=False),
+    # 证据质量摘要（M1）：evidence_quality.evaluate 的六状态结果；旧归档为 NULL（前端显示 UNKNOWN）
+    Column("quality", JSON),
     Index("idx_evidence_service", "service"),
 )
 

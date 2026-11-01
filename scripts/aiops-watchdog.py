@@ -572,7 +572,23 @@ def run_status(components, logger) -> int:
                 bool(watchdog and verify_identity(watchdog)))
     if state.get("snapshot"):
         logger.info("启动快照：%s", json.dumps(state["snapshot"], ensure_ascii=False))
-    return int(bool(missing) or maintenance_active() or not watchdog or not verify_identity(watchdog))
+    # 日志采集心跳：进程活着不等于日志供给正常；无心跳时明确「不能判定」。
+    health_ok = True
+    try:
+        from aiops_agent import log_health
+
+        items = log_health.snapshot()
+        if not items:
+            logger.warning("日志采集心跳：未发现（不能据此判定日志供给正常）")
+        for item in items:
+            logger.info("日志采集 %s：%s", item.get("service") or "unknown", item.get("detail") or "")
+            if not item.get("healthy"):
+                health_ok = False
+    except Exception as exc:  # noqa: BLE001 - status 自身不得因心跳读取失败而崩溃
+        logger.warning("日志采集心跳不可读：%s", exc)
+        health_ok = False
+    return int(bool(missing) or maintenance_active() or not watchdog
+               or not verify_identity(watchdog) or not health_ok)
 
 
 def plist_path() -> Path:

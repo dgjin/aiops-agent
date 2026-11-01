@@ -332,6 +332,15 @@ nohup .venv/bin/python ship_app_logs.py --follow > ship_app_logs.log 2>&1 &   # 
 - 扮演 Filebeat / Fluent Bit 角色：按「被监控应用」清单取 `enabled` 且配置了 `log_path` 的条目，把应用日志规范化为 `service`/`level`（error/warn/info 三档）流标签并注入 `trace_id=`，推送 AIOps Loki（`AIOPS_LOKI_URL`）；
 - 每轮重读清单 → 控制台新增/停用条目热生效；`log_path` 支持通配（覆盖轮转归档）；
 - 位点落盘 `data/log_ship_positions.json`（按文件记录字节偏移），重启不重复推送；
+- 推送以 Loki 确认行数为准：所有级别批次确认后才推进位点；失败有界重试（默认 3 次，退避指数增长上限 5s），耗尽后保留位点，下一轮重推（至少一次）。部分确认按失败处理，不把「已发送」当成「已入库」；
+- 采集心跳落盘 `data/log_ship_health.json`（`AIOPS_LOG_HEALTH_PATH` 可覆盖）：记录最近成功/失败、连续失败数与警告；`scripts/aiops-watchdog.py status` 的退出码纳入采集健康，`/metrics` 输出 `aiops_log_ship_*`。无心跳时只告警「不能判定」，避免首次部署即红灯；
+- 采集前可核对 service 标签（发现问题退出码 1，不改配置）：
+
+```bash
+.venv/bin/python ship_app_logs.py --audit-labels               # 注册表/采集清单比对
+.venv/bin/python ship_app_logs.py --audit-labels --check-loki  # 额外检查近 60 分钟是否有日志
+```
+
 - 单文件模式（兼容旧用法）：`--file <路径> --service <svc> --once`。
 
 ### 3.5 日志突增检测器（WP2 真实链路）

@@ -218,9 +218,22 @@ class AIOpsFixWorkflow:
         if workflow.patched("flow-intake-notify-g1"):
             await self._call(activities.notify_flow_intake, alert)
 
-        # ---------- TRIAGING：日志取证 + 聚类降噪 + LLM 根因 ----------
+        # ---------- TRIAGING：日志取证 + 证据质量预检 + 聚类降噪 + LLM 根因 ----------
         self.stage = "TRIAGING"
-        evidence = await self._call(activities.collect_evidence, alert)
+        evidence_quality_gate = workflow.patched("evidence-quality-g1")
+        if evidence_quality_gate:
+            evidence = await self._call(
+                activities.collect_evidence,
+                alert,
+                {
+                    "lookback_minutes": triage_cfg.get("evidence_lookback_minutes", 10),
+                    "stale_after_minutes": triage_cfg.get("evidence_stale_minutes", 15),
+                    "min_signal_lines": triage_cfg.get("evidence_min_signal_lines", 1),
+                },
+            )
+        else:
+            # 在途旧流程：保持单参数调用，确保历史重放不产生额外命令。
+            evidence = await self._call(activities.collect_evidence, alert)
         clustered = await self._call(activities.cluster_logs, evidence)
         # 证据归档（转人工核对）：必须在 LLM 之前落库——即使 triage 降级/超时转人工，
         # 原始日志也已可查；patched 门确保在途旧流程的历史重放不受影响。
@@ -228,6 +241,21 @@ class AIOpsFixWorkflow:
             self._evidence_summary = await self._call(
                 activities.archive_evidence, evidence, clustered
             )
+        if evidence_quality_gate:
+            quality = evidence.get("quality") or {}
+            status = str(quality.get("status") or "")
+            blocked = status not in ("", "OK")
+            if status == "INSUFFICIENT_SIGNAL" and not triage_cfg.get(
+                "evidence_insufficient_escalate", True
+            ):
+                blocked = False
+            if blocked:
+                # 观测异常/证据不足独立分类：事件前缀不得伪装成 gate1，避免污染模型低置信指标。
+                self.stage = "ESCALATED"
+                self._gate_events.append(f"evidence:blocked:{status}")
+                reason = quality.get("escalation_reason") or f"证据预检未通过（{status}），转人工"
+                await self._call(activities.escalate_to_human, alert, reason)
+                return self._final(alert, None, None, None, started)
         root_cause: RootCause = await self._call(
             activities.analyze_root_cause, alert, clustered, evidence["trace_ids"]
         )

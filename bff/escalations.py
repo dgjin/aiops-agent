@@ -38,6 +38,22 @@ DATA_PATH = DATA_DIR / "escalations.json"
 STATUSES = ("open", "assigned", "closed")
 DEFAULT_SLA_MINUTES = 30
 
+# M1 转人工分类：观测异常/证据不足与业务闸门分开，避免污染模型低置信指标。
+CATEGORY_LABELS = {
+    "model": "模型低置信",
+    "approval": "审批未通过",
+    "sandbox": "测试未通过",
+    "release": "发布劣化",
+    "observability": "观测异常",
+    "evidence": "证据不足",
+    "requirement": "需求来源",
+    "other": "其他",
+}
+CATEGORY_GROUPS = {
+    "observability": "观测异常",
+    "evidence": "证据不足",
+}
+
 
 class EscalationStoreError(ValueError):
     """处置操作校验错误（由 BFF 统一转 400/404）。"""
@@ -73,7 +89,17 @@ def sla_minutes() -> int:
 
 def auto_reason_from_events(gate_events: list[str] | None) -> str:
     """从闸门事件序列推导升级原因摘要（取最后一条有意义的阻断/劣化事件）。"""
+    evidence_labels = {
+        "LOKI_UNAVAILABLE": "Loki 不可用",
+        "NO_LOGS": "窗口内无服务日志",
+        "STALE_LOGS": "日志已过期",
+        "UNMAPPED_SERVICE": "服务标签无法映射",
+        "INSUFFICIENT_SIGNAL": "日志无可分析信号",
+    }
     for event in reversed([str(e) for e in gate_events or []]):
+        if event.startswith("evidence:blocked:"):
+            status = event.split(":", 2)[2]
+            return f"证据预检：{evidence_labels.get(status, status)}（{status}）"
         if event.startswith("gate1:blocked"):
             detail = event.split(":", 2)[-1]
             return f"闸门1：根因置信度不足（{detail}）"
@@ -97,6 +123,45 @@ def auto_reason_from_events(gate_events: list[str] | None) -> str:
     return "转人工（原因见流程详情与审计记录）"
 
 
+def category_from_events(gate_events: list[str] | None) -> str:
+    """由闸门事件推导分类（取最后一条有意义的阻断事件）。"""
+    for event in reversed([str(e) for e in gate_events or []]):
+        if event.startswith("evidence:blocked:"):
+            status = event.split(":", 2)[2]
+            return "evidence" if status == "INSUFFICIENT_SIGNAL" else "observability"
+        if event.startswith("gate1:blocked"):
+            return "model"
+        if event.startswith("gate2"):
+            return "approval"
+        if event.startswith("tests:failed"):
+            return "sandbox"
+        if event.startswith("canary:degraded"):
+            return "release"
+    return ""
+
+
+def category_from_reason(reason: str, requirement: bool = False) -> str:
+    """历史待办无分类字段时，按升级原因确定性回填（只分类，不关闭）。"""
+    if requirement:
+        return "requirement"
+    text = str(reason or "")
+    if text.startswith("证据预检："):
+        return "evidence" if "证据不足" in text or "INSUFFICIENT_SIGNAL" in text else "observability"
+    if text.startswith("闸门1"):
+        return "model"
+    if text.startswith("闸门2"):
+        return "approval"
+    if text.startswith("沙箱") or "补丁生成失败" in text or "测试未通过" in text:
+        return "sandbox"
+    if text.startswith("金丝雀") or "回滚" in text:
+        return "release"
+    return "other" if text else ""
+
+
+def category_label(category: str) -> str:
+    return CATEGORY_LABELS.get(str(category or ""), "未分类")
+
+
 # ----------------------------------------------------------------------
 # 记录构造与状态迁移（纯函数，便于单测）
 # ----------------------------------------------------------------------
@@ -107,12 +172,18 @@ def new_entry(flow: dict, now: datetime | None = None) -> dict:
     wf_id = str(flow.get("wf_id") or "")
     alert = flow.get("alert") or {}
     ts = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+    reason = auto_reason_from_events(flow.get("gate_events"))
+    wf_is_requirement = wf_id.startswith("aiops-req-")
+    category = category_from_events(flow.get("gate_events")) or category_from_reason(
+        reason, requirement=wf_is_requirement
+    )
     return {
         "id": f"esc-{wf_id}",
         "wf_id": wf_id,
         "alert_id": str(alert.get("alert_id") or ""),
         "service": str(alert.get("service") or ""),
-        "auto_reason": auto_reason_from_events(flow.get("gate_events")),
+        "auto_reason": reason,
+        "category": category,
         "alert": alert,
         "status": "open",
         "assignee": "",
@@ -123,6 +194,17 @@ def new_entry(flow: dict, now: datetime | None = None) -> dict:
         "re_escalated": False,
         "history": [{"ts": ts, "action": "open", "actor": "system", "detail": "ESCALATED 自动登记"}],
     }
+
+
+def entry_category(entry: dict) -> str:
+    """待办分类：新记录读字段；历史记录按原因确定性回填（不写库、不关闭）。"""
+    current = str(entry.get("category") or "")
+    if current in CATEGORY_LABELS:
+        return current
+    wf_id = str(entry.get("wf_id") or "")
+    alert_id = str(entry.get("alert_id") or "")
+    requirement = wf_id.startswith("aiops-req-") or bool(alert_id.startswith("req-"))
+    return category_from_reason(str(entry.get("auto_reason") or ""), requirement=requirement) or "other"
 
 
 def _append_history(entry: dict, action: str, actor: str, detail: str = "") -> None:
@@ -186,6 +268,7 @@ def _row_to_entry(row) -> dict:
         "alert_id": row["alert_id"],
         "service": row["service"],
         "auto_reason": row["auto_reason"],
+        "category": row["category"] if "category" in row else "",
         "alert": row["alert"],
         "status": row["status"],
         "assignee": row["assignee"],
@@ -205,6 +288,7 @@ def _entry_values(entry: dict) -> dict:
         "alert_id": entry.get("alert_id") or "",
         "service": entry.get("service") or "",
         "auto_reason": entry.get("auto_reason") or "",
+        "category": entry.get("category") or "",
         "alert": entry.get("alert"),
         "status": entry.get("status") or "open",
         "assignee": entry.get("assignee") or "",
@@ -297,14 +381,47 @@ def get(esc_id: str) -> dict | None:
 
 def stats() -> dict:
     entries = _read_raw()
+    categories: dict[str, int] = {}
+    for entry in entries:
+        key = entry_category(entry)
+        categories[key] = categories.get(key, 0) + 1
     return {
         "total": len(entries),
         "open": sum(1 for e in entries if e.get("status") == "open"),
         "assigned": sum(1 for e in entries if e.get("status") == "assigned"),
         "closed": sum(1 for e in entries if e.get("status") == "closed"),
         "re_escalated": sum(1 for e in entries if e.get("re_escalated")),
+        "categories": categories,
         "sla_minutes": sla_minutes(),
     }
+
+
+def backfill_categories(dry_run: bool = True) -> dict:
+    """历史待办批量分类（M1）：只写 category，不改变状态、不关闭任何待办。
+
+    默认 dry-run 返回将变更清单；``dry_run=False`` 才落库。历史 41 条待办必须在
+    日志恢复后由值班逐条重试/关闭，本函数只解决「无法筛选」的问题。
+    """
+    changed: list[dict] = []
+    for entry in _read_raw():
+        current = str(entry.get("category") or "")
+        target = entry_category(entry)
+        if current == target:
+            continue
+        changed.append(
+            {
+                "id": entry.get("id"),
+                "wf_id": entry.get("wf_id"),
+                "service": entry.get("service"),
+                "from": current,
+                "to": target,
+                "label": category_label(target),
+            }
+        )
+        if not dry_run:
+            entry["category"] = target
+            persist_entry(entry)
+    return {"dry_run": dry_run, "changed": len(changed), "items": changed}
 
 
 def sync_from_flows(flows: list[dict]) -> int:

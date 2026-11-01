@@ -44,6 +44,17 @@ function Meta({
 const isErrorLine = (line: string): boolean =>
   /\b(error|exception|fatal|panic|traceback|failed)\b/i.test(line)
 
+/** 证据质量六状态展示（M1）：OK 之外一律按「不可直接采信」着色。 */
+const QUALITY_META: Record<string, { label: string; cls: string }> = {
+  OK: { label: '可用', cls: 'border-ok/40 text-ok' },
+  LOKI_UNAVAILABLE: { label: 'Loki 不可用', cls: 'border-danger/40 text-danger' },
+  NO_LOGS: { label: '窗口内无日志', cls: 'border-danger/40 text-danger' },
+  STALE_LOGS: { label: '日志已过期', cls: 'border-warn/40 text-warn' },
+  UNMAPPED_SERVICE: { label: '服务标签未映射', cls: 'border-warn/40 text-warn' },
+  INSUFFICIENT_SIGNAL: { label: '无可分析信号', cls: 'border-warn/40 text-warn' },
+  UNKNOWN: { label: '未记录（旧归档）', cls: 'border-line text-idle' },
+}
+
 export function LogEvidence({ wfId }: { wfId: string }) {
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ['flow-evidence', wfId],
@@ -53,6 +64,8 @@ export function LogEvidence({ wfId }: { wfId: string }) {
   })
   const [query, setQuery] = useState('')
   const evidence = data?.evidence
+  const quality = evidence?.quality ?? null
+  const qualityStatus = quality?.status ?? 'UNKNOWN'
 
   /** 保留原始行号（过滤后仍能对应归档中的位置）。 */
   const lines = useMemo(() => {
@@ -73,6 +86,30 @@ export function LogEvidence({ wfId }: { wfId: string }) {
 
   return (
     <div>
+      {/* 证据质量（M1）：状态 + 最新日志时间 + 判定说明；阻断升级时附升级原因 */}
+      <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+        <span
+          className={cn(
+            'inline-flex items-center gap-1 rounded border px-1.5 py-0.5',
+            (QUALITY_META[qualityStatus] ?? QUALITY_META.UNKNOWN).cls,
+          )}
+          title={quality?.detail || '未记录证据质量（质量预检上线前的归档）'}
+        >
+          证据质量：{(QUALITY_META[qualityStatus] ?? QUALITY_META.UNKNOWN).label}
+          <span className="font-mono text-[10px] opacity-70">{qualityStatus}</span>
+        </span>
+        {quality?.latest_log_at && (
+          <span className="text-muted">最新日志 {fmtDateTime(quality.latest_log_at)}</span>
+        )}
+        {quality && quality.signal_lines > 0 && (
+          <span className="text-muted">可分析信号 {quality.signal_lines} 行</span>
+        )}
+        {quality?.detail && (
+          <span className="min-w-0 flex-1 truncate text-idle" title={quality.detail}>
+            {quality.detail}
+          </span>
+        )}
+      </div>
       <div className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
         <Meta label="采集时间">{fmtDateTime(evidence.collected_at)}</Meta>
         <Meta

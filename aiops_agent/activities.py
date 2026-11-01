@@ -134,33 +134,109 @@ def _ensure_app_index(service: str, repo_dir: Path, index_path: Path) -> None:
 # --------------------------------------------------------------------------
 
 @activity.defn
-async def collect_evidence(alert: Alert) -> dict:
-    """真实实现（WP2）：从 Loki 按 service 拉取近 10 分钟日志并提取 trace_id。
+async def collect_evidence(alert: Alert, options: dict | None = None) -> dict:
+    """真实实现（WP2）：从 Loki 按 service 拉取近 N 分钟日志并提取 trace_id。
+
+    M1 起附带确定性证据质量预检（``quality``）：近期窗口无日志时再查一次历史窗口，
+    区分「从未有日志」与「日志已过期」；服务映射依据应用注册表，但未注册服务若仍有
+    日志不判 UNMAPPED（避免基础设施告警被误拦截）。
 
     调用链上下文：演示环境从日志行内提取 trace_id（统一字段规范），
     生产环境替换为 OTel Collector / Jaeger 等链路数据源。
-    Loki 不可用时降级为空证据（后续分析走安全侧）。
+    Loki 不可用时保留降级空证据（quality=LOKI_UNAVAILABLE，由工作流转人工）。
     """
-    from . import logs
+    from . import app_registry, evidence_quality, logs
+
+    cfg = options or {}
+    lookback = max(1, int(cfg.get("lookback_minutes") or 10))
+    stale_after = max(1, int(cfg.get("stale_after_minutes") or 15))
+    min_signal = max(1, int(cfg.get("min_signal_lines") or 1))
 
     await _tiny_delay()
+    lines: list[str] = []
+    latest = ""
+    stream_count = 0
+    truncated = False
+    loki_available = False
+    query_error = ""
     try:
-        lines = await asyncio.to_thread(
-            logs.query_lines, alert.service, lookback_minutes=10, limit=3000
+        meta = await asyncio.to_thread(
+            logs.query_lines_with_meta,
+            alert.service,
+            lookback_minutes=lookback,
+            limit=3000,
         )
+        lines = meta["lines"]
+        latest = meta["latest_at"]
+        stream_count = meta["stream_count"]
+        truncated = meta["truncated"]
         loki_available = True
     except Exception as exc:  # noqa: BLE001 - 观测面不可用不阻断主流程
+        query_error = f"{type(exc).__name__}: {exc}"
         log.warning("[evidence] Loki 不可用，降级为空证据: %s", exc)
-        lines, loki_available = [], False
+
+    if loki_available and not lines:
+        # 近期无日志：再查历史窗口，区分 NO_LOGS / STALE_LOGS；最多保留 200 行供人工核对。
+        history_window = max(60, stale_after * 4)
+        try:
+            history = await asyncio.to_thread(
+                logs.query_lines_with_meta,
+                alert.service,
+                lookback_minutes=history_window,
+                limit=200,
+            )
+            if history["lines"]:
+                lines = history["lines"]
+                latest = history["latest_at"]
+                stream_count = history["stream_count"]
+                truncated = history["truncated"]
+                log.info(
+                    "[evidence] %s 近 %d 分钟无日志，回看 %d 分钟命中 %d 行历史日志（最新=%s）",
+                    alert.service,
+                    lookback,
+                    history_window,
+                    len(lines),
+                    latest,
+                )
+        except Exception as exc:  # noqa: BLE001 - 历史回看失败不改变近期可用结论
+            log.warning("[evidence] 历史日志回看失败（按近期窗口判定）: %s", exc)
+
+    registered: bool | None = None
+    try:
+        apps = await asyncio.to_thread(app_registry.load_apps)
+        services = {
+            str(app.get("service") or "").strip().lower()
+            for app in apps
+            if str(app.get("service") or "").strip()
+        }
+        if services:
+            registered = str(alert.service or "").strip().lower() in services
+    except Exception as exc:  # noqa: BLE001 - 注册表不可用时不阻断取证
+        log.warning("[evidence] 应用注册表不可用，跳过 service 映射校验: %s", exc)
+
+    quality = evidence_quality.evaluate(
+        service=alert.service,
+        loki_available=loki_available,
+        lines=lines,
+        latest_log_at=latest,
+        registered=registered,
+        lookback_minutes=lookback,
+        stale_after_minutes=stale_after,
+        min_signal_lines=min_signal,
+        query_error=query_error,
+    )
+    quality["escalation_reason"] = evidence_quality.escalation_reason(quality)
     trace_ids = sorted(
         {m for line in lines for m in re.findall(r"trace_id=([\w\-]+)", line)}
     )[:10]
     log.info(
-        "[evidence] %s: 拉取 %d 行日志, %d 个 trace（loki=%s）",
+        "[evidence] %s: 拉取 %d 行日志, %d 个 trace（loki=%s, quality=%s）%s",
         alert.service,
         len(lines),
         len(trace_ids),
         loki_available,
+        quality["status"],
+        f"；{quality['detail']}" if quality.get("detail") else "",
     )
     return {
         "alert_id": alert.alert_id,
@@ -169,6 +245,10 @@ async def collect_evidence(alert: Alert) -> dict:
         "lines": lines,
         "trace_ids": trace_ids,
         "loki_available": loki_available,
+        "latest_log_at": latest,
+        "stream_count": stream_count,
+        "truncated": truncated,
+        "quality": quality,
         "collected_at": _now(),
     }
 

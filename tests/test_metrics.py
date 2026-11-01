@@ -13,6 +13,7 @@ import os
 import socket
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 from unittest.mock import AsyncMock
@@ -20,7 +21,7 @@ from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY
 
-from aiops_agent import db, metrics, readiness, tracing
+from aiops_agent import db, log_health, metrics, readiness, tracing
 
 from bff import runs_store
 
@@ -307,6 +308,50 @@ class TracingTest(unittest.TestCase):
             ):
                 self.assertFalse(tracing.setup_tracing("aiops-bff"))
             self.assertFalse(tracing._initialized)
+
+
+class LogShipHealthMetricTest(unittest.TestCase):
+    """日志采集心跳指标（M1）：逐服务输出；缺失/读取失败降级为注释，绝不影响主 /metrics。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "log_ship_health.json"
+        self._env = mock.patch.dict(os.environ, {log_health.ENV_PATH: str(self.path)})
+        self._env.start()
+        self.addCleanup(self._env.stop)
+
+    def test_renders_per_service_metrics(self) -> None:
+        now = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
+        log_health.record("nl2sql", success=True, pushed=7, path=self.path, now=now)
+        text = metrics._render_log_ship_health().decode("utf-8")
+        self.assertIn(
+            f'aiops_log_ship_last_success_timestamp_seconds{{service="nl2sql"}} {int(now.timestamp())}',
+            text,
+        )
+        self.assertIn('aiops_log_ship_last_pushed_lines{service="nl2sql"} 7', text)
+        self.assertIn('aiops_log_ship_consecutive_failures{service="nl2sql"} 0', text)
+        self.assertIn('aiops_log_ship_healthy{service="nl2sql"} 1', text)
+
+    def test_failed_push_and_label_escaped(self) -> None:
+        log_health.record('svc"x', success=False, error="boom", path=self.path)
+        text = metrics._render_log_ship_health().decode("utf-8")
+        self.assertIn('aiops_log_ship_healthy{service="svc\\"x"} 0', text)
+        self.assertIn('aiops_log_ship_consecutive_failures{service="svc\\"x"} 1', text)
+
+    def test_missing_heartbeat_marked_unavailable(self) -> None:
+        text = metrics._render_log_ship_health().decode("utf-8")
+        self.assertIn("unavailable (no heartbeat)", text)
+
+    def test_read_failure_degrades(self) -> None:
+        with mock.patch.object(log_health, "snapshot", side_effect=RuntimeError("boom")):
+            text = metrics._render_log_ship_health().decode("utf-8")
+        self.assertIn("unavailable", text)
+
+    def test_render_includes_heartbeat_section(self) -> None:
+        log_health.record("nl2sql", success=True, path=self.path)
+        payload, _ = metrics.render()
+        self.assertIn(b"aiops_log_ship_healthy", payload)
 
 
 class WorkerMetricsServerTest(unittest.TestCase):

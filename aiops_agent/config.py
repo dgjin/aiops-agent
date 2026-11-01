@@ -57,6 +57,12 @@ class TriageConfig(BaseModel):
 
     confidence_threshold: float = Field(0.8, ge=0.0, le=1.0)
     max_fix_retries: int = Field(2, ge=0, le=10)
+    # M1 证据质量预检（确定性规则，不新增模型置信分）：
+    evidence_lookback_minutes: int = Field(10, ge=1, le=1440)
+    evidence_stale_minutes: int = Field(15, ge=1, le=1440)
+    evidence_min_signal_lines: int = Field(1, ge=1, le=100)
+    # INSUFFICIENT_SIGNAL 默认直接转人工（证据不足）；保留策略开关便于后续评测调整。
+    evidence_insufficient_escalate: bool = True
 
 
 class ApprovalConfig(BaseModel):
@@ -367,6 +373,10 @@ def snapshot_for_workflow(policy: Policy) -> dict:
         "triage": {
             "confidence_threshold": gate.triage.confidence_threshold,
             "max_fix_retries": gate.triage.max_fix_retries,
+            "evidence_lookback_minutes": gate.triage.evidence_lookback_minutes,
+            "evidence_stale_minutes": gate.triage.evidence_stale_minutes,
+            "evidence_min_signal_lines": gate.triage.evidence_min_signal_lines,
+            "evidence_insufficient_escalate": gate.triage.evidence_insufficient_escalate,
         },
         "approval": {
             "timeout_seconds": int(gate.approval.timeout.total_seconds()),

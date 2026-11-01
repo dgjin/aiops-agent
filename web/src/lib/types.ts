@@ -186,6 +186,31 @@ export interface ResultPayload {
   evidence: EvidenceSummary | null
 }
 
+/** 证据质量六状态（M1）：与 aiops_agent/evidence_quality.py 固定口径一致；旧归档为 UNKNOWN。 */
+export type EvidenceQualityStatus =
+  | 'OK'
+  | 'LOKI_UNAVAILABLE'
+  | 'NO_LOGS'
+  | 'STALE_LOGS'
+  | 'UNMAPPED_SERVICE'
+  | 'INSUFFICIENT_SIGNAL'
+  | 'UNKNOWN'
+
+/** 证据质量明细（归档记录内保存的结构）。 */
+export interface EvidenceQuality {
+  status: EvidenceQualityStatus
+  /** 人类可读判定说明（为何不满足取证条件） */
+  detail: string
+  /** 最新一条日志时间（ISO；无日志为空串） */
+  latest_log_at: string
+  /** 命中错误/异常关键字的行数 */
+  signal_lines: number
+  lookback_minutes: number
+  stale_after_minutes: number
+  /** 证据预检阻断时的升级原因（仅在阻断路径写入） */
+  escalation_reason?: string
+}
+
 /** 日志证据摘要（列表徽标 / 详情头部；不含原始日志正文）。 */
 export interface EvidenceSummary {
   available: boolean
@@ -204,6 +229,14 @@ export interface EvidenceSummary {
   template_count: number
   trace_count: number
   compression_ratio: number
+  /** 证据质量状态（M1；旧归档 / 旧流程结果为 UNKNOWN 或缺省） */
+  quality_status?: EvidenceQualityStatus
+  /** 证据质量判定说明 */
+  quality_detail?: string
+  /** 最新一条日志时间（ISO） */
+  latest_log_at?: string
+  /** 命中错误/异常关键字的行数 */
+  signal_lines?: number
 }
 
 /** 日志证据全文（流程详情 / 转人工核对弹窗）。 */
@@ -212,6 +245,8 @@ export interface LogEvidenceRecord extends Omit<EvidenceSummary, 'template_count
   trace_ids: string[]
   templates: { id: string; pattern: string; count: number }[]
   lines: string[]
+  /** 证据质量明细（M1；旧归档为 null） */
+  quality?: EvidenceQuality | null
 }
 
 export interface EvidenceResp extends Timed {
@@ -768,6 +803,17 @@ export interface EscalationHistory {
   detail: string
 }
 
+/** 转人工待办处置分类（M1）：观测异常/证据不足与业务闸门分开统计。 */
+export type EscalationCategory =
+  | 'model'
+  | 'approval'
+  | 'sandbox'
+  | 'release'
+  | 'observability'
+  | 'evidence'
+  | 'requirement'
+  | 'other'
+
 /** 转人工待办条目（读侧附加 overdue / sla_minutes 派生状态）。 */
 export interface EscalationEntry {
   id: string
@@ -776,6 +822,10 @@ export interface EscalationEntry {
   service: string
   /** 自动升级原因摘要（由闸门事件链翻译） */
   auto_reason: string
+  /** 处置分类（读侧派生：新记录读字段，历史记录按升级原因确定性回填） */
+  category?: EscalationCategory
+  /** 分类中文标签（服务端派生，前端直接展示） */
+  category_label?: string
   alert: AlertMeta | null
   status: 'open' | 'assigned' | 'closed'
   assignee: string
@@ -805,6 +855,8 @@ export interface EscalationStats {
   assigned: number
   closed: number
   re_escalated: number
+  /** 分类计数（key 为 EscalationCategory；含 other） */
+  categories?: Record<string, number>
   sla_minutes: number
 }
 

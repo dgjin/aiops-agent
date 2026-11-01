@@ -24,6 +24,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 
 DEFAULT_LOKI_URL = os.environ.get("AIOPS_LOKI_URL", "http://localhost:3101")
 
@@ -80,29 +81,82 @@ def query_lines(
     level: str | None = None,
     loki_url: str | None = None,
 ) -> list[str]:
-    """查询近 N 分钟该 service 的日志行（时间升序），最多 limit 行。"""
+    """查询近 N 分钟该 service 的日志行（时间升序），最多 limit 行。
+
+    兼容包装：需要最新时间戳 / 流数量 / 是否截断时改用 ``query_lines_with_meta``。
+    """
+    meta = query_lines_with_meta(
+        service,
+        lookback_minutes=lookback_minutes,
+        limit=limit,
+        level=level,
+        loki_url=loki_url,
+    )
+    return meta["lines"]
+
+
+def query_lines_with_meta(
+    service: str,
+    lookback_minutes: int = 10,
+    limit: int = 3000,
+    level: str | None = None,
+    loki_url: str | None = None,
+) -> dict:
+    """查询日志并返回元数据（M1 证据新鲜度判定）。
+
+    返回 ``lines``（时间升序）、``latest_at``（最新日志 UTC ISO）、``latest_ns``、
+    ``stream_count``、``truncated``（命中查询上限）、``queried_at`` 等。
+
+    截断判定：向 Loki 多取 1 行，若返回超过 ``limit`` 则只保留最新 ``limit`` 行，
+    避免把「被截断的窗口」误当成完整证据。
+    """
     _check_label(service, "service")
     if level:
         _check_label(level, "level")
+    limit = max(1, int(limit))
     end = time.time_ns()
-    start = end - lookback_minutes * 60 * 1_000_000_000
+    start = end - max(1, int(lookback_minutes)) * 60 * 1_000_000_000
     selector = f'{{service="{service}"' + (f', level="{level}"' if level else "") + "}"
     params = urllib.parse.urlencode(
         {
             "query": selector,
             "start": str(start),
             "end": str(end),
-            "limit": str(limit),
+            "limit": str(limit + 1),
             "direction": "backward",
         }
     )
     data = _get_json(f"{_loki_url(loki_url)}/loki/api/v1/query_range?{params}")
+    streams = data.get("data", {}).get("result", [])
     rows: list[tuple[int, str]] = []
-    for stream in data.get("data", {}).get("result", []):
+    for stream in streams:
         for ts, line in stream.get("values", []):
             rows.append((int(ts), line))
     rows.sort(key=lambda item: item[0])
-    return [line for _, line in rows]
+    truncated = len(rows) > limit
+    if truncated:
+        rows = rows[-limit:]
+    latest_ns = rows[-1][0] if rows else None
+    latest_at = (
+        datetime.fromtimestamp(latest_ns / 1_000_000_000, tz=timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        if latest_ns is not None
+        else ""
+    )
+    return {
+        "lines": [line for _, line in rows],
+        "latest_at": latest_at,
+        "latest_ns": latest_ns,
+        "stream_count": len(streams),
+        "truncated": truncated,
+        "queried_at": datetime.fromtimestamp(end / 1_000_000_000, tz=timezone.utc).isoformat(
+            timespec="seconds"
+        ),
+        "window_minutes": max(1, int(lookback_minutes)),
+        "limit": limit,
+        "line_count": len(rows),
+    }
 
 
 def query_metric(query: str, at_ns: int | None = None, loki_url: str | None = None) -> float:

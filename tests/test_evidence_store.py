@@ -89,6 +89,56 @@ class BuildRecordTest(unittest.TestCase):
             evidence_store.build_record("", _EVIDENCE, _CLUSTERED)
 
 
+class EvidenceQualityTest(unittest.TestCase):
+    """证据质量摘要（M1）：归档写入 / 摘要暴露 / 旧归档回退 UNKNOWN。"""
+
+    QUALITY = {
+        "status": "NO_LOGS",
+        "detail": "Loki 可用，但近 10 分钟无服务 nl2sql 的日志",
+        "latest_log_at": "",
+        "signal_lines": 0,
+        "lookback_minutes": 10,
+        "stale_after_minutes": 15,
+        "escalation_reason": "观测异常：窗口内无服务日志（NO_LOGS）",
+    }
+
+    def test_build_record_and_summary_expose_quality(self) -> None:
+        record = evidence_store.build_record(
+            "wf-q", {**_EVIDENCE, "quality": self.QUALITY}, _CLUSTERED
+        )
+        self.assertEqual(record["quality"]["status"], "NO_LOGS")
+        summary = evidence_store.summary_of(record)
+        assert summary is not None
+        self.assertEqual(summary["quality_status"], "NO_LOGS")
+        self.assertIn("无服务", summary["quality_detail"])
+        self.assertEqual(summary["latest_log_at"], "")
+        self.assertEqual(summary["signal_lines"], 0)
+
+    def test_quality_latest_log_falls_back_to_evidence(self) -> None:
+        quality = {key: value for key, value in self.QUALITY.items() if key != "latest_log_at"}
+        record = evidence_store.build_record(
+            "wf-q2", {**_EVIDENCE, "quality": quality, "latest_log_at": "2026-10-16T08:05:00+00:00"}, None
+        )
+        summary = evidence_store.summary_of(record)
+        assert summary is not None
+        self.assertEqual(summary["latest_log_at"], "2026-10-16T08:05:00+00:00")
+
+    def test_legacy_record_without_quality_is_unknown(self) -> None:
+        record = evidence_store.build_record("wf-old", _EVIDENCE, _CLUSTERED)
+        self.assertEqual(record["quality"]["status"], evidence_store.QUALITY_UNKNOWN)
+        summary = evidence_store.summary_of(record)
+        assert summary is not None
+        self.assertEqual(summary["quality_status"], "UNKNOWN")
+        self.assertEqual(summary["quality_detail"], "")
+
+    def test_malformed_quality_is_tolerated(self) -> None:
+        record = evidence_store.build_record("wf-bad", {**_EVIDENCE, "quality": "broken"}, None)
+        self.assertEqual(record["quality"]["status"], evidence_store.QUALITY_UNKNOWN)
+        summary = evidence_store.summary_of({**record, "quality": None})
+        assert summary is not None
+        self.assertEqual(summary["quality_status"], "UNKNOWN")
+
+
 class _FileStoreCase(unittest.TestCase):
     """demo 文件后端：AIOPS_DATA_ROOT 指向临时目录，不污染真实 data/。"""
 
@@ -118,6 +168,16 @@ class _FileStoreCase(unittest.TestCase):
         assert record is not None
         self.assertEqual(record["lines"], ["only-one"])
         self.assertEqual(record["templates"], [])
+
+    def test_quality_persisted_in_file(self) -> None:
+        quality = {"status": "INSUFFICIENT_SIGNAL", "detail": "只有健康检查行", "signal_lines": 0}
+        evidence_store.save("wf-q", {**_EVIDENCE, "quality": quality}, _CLUSTERED)
+        record = evidence_store.get("wf-q")
+        assert record is not None
+        self.assertEqual(record["quality"]["status"], "INSUFFICIENT_SIGNAL")
+        summary = evidence_store.summary("wf-q")
+        assert summary is not None
+        self.assertEqual(summary["quality_status"], "INSUFFICIENT_SIGNAL")
 
     def test_missing_returns_none(self) -> None:
         self.assertIsNone(evidence_store.get("wf-not-exist"))
@@ -166,6 +226,23 @@ class _DbBackedTest(unittest.TestCase):
         assert updated is not None
         self.assertEqual(updated["lines"], ["rewritten"])
 
+    def test_db_quality_roundtrip(self) -> None:
+        quality = {"status": "STALE_LOGS", "detail": "最新日志已过期", "signal_lines": 2}
+        evidence_store.save("wf-db-q", {**_EVIDENCE, "quality": quality}, _CLUSTERED)
+        record = evidence_store.get("wf-db-q")
+        assert record is not None
+        self.assertEqual(record["quality"]["status"], "STALE_LOGS")
+        summary = evidence_store.summary("wf-db-q")
+        assert summary is not None
+        self.assertEqual(summary["quality_status"], "STALE_LOGS")
+        self.assertEqual(summary["signal_lines"], 2)
+
+        # 重新归档覆盖质量（幂等 upsert 同步更新 quality 列）
+        evidence_store.save("wf-db-q", {**_EVIDENCE, "quality": {"status": "OK"}}, None)
+        summary = evidence_store.summary("wf-db-q")
+        assert summary is not None
+        self.assertEqual(summary["quality_status"], "OK")
+
 
 class _StoredEvidenceCase(unittest.TestCase):
     """路由层：证据读取接口与转人工列表摘要。"""
@@ -202,6 +279,9 @@ class _StoredEvidenceCase(unittest.TestCase):
         decorated = esc_routes._decorate(entry)
         self.assertEqual(decorated["evidence"]["stored_lines"], 2)
         self.assertEqual(decorated["evidence"]["template_count"], 2)
+        # M1：读侧派生处置分类（历史记录无字段时按升级原因回填）
+        self.assertEqual(decorated["category"], "model")
+        self.assertEqual(decorated["category_label"], "模型低置信")
 
     def test_escalations_list_attaches_evidence(self) -> None:
         entry = {
