@@ -18,12 +18,12 @@ export function CopyableId({ value, className }: { value: string; className?: st
         }
       }}
       className={cn(
-        'inline-flex items-center gap-1 font-mono text-xs text-muted transition-colors hover:text-ink',
+        'inline-flex min-w-0 items-center gap-1 font-mono text-xs text-muted transition-colors hover:text-ink',
         className,
       )}
     >
-      {value}
-      {copied && <span className="text-accent">已复制</span>}
+      <span className="truncate">{value}</span>
+      {copied && <span className="shrink-0 text-accent">已复制</span>}
     </button>
   )
 }

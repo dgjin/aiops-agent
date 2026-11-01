@@ -9,14 +9,16 @@
  *   筛选（按当前数据动态生成选项与计数；纳管应用显示应用名，node / redis 等未纳管服务回退服务名
  *   并标注）+ 来源筛选（告警 / 需求）+ 仅看超时；
  *   状态页签带全量计数；列表为统一表格（监控系统 / 状态 / 升级原因 / 告警·工作流 / 责任人 /
- *   登记时间 / SLA / 操作），点击表头自动排序（升降切换，aria-sort 标注），默认按监控系统
+ *   登记·SLA / 日志证据 / 操作），点击表头自动排序（升降切换，aria-sort 标注），默认按监控系统
  *   分块 + 待处置优先——均前端内存计算，状态页签仍走服务端。
+ * - 排版：固定列宽（table-fixed + colgroup）铺满内容区，不再横向滚动内嵌——所有列一屏可见；
+ *   长文本一律 truncate + title 悬停看全文；工作流 ID 即「详情」入口，行内操作区只留处置按钮。
  */
 
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { FileText, Search, X } from 'lucide-react'
+import { FileText, RefreshCw, Search, X } from 'lucide-react'
 import { api, describeError } from '../lib/api'
 import { cn, fmtDateTime } from '../lib/format'
 import { compareValues, nextSort, type SortState } from '../lib/sort'
@@ -58,7 +60,7 @@ const SELECT_CLS =
   'rounded-lg border border-line bg-panel px-2 py-1.5 text-xs text-ink focus:border-accent/50 focus:outline-none'
 
 /** 可排序列（「告警 / 工作流」与操作列不参与排序；default 为「监控系统分块 + 待处置优先」）。 */
-type ColumnKey = 'system' | 'status' | 'reason' | 'assignee' | 'escalated_at' | 'overdue'
+type ColumnKey = 'system' | 'status' | 'reason' | 'assignee' | 'escalated_at'
 type SortKey = ColumnKey | 'default'
 
 /** 默认排序：按监控系统分块（组内待处置优先）；点击表头后切换为按列排序。 */
@@ -96,8 +98,6 @@ function sortValue(entry: EscalationEntry, key: ColumnKey): string | number {
       return entry.assignee || ''
     case 'escalated_at':
       return tsOf(entry.escalated_at)
-    case 'overdue':
-      return Number(entry.status !== 'closed' && entry.overdue)
   }
 }
 
@@ -286,7 +286,7 @@ export function Escalations() {
 
   /** 点击表头：同列翻转升降；换列按直觉默认方向（登记时间 / SLA 降序，其余升序）。 */
   const toggleSort = (key: ColumnKey) => {
-    setSort((prev) => nextSort(prev, key, key === 'escalated_at' || key === 'overdue' ? 'desc' : 'asc'))
+    setSort((prev) => nextSort(prev, key, key === 'escalated_at' ? 'desc' : 'asc'))
   }
 
   // ---- 内容管理：搜索 + 筛选 + 排序（前端内存计算；状态页签仍走服务端过滤）----
@@ -524,24 +524,69 @@ export function Escalations() {
             </div>
           ) : (
           <>
-          <div className="mt-5 overflow-x-auto rounded-xl border border-line bg-panel">
-            <table className="w-full min-w-[1120px] text-xs">
+          <div className="mt-5">
+            <table className="w-full table-fixed text-xs">
+              <colgroup>
+                <col className="w-[14%]" />
+                <col className="w-[11%]" />
+                <col className="w-[14%]" />
+                <col className="w-[15%]" />
+                <col className="w-[8%]" />
+                <col className="w-[12%]" />
+                <col className="w-[10%]" />
+                <col className="w-[16%]" />
+              </colgroup>
               <thead>
                 <tr className="border-b border-line text-left text-muted">
-                  <SortableTh label="监控系统" colKey="system" sort={sort} onToggle={toggleSort} />
-                  <SortableTh label="状态" colKey="status" sort={sort} onToggle={toggleSort} />
-                  <SortableTh label="升级原因" colKey="reason" sort={sort} onToggle={toggleSort} />
-                  <th className="whitespace-nowrap px-3 py-2 font-medium">告警 / 工作流</th>
-                  <SortableTh label="责任人" colKey="assignee" sort={sort} onToggle={toggleSort} />
                   <SortableTh
-                    label="登记时间"
+                    label="监控系统"
+                    colKey="system"
+                    sort={sort}
+                    onToggle={toggleSort}
+                    padding="px-2.5 py-2"
+                    className="sticky top-12 z-10 bg-canvas"
+                  />
+                  <SortableTh
+                    label="状态"
+                    colKey="status"
+                    sort={sort}
+                    onToggle={toggleSort}
+                    padding="px-2.5 py-2"
+                    className="sticky top-12 z-10 bg-canvas"
+                  />
+                  <SortableTh
+                    label="升级原因"
+                    colKey="reason"
+                    sort={sort}
+                    onToggle={toggleSort}
+                    padding="px-2.5 py-2"
+                    className="sticky top-12 z-10 bg-canvas"
+                  />
+                  <th className="sticky top-12 z-10 whitespace-nowrap bg-canvas px-2.5 py-2 font-medium">
+                    告警 / 工作流
+                  </th>
+                  <SortableTh
+                    label="责任人"
+                    colKey="assignee"
+                    sort={sort}
+                    onToggle={toggleSort}
+                    padding="px-2.5 py-2"
+                    className="sticky top-12 z-10 bg-canvas"
+                  />
+                  <SortableTh
+                    label="登记 / SLA"
                     colKey="escalated_at"
                     sort={sort}
                     onToggle={toggleSort}
+                    padding="px-2.5 py-2"
+                    className="sticky top-12 z-10 bg-canvas"
                   />
-                  <SortableTh label="SLA" colKey="overdue" sort={sort} onToggle={toggleSort} />
-                  <th className="whitespace-nowrap px-3 py-2 font-medium">日志证据</th>
-                  <th className="whitespace-nowrap px-3 py-2 text-right font-medium">操作</th>
+                  <th className="sticky top-12 z-10 whitespace-nowrap bg-canvas px-2.5 py-2 font-medium">
+                    日志证据
+                  </th>
+                  <th className="sticky top-12 z-10 whitespace-nowrap bg-canvas px-2.5 py-2 text-right font-medium">
+                    操作
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -553,17 +598,17 @@ export function Escalations() {
                       key={entry.id}
                       className="border-b border-line/60 last:border-0 hover:bg-elevated/40"
                     >
-                      <td className="px-3 py-2.5 align-top">
-                        <div className="flex flex-wrap items-center gap-1.5">
+                      <td className="px-2.5 py-2.5 align-top">
+                        <div className="flex min-w-0 items-center gap-1.5">
                           <span
-                            className="font-medium text-ink"
+                            className="truncate font-medium text-ink"
                             title={`监控系统：${systemLabelOf(entry)}`}
                           >
                             {systemLabelOf(entry)}
                           </span>
                           {!entry.system_managed && (
                             <span
-                              className="rounded border border-line px-1 py-0.5 text-[10px] text-idle"
+                              className="shrink-0 rounded border border-line px-1 py-0.5 text-[10px] text-idle"
                               title="未在「被监控系统」清单中纳管"
                             >
                               未纳管
@@ -572,33 +617,39 @@ export function Escalations() {
                         </div>
                         {entry.service && entry.service !== systemLabelOf(entry) && (
                           <div
-                            className="mt-0.5 font-mono text-[10px] text-idle"
-                            title="服务标识（告警 service）"
+                            className="mt-0.5 truncate font-mono text-[10px] text-idle"
+                            title={`服务标识（告警 service）：${entry.service}`}
                           >
                             {entry.service}
                           </div>
                         )}
                       </td>
-                      <td className="px-3 py-2.5 align-top">
-                        <div className="flex flex-wrap items-center gap-1.5">
+                      <td className="px-2.5 py-2.5 align-top">
+                        <div className="flex flex-wrap items-center gap-1">
                           <span
-                            className={cn('rounded border px-1.5 py-0.5 text-[10px]', meta.cls)}
+                            className={cn(
+                              'inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px]',
+                              meta.cls,
+                            )}
                           >
                             {meta.label}
+                            {entry.re_escalated && (
+                              <span
+                                className="inline-flex"
+                                title="已超 SLA 未处置，BFF 巡检已自动再升级一次"
+                              >
+                                <RefreshCw size={10} />
+                              </span>
+                            )}
                           </span>
                           {entry.requirement && (
                             <span className="rounded border border-accent/40 px-1.5 py-0.5 text-[10px] text-accent">
                               需求
                             </span>
                           )}
-                          {entry.re_escalated && (
-                            <span className="rounded border border-line px-1.5 py-0.5 text-[10px] text-idle">
-                              已再升级
-                            </span>
-                          )}
                         </div>
                       </td>
-                      <td className="max-w-[22rem] px-3 py-2.5 align-top">
+                      <td className="px-2.5 py-2.5 align-top">
                         <div className="truncate text-ink" title={entry.auto_reason}>
                           {entry.auto_reason || '—'}
                         </div>
@@ -608,59 +659,84 @@ export function Escalations() {
                           </div>
                         )}
                       </td>
-                      <td className="px-3 py-2.5 align-top">
+                      <td className="px-2.5 py-2.5 align-top">
                         <div className="space-y-0.5 text-muted">
-                          <div>
-                            告警 <CopyableId value={entry.alert_id || '—'} />
+                          <div className="flex min-w-0 items-baseline gap-1">
+                            <span className="shrink-0 text-[10px] text-idle">告警</span>
+                            <CopyableId value={entry.alert_id || '—'} className="text-[11px]" />
                           </div>
-                          <div>
-                            工作流 <CopyableId value={entry.wf_id} />
+                          <div className="flex min-w-0 items-baseline gap-1">
+                            <span className="shrink-0 text-[10px] text-idle">流程</span>
+                            <Link
+                              to={`/flows/${encodeURIComponent(entry.wf_id)}`}
+                              title={`查看流程详情：${entry.wf_id}`}
+                              className="truncate font-mono text-[11px] text-accent hover:underline"
+                            >
+                              {entry.wf_id}
+                            </Link>
                           </div>
                         </div>
                       </td>
-                      <td className="whitespace-nowrap px-3 py-2.5 align-top">
+                      <td className="px-2.5 py-2.5 align-top">
                         {entry.assignee ? (
-                          <span className="text-ink">{entry.assignee}</span>
+                          <span className="block truncate text-ink" title={entry.assignee}>
+                            {entry.assignee}
+                          </span>
                         ) : (
                           <span className="text-idle">未指派</span>
                         )}
                       </td>
-                      <td className="whitespace-nowrap px-3 py-2.5 align-top text-muted">
-                        {fmtDateTime(entry.escalated_at)}
+                      <td className="whitespace-nowrap px-2.5 py-2.5 align-top">
+                        <div className="text-muted">{fmtDateTime(entry.escalated_at)}</div>
+                        <div className="mt-0.5">
+                          {!open ? (
+                            <span className="text-[10px] text-idle">已关闭</span>
+                          ) : entry.overdue ? (
+                            <span
+                              className="rounded border border-danger/40 bg-danger/10 px-1 py-0.5 text-[10px] text-danger"
+                              title="已超 SLA 未处置，BFF 巡检已自动再升级一次"
+                            >
+                              已超时
+                            </span>
+                          ) : (
+                            <span className="text-[10px] text-ok">SLA 正常</span>
+                          )}
+                        </div>
                       </td>
-                      <td className="whitespace-nowrap px-3 py-2.5 align-top">
-                        {!open ? (
-                          <span className="text-idle">—</span>
-                        ) : entry.overdue ? (
-                          <span className="rounded border border-danger/40 bg-danger/10 px-1.5 py-0.5 text-[10px] text-danger">
-                            已超时未处置
-                          </span>
-                        ) : (
-                          <span className="text-ok">正常</span>
-                        )}
-                      </td>
-                      <td className="whitespace-nowrap px-3 py-2.5 align-top">
+                      <td className="px-2.5 py-2.5 align-top">
                         {entry.evidence?.available ? (
                           <button
                             type="button"
                             onClick={() => setEvidenceTarget(entry)}
-                            title="查看该流程 TRIAGING 阶段采集的原始日志与模板聚类"
-                            className="inline-flex items-center gap-1 rounded border border-accent/40 px-1.5 py-0.5 text-[10px] text-accent transition-colors hover:bg-accent/10"
+                            title={`查看 TRIAGING 采集的原始日志与模板聚类：共 ${entry.evidence.total_lines} 行，归档 ${entry.evidence.stored_lines} 行${entry.evidence.truncated ? '（超出上限已截断）' : ''}，${entry.evidence.template_count} 个模板`}
+                            className="inline-flex max-w-full items-center gap-1 rounded border border-accent/40 px-1 py-0.5 text-[10px] text-accent transition-colors hover:bg-accent/10"
                           >
-                            <FileText size={11} />
-                            {entry.evidence.stored_lines} 行 · {entry.evidence.template_count} 模板
-                            {entry.evidence.truncated ? '（已截断）' : ''}
+                            <FileText size={10} className="shrink-0" />
+                            <span className="truncate">
+                              {entry.evidence.stored_lines}
+                              {entry.evidence.truncated ? '+' : ''} 行 / {entry.evidence.template_count} 模板
+                            </span>
                           </button>
                         ) : (
-                          <span className="text-[10px] text-idle">
-                            {entry.requirement ? '需求来源（无日志）' : '未归档'}
+                          <span
+                            className="block truncate text-[10px] text-idle"
+                            title={
+                              entry.requirement
+                                ? '需求来源待办不采集运行日志'
+                                : '该流程未归档日志证据（仅新告警触发的流程会采集）'
+                            }
+                          >
+                            {entry.requirement ? '需求来源' : '未归档'}
                           </span>
                         )}
                       </td>
-                      <td className="px-3 py-2.5 align-top">
+                      <td className="px-2.5 py-2.5 align-top">
                         <div className="flex flex-wrap items-center justify-end gap-1.5">
-                          {open && (
-                            <PermissionGate require="operator" fallback={null}>
+                          {open ? (
+                            <PermissionGate
+                              require="operator"
+                              fallback={<span className="text-[10px] text-idle">只读</span>}
+                            >
                               <ActionButton size="sm" onClick={() => setAssignTarget(entry)}>
                                 {entry.assignee ? '改派' : '指派'}
                               </ActionButton>
@@ -671,13 +747,9 @@ export function Escalations() {
                                 重试
                               </ActionButton>
                             </PermissionGate>
+                          ) : (
+                            <span className="text-idle">—</span>
                           )}
-                          <Link
-                            to={`/flows/${encodeURIComponent(entry.wf_id)}`}
-                            className="whitespace-nowrap text-accent hover:underline"
-                          >
-                            详情 →
-                          </Link>
                         </div>
                       </td>
                     </tr>
