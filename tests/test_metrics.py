@@ -322,7 +322,8 @@ class LogShipHealthMetricTest(unittest.TestCase):
         self.addCleanup(self._env.stop)
 
     def test_renders_per_service_metrics(self) -> None:
-        now = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
+        # 心跳新鲜度按真实时钟判定，固定时间戳会随时间成为「过期心跳」而误报
+        now = datetime.now(timezone.utc).replace(microsecond=0)
         log_health.record("nl2sql", success=True, pushed=7, path=self.path, now=now)
         text = metrics._render_log_ship_health().decode("utf-8")
         self.assertIn(

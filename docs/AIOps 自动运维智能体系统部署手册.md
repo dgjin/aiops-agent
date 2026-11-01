@@ -1260,3 +1260,59 @@ SQL stdout 直接写入 600 暂存文件，不捕获到整块内存；逐行 SQL
 外部监控栈沿用第九节边界（工具不自动改写/重启）：按迁移材料人工替换监控栈 `deploy/prometheus.yml` 两个 targets 与 `deploy/alertmanager.yml` 的 receiver url（替换前保留 `.bak.<时间戳>`），重启两个容器（Alertmanager 由 entrypoint 渲染模板，改模板必须重启容器），以 targets `up` 与 `/-/ready` 验证。
 
 2026-10-13 首次执行记录（DHCP：`10.1.112.39` → `192.168.0.6`）：Caddyfile 2 处、两处 settings 与两个片段已更新；叶证书重签（SAN = host.docker.internal / localhost / 127.0.0.1 / ::1 / 192.168.0.6）并 reload，入口新地址与本机均可达 200；监控栈替换 + 容器重启后 Prometheus 双 job `up`、Alertmanager `/-/ready` 200；被监控应用条目 url 更新为 `http://192.168.0.6:3000/`（生产库 monitored_apps 表），巡检下一轮恢复在线。
+
+## 11 评测资产、质量门槛与模型路由（M3）
+
+### 11.1 资产与职责
+
+| 资产 | 作用 | 是否入库 |
+|---|---|---|
+| `data/triage_eval_samples.json` | 根因集 105 条（dev/holdout 分层、安全回归标注） | 是 |
+| `data/fix_eval_samples.json` | 代码修复集 33 条（真实夹具缺陷） | 是 |
+| `data/fix_eval_abstain_samples.json` | 弃权集 28 条（非代码根因/误报/日志异常） | 是 |
+| `data/triage_eval_report.json`、`data/fix_eval_report.json` | 最近一次评测报告（含来源与指标）；当前入库的仍是 M3 前旧报告，首次重跑后覆盖 | 是 |
+| `data/eval_baseline.json` | 批准基线（用于退化比较） | 是（晋升后） |
+| `data/model_quality_bar.json` | 模型质量证据（自动修复路由的前置） | 是（达标后） |
+
+`dataset_version` 是样本内容哈希，由 `scripts/gen_eval_v2_datasets.py` 写入；改动样本后必须重新生成，否则 PR 门禁会因版本不一致而失败。
+
+### 11.2 日常命令
+
+```bash
+# PR/本地：确定性门禁（不调用模型，约 1s）
+.venv/bin/python scripts/eval_gate.py
+
+# 评测机：holdout 根因评测（组合判据 + 安全回归）
+.venv/bin/python eval_triage.py --split holdout --model qwen3.8:27b-mlx --check
+
+# 评测机：holdout 修复评测（真实沙箱 + 弃权路由；--retries 按回炉策略）
+.venv/bin/python eval_fix.py --split holdout --model qwen3.8:27b-mlx --retries 2 --check
+
+# 基线晋升：仅当硬阈值与基线比较都无违规时写入
+.venv/bin/python eval_triage.py --split holdout --check --write-baseline
+.venv/bin/python eval_fix.py --split holdout --retries 2 --check --write-baseline
+
+# 质量证据：仅当 holdout Schema ≥90% 且沙箱 ≥85% 时写入
+.venv/bin/python eval_fix.py --split holdout --retries 2 --check --write-quality-bar
+```
+
+门禁结论：`ok` / `baseline_missing`（有硬阈值，无基线）/ `baseline_incompatible`（数据集版本变化，不做退化比较）/ `regression`（相对基线下降 >2pp 或新增高风险误放行）/ `hard_fail`。`--check` 对 `regression` 与 `hard_fail` 返回退出码 1。
+
+### 11.3 策略配置
+
+- `demo-policy.yaml`：`triage.composite_gate.enabled=true`，`fix_routing.require_quality_bar=false`（演示环境不阻断）。
+- `release-gate-policy.yaml`：`triage.composite_gate` 与 `fix_routing.require_quality_bar=true`、`quality_bar_path=./data/model_quality_bar.json`。缺质量证据、证据路径损坏或模型不在名单内时，`route_fix` 返回 `route=human`，闸门 1 记录 `model_not_qualified`，不会静默降级到未达标模型。
+- 置信度阈值保持 `0.8`，组合判据只叠加必要条件，不替代它。
+
+### 11.4 评测机（自托管 runner）
+
+- 标签：`self-hosted`、`aiops-eval`；工作流 `.github/workflows/eval-daily.yml` 每日 UTC 18:00 及模型/提示词/数据集变更时触发。
+- 依赖：Ollama 监听 `127.0.0.1:11434`，已 `ollama pull` 默认模型（`qwen3.8:27b-mlx`）；工作流先做 preflight，缺失即失败并打印修复命令。
+- 质量证据不在 CI 自动写入：holdout 全绿后由值班执行 `--write-quality-bar`，连同报告提交评审后方可影响 release 路由。
+- 若评测机尚未注册，PR 阶段仍由 `ci.yml` 的 `eval-gate` 提供确定性保护；每日任务会在队列中等待但不影响合并。
+
+### 11.5 失败处置
+
+- 数据集版本不一致：运行 `scripts/gen_eval_v2_datasets.py` 重新生成并复核 diff，不得手改 `dataset_version`。
+- 新增安全回归误放行：先复现单样本（`--id <ID>`），确认是分类信号缺口还是模型输出问题；信号缺口补 `gate_decision` 并加单测，模型问题记录失败分类（`high_confidence_false_pass` / `route_mismatch` / `over_blocked`）。
+- 质量证据过期（模型或提示词变更）：删除 `data/model_quality_bar.json` 对应条目重新评测，禁止沿用旧证据放行。

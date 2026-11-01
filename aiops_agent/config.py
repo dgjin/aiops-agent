@@ -50,6 +50,25 @@ def _parse_duration(value: object) -> timedelta:
     return timedelta(seconds=int(match.group(1)) * _UNIT_SECONDS[match.group(2)])
 
 
+class CompositeGateConfig(BaseModel):
+    """M3 组合放行判据：默认关闭（新策略显式启用，避免改变在途流程行为）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    require_suspect_files: bool = True
+
+
+class FixRoutingConfig(BaseModel):
+    """M3 修复模型路由：生产要求 holdout 质量门槛达标，否则转人工/排队。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    require_quality_bar: bool = False
+    quality_bar_path: str = ""
+    prefer_qoder_for_multi_file: bool = True
+
+
 class TriageConfig(BaseModel):
     """闸门 1：根因置信度策略。"""
 
@@ -63,6 +82,9 @@ class TriageConfig(BaseModel):
     evidence_min_signal_lines: int = Field(1, ge=1, le=100)
     # INSUFFICIENT_SIGNAL 默认直接转人工（证据不足）；保留策略开关便于后续评测调整。
     evidence_insufficient_escalate: bool = True
+    # M3 组合放行与模型路由（显式启用；旧快照无这些键时按默认关闭/不要求）
+    composite_gate: CompositeGateConfig = Field(default_factory=CompositeGateConfig)
+    fix_routing: FixRoutingConfig = Field(default_factory=FixRoutingConfig)
 
 
 class ApprovalConfig(BaseModel):
@@ -377,6 +399,16 @@ def snapshot_for_workflow(policy: Policy) -> dict:
             "evidence_stale_minutes": gate.triage.evidence_stale_minutes,
             "evidence_min_signal_lines": gate.triage.evidence_min_signal_lines,
             "evidence_insufficient_escalate": gate.triage.evidence_insufficient_escalate,
+            # M3：组合放行判据与模型路由（旧快照缺省时工作流按 .get 兜底）
+            "composite_gate": {
+                "enabled": gate.triage.composite_gate.enabled,
+                "require_suspect_files": gate.triage.composite_gate.require_suspect_files,
+            },
+            "fix_routing": {
+                "require_quality_bar": gate.triage.fix_routing.require_quality_bar,
+                "quality_bar_path": gate.triage.fix_routing.quality_bar_path,
+                "prefer_qoder_for_multi_file": gate.triage.fix_routing.prefer_qoder_for_multi_file,
+            },
         },
         "approval": {
             "timeout_seconds": int(gate.approval.timeout.total_seconds()),

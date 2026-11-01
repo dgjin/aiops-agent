@@ -76,4 +76,22 @@
 - [ ] 预生产/生产环境完成一次 `index_codebase.py` 重建，并验证「已批准可检索、撤销后重建不可检索」的真实索引闭环。
 - [ ] 存量待办（41 条口径）的处理人与处置计划需值班在列表中逐条登记；系统已提供字段与入口，不做批量伪造责任人，也不要求人为清零。
 
+### M3 评测体系 V2、组合放行判据与模型路由
+
+- [x] 根因集扩容：`data/triage_eval_samples.json` 105 条（`dataset_version=a4ce562a23aa`），dev 79 / holdout 26；期望路由 code_fix 39 / runbook 48 / human 18；安全回归样本 48 条、低证据样本 18 条，覆盖 S08（连接池）、S11（网关 502）同类场景与多根因、串服务、日志缺失/截断。
+- [x] 修复评测口径：`data/fix_eval_samples.json` 33 条（`05987e0a79ab`，holdout 17 / dev 16）+ `data/fix_eval_abstain_samples.json` 28 条弃权样本（`b4e8aa46e949`，runbook 22 / human 6），合计 61 条满足计划 ≥60。
+- [x] 合成口径声明：新增样本为脱敏场景化变体，`source=scenario_catalog`；真实历史处置须经管理员审核脱敏后以 `source=historical` 追加，报告与数据集均保留该字段，避免把合成样本计入真实处置成绩。
+- [x] 组合放行判据：`aiops_agent/gate_decision.py` 为纯函数，次序为 Schema 有效 → 证据质量 OK → 置信度 ≥0.8（未放宽）→ 根因类型（基础设施/配置转 Runbook，未知转人工）→ 嫌疑文件可定位 → 模型路由达标；每条结论输出 `gate1:composite:pass|blocked:<code>` 事件，控制台与待办原因复用同一份中文标签。
+- [x] 工作流接入：`assess_fix_scope` 活动解析嫌疑文件并产出路由结论；闸门分支由 `workflow.patched("composite-gate-v1")` 与策略开关双重守护，策略未开启或在途旧流程行为不变。
+- [x] 安全回归实证：以 48 条安全样本的规范化信号构造「置信度 0.99」夹具，组合判据全部拦截为 runbook；39 条代码根因夹具全部放行，未出现过度拦截。本轮据此补齐 3 类信号缺口（消费组再平衡/端口被占用/目录权限），并移除会误伤 JSON 解析类代码根因的泛化词（“上游”“解析失败”）。
+- [x] 模型路由：`aiops_agent/model_routing.py` 默认 Ollama `qwen3.8:27b-mlx`；8B 等小模型标记 `qualified=False`，不得作为无人值守默认；多文件根因且 Qoder 可用时切 Qoder；release 策略 `fix_routing.require_quality_bar=true`，缺少质量证据时一律转人工/排队，不静默降级。
+- [x] 评测报告 V2：`eval_triage.py` / `eval_fix.py` 输出 `dataset_version / code_commit / prompt_hash / model / provider / rag_index_hash`，指标含高置信误放行率、分场景准确率、置信度分桶、Brier、diff 可应用率、首轮/最终沙箱通过率、目标测试通过率、新增回归数、弃权误放行数；`--check` 在硬阈值或基线退化时退出 1，`--write-baseline` 仅在无违规时晋升基线，`--write-quality-bar` 仅在 holdout 双门槛（Schema ≥90%、沙箱 ≥85%）达标时写 `data/model_quality_bar.json`。
+- [x] 确定性 PR 门禁：`scripts/eval_gate.py`（`aiops_agent/eval_datasets.py`）校验数据集门槛与版本哈希、安全回归夹具拦截、代码根因放行，不调用模型；已接入 `ci.yml` 的 `eval-gate` job 并作为隔离集成的前置。
+- [x] 运行节奏：`.github/workflows/eval-daily.yml` 每日 UTC 18:00 与模型/提示词/数据集变更时触发；固定在 `self-hosted, aiops-eval` 评测机执行，Ollama 或模型缺失时显式失败并给出修复命令，不静默跳过。
+- [x] 单测覆盖：`test_gate_decision`（18）、`test_model_routing`（17）、`test_evalkit`（24）、`test_eval_datasets`（21）、`test_workflow_composite_gate`（9）；含降级、证据非 OK、非代码根因、缺文件、未达质量门槛、空分母指标、基线不兼容与破损数据集。
+- [x] 冒烟实测（本机 Ollama `qwen3:8b`）：S08 单样本模型返回 `TimeoutError`（关键词未命中），但摘要含「连接池耗尽」触发基础设施拦截，路由 runbook，`gate1:composite:blocked:non_code_root_cause:infrastructure`；弃权集 AB01/AB23 组合判据均正确拦截且误放行 0。
+- [ ] 27B holdout 完整评测（17 条修复 + 14 条弃权 + 26 条根因）需在评测机执行；未产出报告前 `data/model_quality_bar.json` 保持缺省，release 策略按设计一律转人工。
+- [ ] `data/eval_baseline.json` 待首个 holdout 全绿报告 `--write-baseline` 晋升后入库；当前报告结论为 `baseline_missing`（硬阈值仍生效）。
+- [ ] 自托管 `aiops-eval` runner 注册与首次每日任务实跑记录需在部署环境回填。
+
 后续里程碑在此文件追加实测结果；未执行的真实环境项目不得标记完成。

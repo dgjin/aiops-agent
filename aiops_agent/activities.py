@@ -425,6 +425,63 @@ async def retrieve_similar_fixes(alert: Alert, root_cause: RootCause) -> list[di
 
 
 @activity.defn
+async def assess_fix_scope(
+    alert: Alert, root_cause: RootCause, options: dict | None = None
+) -> dict:
+    """M3：组合放行判据的「范围/路由」输入（纯本地，无网络）。
+
+    解析修复仓库并逐个确认嫌疑文件可定位（复用 ``locate_target_file`` 的确定性
+    模糊匹配，兼容 ``src/order/service.py → order_service.py`` 这类仓库差异），
+    同时给出修复模型路由结论（是否达 holdout 质量门槛）。
+
+    任何异常都走安全侧：``scope_known=False`` / 文件记入 missing，由工作流转人工。
+    """
+    from . import code_rag, fix_agent, model_routing
+
+    await _tiny_delay()
+    opts = options or {}
+    repo_dir = _resolve_repo_dir(alert.service)
+    root = Path(repo_dir) if repo_dir else code_rag.DEFAULT_REPO_DIR
+    scope_known = bool(root and root.is_dir())
+    found: list[str] = []
+    missing: list[str] = []
+    for suspect in root_cause.suspect_files or []:
+        try:
+            target = fix_agent.locate_target_file([suspect], root) if scope_known else None
+        except Exception as exc:  # noqa: BLE001 - 定位异常按未找到处理（安全侧）
+            log.warning("[scope] 嫌疑文件定位失败 %s: %s", suspect, exc)
+            target = None
+        (found if target else missing).append(suspect)
+
+    quality_path = str(opts.get("quality_bar_path") or "")
+    quality_bar = model_routing.load_quality_bar(quality_path or None)
+    routing = model_routing.route_fix(
+        root_cause.suspect_files,
+        quality_bar=quality_bar,
+        require_quality_bar=bool(opts.get("require_quality_bar", False)),
+        prefer_qoder_for_multi_file=bool(opts.get("prefer_qoder_for_multi_file", True)),
+    )
+    log.info(
+        "[scope] 服务=%s 仓库=%s 已定位=%s 未定位=%s 路由=%s:%s（达标=%s，原因=%s）",
+        alert.service,
+        root,
+        found or "-",
+        missing or "-",
+        routing.provider,
+        routing.model,
+        routing.qualified,
+        routing.reason,
+    )
+    return {
+        "repo_dir": str(root),
+        "scope_known": scope_known,
+        "files_found": found,
+        "files_missing": missing,
+        "routing": routing.to_dict(),
+    }
+
+
+@activity.defn
 async def generate_patch(
     alert: Alert,
     root_cause: RootCause,

@@ -5,6 +5,17 @@ release_gate:
   triage:
     confidence_threshold: 0.8     # 闸门 1：根因置信度低于阈值转人工（设计方案 4.2）
     max_fix_retries: 2            # 补丁回炉重试上限（防 token/资源雪崩）
+    # M3 组合放行判据：证据 OK、Schema 有效、代码根因、嫌疑文件可定位才放行；
+    # 基础设施/配置/证书/DNS 等非代码根因走人工/Runbook，不生成代码补丁。
+    composite_gate:
+      enabled: true
+      require_suspect_files: true
+    # M3 模型路由：生产未在质量证据文件（holdout 门槛）中达标的模型一律转人工/排队，
+    # 不静默降级；证据由 eval_fix.py --write-quality-bar 在门槛达标时生成。
+    fix_routing:
+      require_quality_bar: true
+      quality_bar_path: ./data/model_quality_bar.json
+      prefer_qoder_for_multi_file: true
   approval:
     timeout: 30m                  # 超时自动驳回（锁定）
     on_timeout: reject

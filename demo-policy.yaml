@@ -5,6 +5,15 @@ release_gate:
   triage:
     confidence_threshold: 0.8
     max_fix_retries: 2
+    # M3 组合放行判据：证据/Schema/根因类型/嫌疑文件必须同时满足（演示启用）
+    composite_gate:
+      enabled: true
+      require_suspect_files: true
+    # M3 模型路由：演示不强制质量门槛（生产必须为 true）
+    fix_routing:
+      require_quality_bar: false
+      quality_bar_path: ./data/model_quality_bar.json
+      prefer_qoder_for_multi_file: true
   approval:
     timeout: 300s                 # 演示缩短：300 秒
     on_timeout: reject

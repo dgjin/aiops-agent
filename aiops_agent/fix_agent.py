@@ -39,7 +39,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-from . import code_rag
+from . import code_rag, model_routing
 from .models import Alert, Patch, RootCause
 from .triage import DEFAULT_MODEL, call_ollama, strip_code_fence
 
@@ -647,6 +647,8 @@ def run_fix(
         "reason": "",
         "generations": 0,
         "elapsed_seconds": 0.0,
+        # M3 模型路由标签：tier / qualified / multi_file（不改既有 provider/model 解析）
+        "routing": model_routing.describe_for_meta(provider, used_model, root_cause.suspect_files),
     }
     start = time.monotonic()
     desc = alert.description.lower()

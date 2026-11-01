@@ -36,6 +36,7 @@ from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
     from . import activities
+    from . import gate_decision
     from .models import (
         Alert,
         CanaryResult,
@@ -273,6 +274,54 @@ class AIOpsFixWorkflow:
                 f"闸门1：根因置信度 {root_cause.confidence:.2f} 低于阈值 {threshold}，转人工",
             )
             return self._final(alert, root_cause, None, None, started)
+
+        # 闸门 1（M3 组合判据，patched 守护）：
+        # 置信度通过后，再校验证据/根因类型/嫌疑文件/模型路由（只收紧不放松）。
+        # 非代码根因（基础设施/配置/证书/DNS 等）转 Runbook，不生成代码补丁。
+        composite_cfg = triage_cfg.get("composite_gate") or {}
+        if workflow.patched("composite-gate-v1") and composite_cfg.get("enabled", False):
+            routing_cfg = triage_cfg.get("fix_routing") or {}
+            scope = await self._call(
+                activities.assess_fix_scope,
+                alert,
+                root_cause,
+                {
+                    "require_quality_bar": bool(routing_cfg.get("require_quality_bar", False)),
+                    "quality_bar_path": str(routing_cfg.get("quality_bar_path", "")),
+                    "prefer_qoder_for_multi_file": bool(
+                        routing_cfg.get("prefer_qoder_for_multi_file", True)
+                    ),
+                },
+            )
+            quality = (evidence or {}).get("quality") or {}
+            decision = gate_decision.decide(
+                confidence=root_cause.confidence,
+                threshold=threshold,
+                error_type=root_cause.error_type,
+                summary=root_cause.summary,
+                suspect_files=root_cause.suspect_files,
+                evidence_status=str(quality.get("status") or ""),
+                files_found=scope.get("files_found") or [],
+                files_missing=scope.get("files_missing") or [],
+                scope_known=bool(scope.get("scope_known", False)),
+                require_suspect_files=bool(composite_cfg.get("require_suspect_files", True)),
+                routing=scope.get("routing"),
+            )
+            self._gate_events.extend(decision.events())
+            if not decision.allowed:
+                self.stage = "ESCALATED"
+                detail = "；".join(
+                    gate_decision.reason_label(reason["code"])
+                    for reason in decision.reasons
+                    if reason["severity"] == "block"
+                )
+                target = "Runbook" if decision.route == gate_decision.ROUTE_RUNBOOK else "人工"
+                await self._call(
+                    activities.escalate_to_human,
+                    alert,
+                    _clip_event_text(f"闸门1（组合判据）：{detail}，转{target}", 400),
+                )
+                return self._final(alert, root_cause, None, None, started)
 
         # 闸门 1 通过：修复 → 验证 → 审批 → 发布（与需求流程共用的公共链路）
         return await self._fix_to_release(alert, root_cause, started)

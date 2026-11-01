@@ -30,6 +30,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from aiops_agent import db as db_layer
+from aiops_agent import gate_decision
 from aiops_agent import mode
 
 DATA_DIR = mode.data_root()  # 演示为 <repo>/data（与 monitored_apps 同口径）
@@ -123,6 +124,9 @@ def auto_reason_from_events(gate_events: list[str] | None) -> str:
         if event.startswith("evidence:blocked:"):
             status = event.split(":", 2)[2]
             return f"证据预检：{evidence_labels.get(status, status)}（{status}）"
+        if event.startswith("gate1:composite:blocked:"):
+            code = event.split("gate1:composite:blocked:", 1)[1]
+            return f"闸门1（组合判据）：{gate_decision.reason_label(code)}"
         if event.startswith("gate1:blocked"):
             detail = event.split(":", 2)[-1]
             return f"闸门1：根因置信度不足（{detail}）"
@@ -152,6 +156,8 @@ def category_from_events(gate_events: list[str] | None) -> str:
         if event.startswith("evidence:blocked:"):
             status = event.split(":", 2)[2]
             return "evidence" if status == "INSUFFICIENT_SIGNAL" else "observability"
+        if event.startswith("gate1:composite:blocked:"):
+            return "model"
         if event.startswith("gate1:blocked"):
             return "model"
         if event.startswith("gate2"):

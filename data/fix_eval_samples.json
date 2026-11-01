@@ -1,10 +1,7 @@
 {
   "description": "P1-5 评测扩样：fix 评测夹具仓库（data/fix_eval_repo）的 33 个真实可修复样本。description 不得包含演示分支标记词（low-conf/protected/test-fail 等），否则会被确定性短路。沙箱口径：fix_target_tests 转为通过且不得引入基线之外的失败用例（baseline_failed_tests = 全部基线失败 - 本人目标）。",
-  "generated_by": "scripts/gen_fix_eval_samples.py",
-  "generated_at": "2026-10-06 17:42:25",
-  "repo_dir": "data/fix_eval_repo",
-  "baseline_total_tests": 52,
-  "baseline_failed_count": 32,
+  "schema_version": "v2",
+  "dataset_version": "05987e0a79ab",
   "samples": [
     {
       "id": "F01",
@@ -59,7 +56,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "holdout"
     },
     {
       "id": "F02",
@@ -113,7 +111,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "dev"
     },
     {
       "id": "F03",
@@ -168,7 +167,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "holdout"
     },
     {
       "id": "F04",
@@ -223,7 +223,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "dev"
     },
     {
       "id": "F05",
@@ -278,7 +279,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "holdout"
     },
     {
       "id": "F06",
@@ -333,7 +335,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "dev"
     },
     {
       "id": "F07",
@@ -388,7 +391,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "holdout"
     },
     {
       "id": "F08",
@@ -443,7 +447,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "dev"
     },
     {
       "id": "F09",
@@ -498,7 +503,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "holdout"
     },
     {
       "id": "F10",
@@ -553,7 +559,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "dev"
     },
     {
       "id": "F11",
@@ -608,7 +615,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "holdout"
     },
     {
       "id": "F12",
@@ -663,7 +671,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "dev"
     },
     {
       "id": "F13",
@@ -718,7 +727,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "holdout"
     },
     {
       "id": "F14",
@@ -773,7 +783,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "dev"
     },
     {
       "id": "F15",
@@ -828,7 +839,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "holdout"
     },
     {
       "id": "F16",
@@ -883,7 +895,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "dev"
     },
     {
       "id": "F17",
@@ -938,7 +951,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "holdout"
     },
     {
       "id": "F18",
@@ -993,7 +1007,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "dev"
     },
     {
       "id": "F19",
@@ -1048,7 +1063,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "holdout"
     },
     {
       "id": "F20",
@@ -1103,7 +1119,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "dev"
     },
     {
       "id": "F21",
@@ -1158,7 +1175,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "holdout"
     },
     {
       "id": "F22",
@@ -1213,7 +1231,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "dev"
     },
     {
       "id": "F23",
@@ -1268,7 +1287,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "holdout"
     },
     {
       "id": "F24",
@@ -1323,7 +1343,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "dev"
     },
     {
       "id": "F25",
@@ -1378,7 +1399,8 @@
         "test_submit_without_coupon_code",
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected"
-      ]
+      ],
+      "split": "holdout"
     },
     {
       "id": "F26",
@@ -1433,7 +1455,8 @@
         "test_submit_without_coupon_code",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "dev"
     },
     {
       "id": "F27",
@@ -1488,7 +1511,8 @@
         "test_submit_without_coupon_code",
         "test_window_minutes_to_seconds",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "holdout"
     },
     {
       "id": "F28",
@@ -1543,7 +1567,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "dev"
     },
     {
       "id": "F29",
@@ -1598,7 +1623,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "holdout"
     },
     {
       "id": "F30",
@@ -1653,7 +1679,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "dev"
     },
     {
       "id": "F31",
@@ -1708,7 +1735,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "holdout"
     },
     {
       "id": "F32",
@@ -1763,7 +1791,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "dev"
     },
     {
       "id": "F33",
@@ -1818,7 +1847,8 @@
         "test_window_minutes_to_seconds",
         "test_window_negative_duration_rejected",
         "test_window_right_open_interval"
-      ]
+      ],
+      "split": "holdout"
     }
   ]
 }

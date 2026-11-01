@@ -38,6 +38,7 @@ _ACTIVITY_LIST = [
     activities.archive_evidence,
     activities.analyze_root_cause,
     activities.retrieve_similar_fixes,
+    activities.assess_fix_scope,
     activities.generate_patch,
     activities.run_tests_in_sandbox,
     activities.create_merge_request,

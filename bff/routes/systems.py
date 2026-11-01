@@ -17,6 +17,8 @@ import re
 
 from fastapi import APIRouter, Query
 
+from aiops_agent import gate_decision
+
 from .. import monitored_apps as store
 from ..deps import ApiError, gw, ok
 from .flows import overview_payload
@@ -93,6 +95,14 @@ def _translate_gate_event(event: str) -> dict:
     if event.startswith("gate1:blocked"):
         detail = event[len("gate1:blocked") :].lstrip(":")
         return {"text": f"闸门1（置信度把关）拦截：{detail or '低于阈值'}", "tone": "danger"}
+    if event == "gate1:composite:pass":
+        return {"text": "闸门1（组合判据）通过：证据/结构/根因类型/嫌疑文件均满足", "tone": "ok"}
+    if event.startswith("gate1:composite:blocked:"):
+        code = event[len("gate1:composite:blocked:") :]
+        return {
+            "text": f"闸门1（组合判据）拦截：{gate_decision.reason_label(code)}",
+            "tone": "danger",
+        }
     if event.startswith("tests:passed"):
         return {"text": f"沙箱测试通过{_attempt_label(event)}", "tone": "ok"}
     if event.startswith("tests:failed"):

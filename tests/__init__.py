@@ -117,7 +117,8 @@ def _production_guard(event, args):
                 fixture = path.is_relative_to(REPO_ROOT / "data" / "fix_eval_repo") or path in {
                     REPO_ROOT / "data" / name for name in ("fix_eval_samples.json", "fix_eval_report.json",
                                                          "triage_eval_samples.json", "triage_eval_report.json",
-                                                         "historical_tickets.json")
+                                                         "fix_eval_abstain_samples.json", "eval_baseline.json",
+                                                         "model_quality_bar.json", "historical_tickets.json")
                 }
                 writing = event != "open" or (isinstance(args[1], str) and any(c in args[1] for c in "wax+"))
                 if event == "open" and isinstance(args[2], int):

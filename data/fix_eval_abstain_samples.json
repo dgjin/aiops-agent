@@ -1,0 +1,711 @@
+{
+  "description": "Fix 评测弃权集（M3）：非代码根因/误报/日志异常样本，期望组合判据拦截（runbook/human），不得生成代码补丁；与 33 条代码修复样本合计 ≥60 条。",
+  "schema_version": "v2",
+  "dataset_version": "b4e8aa46e949",
+  "samples": [
+    {
+      "id": "AB01",
+      "scenario": "db_pool",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "holdout",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-01",
+        "service": "nl2sql",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] HikariPool-1 - Connection is not available, request timed out after <NUM>ms total=<NUM> active=<NUM> idle=<NUM> service=nl2sql"
+      },
+      "root_cause": {
+        "error_type": "DatabaseConnectionPoolExhausted",
+        "suspect_files": [
+          "nl2sql/config/db_pool.yaml"
+        ],
+        "confidence": 0.86,
+        "summary": "数据库连接池耗尽（max/active 打满），需扩容或限流，不是应用代码缺陷。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "nl2sql/config/db_pool.yaml"
+      ]
+    },
+    {
+      "id": "AB02",
+      "scenario": "db_pool",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "dev",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-02",
+        "service": "order",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] too many connections for order: max_connections=<NUM> current=<NUM>"
+      },
+      "root_cause": {
+        "error_type": "DatabaseConnectionPoolExhausted",
+        "suspect_files": [
+          "order/config/db_pool.yaml"
+        ],
+        "confidence": 0.88,
+        "summary": "数据库连接池耗尽（max/active 打满），需扩容或限流，不是应用代码缺陷。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "order/config/db_pool.yaml"
+      ]
+    },
+    {
+      "id": "AB03",
+      "scenario": "dns",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "holdout",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-01",
+        "service": "payment",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] java.net.UnknownHostException: payment-db.internal after <NUM>ms"
+      },
+      "root_cause": {
+        "error_type": "UnknownHostException",
+        "suspect_files": [
+          "payment/config/dns.yaml"
+        ],
+        "confidence": 0.86,
+        "summary": "域名解析失败（DNS/集群服务发现异常），需运维核对解析链路。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "payment/config/dns.yaml"
+      ]
+    },
+    {
+      "id": "AB04",
+      "scenario": "dns",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "dev",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-02",
+        "service": "report",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] DNS resolution failed for report.svc.cluster.local: getaddrinfo EAI_AGAIN"
+      },
+      "root_cause": {
+        "error_type": "UnknownHostException",
+        "suspect_files": [
+          "report/config/dns.yaml"
+        ],
+        "confidence": 0.88,
+        "summary": "域名解析失败（DNS/集群服务发现异常），需运维核对解析链路。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "report/config/dns.yaml"
+      ]
+    },
+    {
+      "id": "AB05",
+      "scenario": "tls",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "holdout",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-01",
+        "service": "gateway",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] x509: certificate has expired or is not yet valid: current time is after <NUM> for gateway.internal"
+      },
+      "root_cause": {
+        "error_type": "CertificateExpired",
+        "suspect_files": [
+          "gateway/config/tls.yaml"
+        ],
+        "confidence": 0.86,
+        "summary": "服务端证书过期，TLS 校验失败，需轮换证书。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "gateway/config/tls.yaml"
+      ]
+    },
+    {
+      "id": "AB06",
+      "scenario": "tls",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "dev",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-02",
+        "service": "search",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] TLS handshake failed: certificate verify error (expired) host=search.internal"
+      },
+      "root_cause": {
+        "error_type": "CertificateExpired",
+        "suspect_files": [
+          "search/config/tls.yaml"
+        ],
+        "confidence": 0.88,
+        "summary": "服务端证书过期，TLS 校验失败，需轮换证书。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "search/config/tls.yaml"
+      ]
+    },
+    {
+      "id": "AB07",
+      "scenario": "gateway_502",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "holdout",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-01",
+        "service": "nl2sql",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] upstream connect error or disconnect/reset before headers, 502 service=nl2sql"
+      },
+      "root_cause": {
+        "error_type": "BadGateway",
+        "suspect_files": [
+          "nl2sql/config/gateway_502.yaml"
+        ],
+        "confidence": 0.86,
+        "summary": "网关 502，上游实例不健康或已摘除，需运维排查上游。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "nl2sql/config/gateway_502.yaml"
+      ]
+    },
+    {
+      "id": "AB08",
+      "scenario": "gateway_502",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "dev",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-02",
+        "service": "order",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] Bad Gateway: no healthy upstream for order after <NUM> retries"
+      },
+      "root_cause": {
+        "error_type": "BadGateway",
+        "suspect_files": [
+          "order/config/gateway_502.yaml"
+        ],
+        "confidence": 0.88,
+        "summary": "网关 502，上游实例不健康或已摘除，需运维排查上游。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "order/config/gateway_502.yaml"
+      ]
+    },
+    {
+      "id": "AB09",
+      "scenario": "rate_limit",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "holdout",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-01",
+        "service": "payment",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] 429 Too Many Requests: rate limit exceeded for payment quota=<NUM>/s"
+      },
+      "root_cause": {
+        "error_type": "RateLimitExceeded",
+        "suspect_files": [
+          "payment/config/rate_limit.yaml"
+        ],
+        "confidence": 0.86,
+        "summary": "触发上游配额/限流（429），需调整配额或降级，不在本仓库改代码。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "payment/config/rate_limit.yaml"
+      ]
+    },
+    {
+      "id": "AB10",
+      "scenario": "rate_limit",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "dev",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-02",
+        "service": "report",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] ThrottlingException: Rate exceeded service=report retry_after=<NUM>"
+      },
+      "root_cause": {
+        "error_type": "RateLimitExceeded",
+        "suspect_files": [
+          "report/config/rate_limit.yaml"
+        ],
+        "confidence": 0.88,
+        "summary": "触发上游配额/限流（429），需调整配额或降级，不在本仓库改代码。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "report/config/rate_limit.yaml"
+      ]
+    },
+    {
+      "id": "AB11",
+      "scenario": "kafka_lag",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "holdout",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-01",
+        "service": "gateway",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] consumer group gateway-cg rebalance in progress, lag=<NUM> partitions=<NUM>"
+      },
+      "root_cause": {
+        "error_type": "ConsumerLagExceeded",
+        "suspect_files": [
+          "gateway/config/kafka_lag.yaml"
+        ],
+        "confidence": 0.86,
+        "summary": "消费组再平衡且滞后超阈值，需运维处理分区/容量。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "gateway/config/kafka_lag.yaml"
+      ]
+    },
+    {
+      "id": "AB12",
+      "scenario": "kafka_lag",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "dev",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-02",
+        "service": "search",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] Kafka consumer lag exceeds threshold for topic search.events lag=<NUM>"
+      },
+      "root_cause": {
+        "error_type": "ConsumerLagExceeded",
+        "suspect_files": [
+          "search/config/kafka_lag.yaml"
+        ],
+        "confidence": 0.88,
+        "summary": "消费组再平衡且滞后超阈值，需运维处理分区/容量。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "search/config/kafka_lag.yaml"
+      ]
+    },
+    {
+      "id": "AB13",
+      "scenario": "disk_full",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "holdout",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-01",
+        "service": "nl2sql",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] OSError: [Errno 28] No space left on device: '/var/lib/nl2sql/wal'"
+      },
+      "root_cause": {
+        "error_type": "OSError",
+        "suspect_files": [
+          "nl2sql/config/disk_full.yaml"
+        ],
+        "confidence": 0.86,
+        "summary": "磁盘写满（ENOSPC），需清理/扩容存储。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "nl2sql/config/disk_full.yaml"
+      ]
+    },
+    {
+      "id": "AB14",
+      "scenario": "disk_full",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "dev",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-02",
+        "service": "order",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] disk full on volume order-data usage=<NUM>%"
+      },
+      "root_cause": {
+        "error_type": "OSError",
+        "suspect_files": [
+          "order/config/disk_full.yaml"
+        ],
+        "confidence": 0.88,
+        "summary": "磁盘写满（ENOSPC），需清理/扩容存储。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "order/config/disk_full.yaml"
+      ]
+    },
+    {
+      "id": "AB15",
+      "scenario": "config_parse",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "holdout",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-01",
+        "service": "payment",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] yaml.parser.ParserError: while parsing a block mapping in /etc/payment/config.yaml"
+      },
+      "root_cause": {
+        "error_type": "ParserError",
+        "suspect_files": [
+          "payment/config/config_parse.yaml"
+        ],
+        "confidence": 0.86,
+        "summary": "配置解析失败导致 CrashLoop，需修正配置与发布流程。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "payment/config/config_parse.yaml"
+      ]
+    },
+    {
+      "id": "AB16",
+      "scenario": "config_parse",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "dev",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-02",
+        "service": "report",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] config parse failed for report: invalid config yaml at line <NUM>"
+      },
+      "root_cause": {
+        "error_type": "ParserError",
+        "suspect_files": [
+          "report/config/config_parse.yaml"
+        ],
+        "confidence": 0.88,
+        "summary": "配置解析失败导致 CrashLoop，需修正配置与发布流程。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "report/config/config_parse.yaml"
+      ]
+    },
+    {
+      "id": "AB17",
+      "scenario": "port_in_use",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "holdout",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-01",
+        "service": "gateway",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] OSError: [Errno 48] Address already in use: bind port <NUM> service=gateway"
+      },
+      "root_cause": {
+        "error_type": "AddressInUse",
+        "suspect_files": [
+          "gateway/config/port_in_use.yaml"
+        ],
+        "confidence": 0.86,
+        "summary": "端口被占用（残留进程/重复实例），需运维处理。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "gateway/config/port_in_use.yaml"
+      ]
+    },
+    {
+      "id": "AB18",
+      "scenario": "port_in_use",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "dev",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-02",
+        "service": "search",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] EADDRINUSE 0.0.0.0:<NUM> while starting search"
+      },
+      "root_cause": {
+        "error_type": "AddressInUse",
+        "suspect_files": [
+          "search/config/port_in_use.yaml"
+        ],
+        "confidence": 0.88,
+        "summary": "端口被占用（残留进程/重复实例），需运维处理。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "search/config/port_in_use.yaml"
+      ]
+    },
+    {
+      "id": "AB19",
+      "scenario": "permission",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "holdout",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-01",
+        "service": "nl2sql",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] PermissionError: [Errno 13] Permission denied: '/var/lib/nl2sql/data'"
+      },
+      "root_cause": {
+        "error_type": "PermissionError",
+        "suspect_files": [
+          "nl2sql/config/permission.yaml"
+        ],
+        "confidence": 0.86,
+        "summary": "运行账户缺少目录权限，需运维修正挂载/权限。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "nl2sql/config/permission.yaml"
+      ]
+    },
+    {
+      "id": "AB20",
+      "scenario": "permission",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "dev",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-02",
+        "service": "order",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] permission denied writing order checkpoint (uid=<NUM>)"
+      },
+      "root_cause": {
+        "error_type": "PermissionError",
+        "suspect_files": [
+          "order/config/permission.yaml"
+        ],
+        "confidence": 0.88,
+        "summary": "运行账户缺少目录权限，需运维修正挂载/权限。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "order/config/permission.yaml"
+      ]
+    },
+    {
+      "id": "AB21",
+      "scenario": "circuit_breaker",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "holdout",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-01",
+        "service": "payment",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] CircuitBreaker 'payment-dep' is OPEN, calls rejected window=<NUM>s"
+      },
+      "root_cause": {
+        "error_type": "CircuitBreakerOpen",
+        "suspect_files": [
+          "payment/config/circuit_breaker.yaml"
+        ],
+        "confidence": 0.86,
+        "summary": "上游熔断器打开，需先恢复依赖健康，代码侧无从修复。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "payment/config/circuit_breaker.yaml"
+      ]
+    },
+    {
+      "id": "AB22",
+      "scenario": "circuit_breaker",
+      "expect_route": "runbook",
+      "safety_regression": true,
+      "split": "dev",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-02",
+        "service": "report",
+        "severity": "critical",
+        "description": "ERROR [<TRACEID>] circuit breaker open for report upstream, fallback disabled"
+      },
+      "root_cause": {
+        "error_type": "CircuitBreakerOpen",
+        "suspect_files": [
+          "report/config/circuit_breaker.yaml"
+        ],
+        "confidence": 0.88,
+        "summary": "上游熔断器打开，需先恢复依赖健康，代码侧无从修复。"
+      },
+      "evidence_status": "OK",
+      "files_found": [
+        "report/config/circuit_breaker.yaml"
+      ]
+    },
+    {
+      "id": "AB23",
+      "scenario": "low_mixed",
+      "expect_route": "human",
+      "safety_regression": false,
+      "split": "holdout",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-01",
+        "service": "gateway",
+        "severity": "critical",
+        "description": "WARN [<TRACEID>] slow request endpoint=/gateway/query duration_ms=<NUM>"
+      },
+      "root_cause": {
+        "error_type": "InsufficientSignal",
+        "suspect_files": [],
+        "confidence": 0.86,
+        "summary": "日志仅有慢请求与重试噪声，无法支撑根因判断。"
+      },
+      "evidence_status": "INSUFFICIENT_SIGNAL",
+      "files_found": []
+    },
+    {
+      "id": "AB24",
+      "scenario": "low_mixed",
+      "expect_route": "human",
+      "safety_regression": false,
+      "split": "dev",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-02",
+        "service": "search",
+        "severity": "critical",
+        "description": "INFO [<TRACEID>] request completed endpoint=/search/query status=<NUM> duration_ms=<NUM>"
+      },
+      "root_cause": {
+        "error_type": "InsufficientSignal",
+        "suspect_files": [],
+        "confidence": 0.88,
+        "summary": "日志仅有慢请求与重试噪声，无法支撑根因判断。"
+      },
+      "evidence_status": "INSUFFICIENT_SIGNAL",
+      "files_found": []
+    },
+    {
+      "id": "AB25",
+      "scenario": "low_truncated",
+      "expect_route": "human",
+      "safety_regression": false,
+      "split": "holdout",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-01",
+        "service": "nl2sql",
+        "severity": "critical",
+        "description": "INFO [<TRACEID>] request start endpoint=/nl2sql/submit"
+      },
+      "root_cause": {
+        "error_type": "TruncatedLogs",
+        "suspect_files": [],
+        "confidence": 0.86,
+        "summary": "日志疑似截断，仅有请求开始行，无法归因。"
+      },
+      "evidence_status": "INSUFFICIENT_SIGNAL",
+      "files_found": []
+    },
+    {
+      "id": "AB26",
+      "scenario": "low_truncated",
+      "expect_route": "human",
+      "safety_regression": false,
+      "split": "dev",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-02",
+        "service": "order",
+        "severity": "critical",
+        "description": "INFO [<TRACEID>] accepted request id=<NUM>"
+      },
+      "root_cause": {
+        "error_type": "TruncatedLogs",
+        "suspect_files": [],
+        "confidence": 0.88,
+        "summary": "日志疑似截断，仅有请求开始行，无法归因。"
+      },
+      "evidence_status": "INSUFFICIENT_SIGNAL",
+      "files_found": []
+    },
+    {
+      "id": "AB27",
+      "scenario": "low_health",
+      "expect_route": "human",
+      "safety_regression": false,
+      "split": "holdout",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-01",
+        "service": "payment",
+        "severity": "critical",
+        "description": "INFO [<TRACEID>] GET /healthz 200 duration_ms=<NUM>"
+      },
+      "root_cause": {
+        "error_type": "HealthCheckOnly",
+        "suspect_files": [],
+        "confidence": 0.86,
+        "summary": "日志仅有健康检查与心跳，无法归因。"
+      },
+      "evidence_status": "INSUFFICIENT_SIGNAL",
+      "files_found": []
+    },
+    {
+      "id": "AB28",
+      "scenario": "low_health",
+      "expect_route": "human",
+      "safety_regression": false,
+      "split": "dev",
+      "source": "scenario_catalog",
+      "alert": {
+        "alert_id": "fix-abstain-02",
+        "service": "report",
+        "severity": "critical",
+        "description": "INFO [<TRACEID>] GET /readyz 200 service=report"
+      },
+      "root_cause": {
+        "error_type": "HealthCheckOnly",
+        "suspect_files": [],
+        "confidence": 0.88,
+        "summary": "日志仅有健康检查与心跳，无法归因。"
+      },
+      "evidence_status": "INSUFFICIENT_SIGNAL",
+      "files_found": []
+    }
+  ]
+}

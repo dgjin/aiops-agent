@@ -50,6 +50,30 @@ jobs:
       - name: Offline CI isolation contract
         run: .venv/bin/python scripts/ci_integration.py --check
 
+  eval-gate:
+    name: Deterministic eval gate (datasets + safety fixtures)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHON_DOTENV_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m venv .venv
+          .venv/bin/python -m pip --isolated install --index-url https://pypi.org/simple --require-hashes -r requirements-build.lock
+          .venv/bin/python -m pip --isolated install --index-url https://pypi.org/simple --require-hashes --no-build-isolation --only-binary=:all: --no-binary=drain3 -r requirements-ci.lock
+      - name: Dataset integrity + safety regression fixtures (no model)
+        run: .venv/bin/python scripts/eval_gate.py --json "$RUNNER_TEMP/eval-gate.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-gate
+          path: ${{ runner.temp }}/eval-gate.json
+          if-no-files-found: ignore
+
   web-build:
     name: Frontend tsc + vite
     runs-on: ubuntu-24.04
@@ -115,7 +139,7 @@ jobs:
 
   isolated-integration:
     name: Isolated MySQL / Redis / formal Temporal / shadow workflow
-    needs: [tests, web-build, security-scan, image-security]
+    needs: [tests, web-build, security-scan, image-security, eval-gate]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:

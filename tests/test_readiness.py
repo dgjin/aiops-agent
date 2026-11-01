@@ -349,7 +349,11 @@ class ReadinessCIContractTest(unittest.TestCase):
         workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
         self.assertEqual(workflow["permissions"], {"contents": "read"})
         jobs = workflow["jobs"]
-        self.assertEqual(set(jobs["isolated-integration"]["needs"]), {"tests", "web-build", "security-scan", "image-security"})
+        self.assertEqual(
+            set(jobs["isolated-integration"]["needs"]),
+            {"tests", "web-build", "security-scan", "image-security", "eval-gate"},
+        )
+        self.assertIn("scripts/eval_gate.py", str(jobs["eval-gate"]))
         for job in jobs.values():
             self.assertNotIn("continue-on-error", job)
             for step in job["steps"]:

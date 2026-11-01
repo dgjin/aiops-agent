@@ -32,8 +32,11 @@ data/*
 data/fix_eval_repo/**/__pycache__/
 !data/fix_eval_samples.json
 !data/fix_eval_report.json
+!data/fix_eval_abstain_samples.json
 !data/triage_eval_samples.json
 !data/triage_eval_report.json
+!data/eval_baseline.json
+!data/model_quality_bar.json
 
 # 运行日志（含 rotate-logs.sh 轮转产物 *.log.N.gz）
 *.log
