@@ -233,6 +233,16 @@ class RequiredRoleTest(unittest.TestCase):
         """IM 通道（ChatOps）：通道级 viewer，命令级权限（发送者角色）在路由内判定。"""
         self.assertEqual(app.required_role("POST", "/api/im/command"), "viewer")
 
+    def test_escalation_actions_roles(self):
+        """转人工处置：指派/计划/关闭/重试 operator；知识审核（入索引）仅 admin。"""
+        for action in ("assign", "plan", "close", "retry"):
+            self.assertEqual(
+                app.required_role("POST", f"/api/escalations/esc-1/{action}"), "operator", action
+            )
+        self.assertEqual(
+            app.required_role("POST", "/api/escalations/esc-1/knowledge/review"), "admin"
+        )
+
 
 class ServiceTokenTest(unittest.TestCase):
     """服务令牌旁路：仅精确路径 + GET + 令牌匹配才生效（被监控系统只读集成通道）。"""

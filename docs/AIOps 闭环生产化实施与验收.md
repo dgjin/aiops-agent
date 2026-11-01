@@ -60,4 +60,20 @@
 - [ ] 真实 Loki 供给恢复验证（service/app 标签、近一小时日志量）须在接入环境执行后回填。
 - [ ] 采集进程连续运行 24h 的心跳无中断记录（需部署环境观察）。
 
+### M2 结构化人工处置与审核知识回流
+
+- [x] 关闭记录结构化：`escalations.resolution`（JSON）在既有待办上扩展，不另建平行系统；字段含关闭原因、实际根因、实际处置、验证结果、对智能体判断的评价、知识候选与敏感确认、关闭人/时间，原 `note` 保留。
+- [x] 校验规则：`RESOLVED` 必须填写实际根因 / 实际处置 / 验证结果；其他原因至少给出备注 / 处置 / 根因之一；勾选知识候选必须先确认已检查敏感信息；旧客户端仅传 `note` 时行为不变（`resolution=null`）。
+- [x] 处置计划：`escalations.plan`（VARCHAR(1024)）支持未关闭待办登记下一步动作，允许保持 open，不批量关闭；已关闭待办拒绝修改（含单测）。
+- [x] 迁移 `20261101_0003` 幂等补齐 `resolution` / `plan`，空库、历史库与回退测试通过（`tests/test_migrations.py`）。
+- [x] 知识审核状态机：`DRAFT / APPROVED / REJECTED`；仅管理员可审核（middleware 对 `/api/escalations/*/knowledge/review` 前置 admin 规则）；未解决记录不得批准；撤销后状态为 `REJECTED` 并可重新审核。
+- [x] 审计：`escalation:close` 记录关闭原因 / 评价 / 知识状态；新增 `escalation:plan`、`knowledge:approve|reject|revoke`（含导出结果）。
+- [x] 清洗与导出：`aiops_agent/knowledge.py` 清洗凭据、令牌、内部地址、邮箱与手机号；清洗后仍命中敏感模式的记录整条跳过；原子写 `data/knowledge_records.json`（`AIOPS_KNOWLEDGE_PATH` 可覆盖），保留来源待办与流程 ID。
+- [x] RAG 合并：`code_rag.build_index` 合并 `historical_tickets.json` 与已审核知识（`kind=ticket`），返回并写入 `knowledge` 计数；`index_codebase.py` 新增 `--knowledge`；未审核、已拒绝、撤销、未解决与旧格式记录不入索引。
+- [x] 显式索引：关闭与审核请求只同步导出文件，不触发嵌入或训练；重建由 `index_codebase.py` 手动执行（部署手册 3.4）。
+- [x] 前端：结构化关闭表单（按原因动态校验、候选与敏感确认）、处置计划弹窗、已关闭行「详情 / 审核」入口、三段式对照（智能体判断 vs 实际根因 vs 验证结果）、知识状态徽标与待审核计数。
+- [x] 单测覆盖：关闭校验边界、状态机、敏感确认、计划、旧格式兼容、demo/production（SQLite）roundtrip、路由全链路 `open→close→approve→export→revoke`、清洗幂等、导出原子写、索引合并与未批准不可检索、角色规则。
+- [ ] 预生产/生产环境完成一次 `index_codebase.py` 重建，并验证「已批准可检索、撤销后重建不可检索」的真实索引闭环。
+- [ ] 存量待办（41 条口径）的处理人与处置计划需值班在列表中逐条登记；系统已提供字段与入口，不做批量伪造责任人，也不要求人为清零。
+
 后续里程碑在此文件追加实测结果；未执行的真实环境项目不得标记完成。

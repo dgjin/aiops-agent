@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import tempfile
 import unittest
@@ -45,6 +46,22 @@ def _flow(
             "description": "订单错误率激增",
         },
     }
+
+
+def _resolution_payload(**overrides) -> dict:
+    """结构化关闭请求（M2）：默认一条可入知识库的 RESOLVED 记录。"""
+    payload = {
+        "note": "已扩容连接池并观察 30 分钟",
+        "close_reason": "RESOLVED",
+        "actual_root_cause": "优惠券服务数据库连接池耗尽",
+        "actual_action": "调大连接池上限并滚动重启",
+        "verification": "错误率回落至 0.1% 以下，持续 30 分钟",
+        "verdict": "CORRECT",
+        "knowledge_candidate": True,
+        "sensitive_confirmed": True,
+    }
+    payload.update(overrides)
+    return payload
 
 
 class PureFunctionTest(unittest.TestCase):
@@ -284,6 +301,21 @@ class ProductionDbBackendTest(unittest.TestCase):
         esc.persist_entry(entry)
         due = esc.due_for_re_escalation()
         self.assertEqual([e["id"] for e in due], ["esc-aiops-fix-order-a1"])
+
+    def test_resolution_and_plan_roundtrip_from_db(self) -> None:
+        """M2：resolution(JSON) / plan(VARCHAR) 在 production（SQLite）后端完整往返。"""
+        entry = esc.new_entry(_flow())
+        esc.apply_plan(entry, "先核对 Loki 标签映射", "alice")
+        resolution = esc.build_resolution(_resolution_payload(), "alice")
+        esc.apply_close(entry, "alice", "", resolution)
+        esc.persist_entry(entry)
+
+        loaded = esc.get("esc-aiops-fix-order-a1")
+        self.assertEqual(loaded["plan"], "先核对 Loki 标签映射")
+        self.assertEqual(loaded["resolution"]["close_reason"], "RESOLVED")
+        self.assertEqual(loaded["resolution"]["verdict"], "CORRECT")
+        self.assertEqual(loaded["resolution"]["knowledge_status"], "DRAFT")
+        self.assertEqual(esc.knowledge_status(loaded), "DRAFT")
 
 
 _REQUIREMENT_SESSION = {
@@ -581,6 +613,250 @@ class CategoryBackfillTest(unittest.TestCase):
         self.assertEqual(categories.get("observability"), 1)
 
 
+class ResolutionTest(unittest.TestCase):
+    """结构化关闭（M2）：RESOLVED 三必填 / 其他原因需说明 / 候选需敏感确认 / 状态机。"""
+
+    def test_resolved_requires_root_cause_action_and_verification(self) -> None:
+        for key, label in (
+            ("actual_root_cause", "实际根因"),
+            ("actual_action", "实际处置"),
+            ("verification", "验证结果"),
+        ):
+            with self.subTest(key=key):
+                with self.assertRaises(esc.EscalationStoreError) as ctx:
+                    esc.build_resolution(_resolution_payload(**{key: " "}), "alice")
+                self.assertIn(label, str(ctx.exception))
+
+    def test_other_reason_requires_explanation(self) -> None:
+        with self.assertRaises(esc.EscalationStoreError):
+            esc.build_resolution({"close_reason": "OTHER"}, "alice")
+        resolution = esc.build_resolution(
+            {"close_reason": "FALSE_POSITIVE", "note": "阈值配置错误，已修正"}, "alice"
+        )
+        self.assertEqual(resolution["close_reason"], "FALSE_POSITIVE")
+        self.assertEqual(resolution["knowledge_status"], "")  # 非候选不进入审核队列
+        self.assertEqual(resolution["verdict"], "UNKNOWN")
+
+    def test_candidate_requires_sensitive_confirmation(self) -> None:
+        with self.assertRaises(esc.EscalationStoreError) as ctx:
+            esc.build_resolution(_resolution_payload(sensitive_confirmed=False), "alice")
+        self.assertIn("敏感", str(ctx.exception))
+
+    def test_candidate_starts_as_draft_with_actor_and_timestamp(self) -> None:
+        resolution = esc.build_resolution(_resolution_payload(), "alice")
+        self.assertEqual(resolution["knowledge_status"], "DRAFT")
+        self.assertEqual(resolution["closed_by"], "alice")
+        self.assertEqual(resolution["knowledge_reviewed_by"], "")
+        self.assertTrue(resolution["closed_at"])
+
+    def test_invalid_reason_or_verdict_rejected(self) -> None:
+        with self.assertRaises(esc.EscalationStoreError):
+            esc.build_resolution(_resolution_payload(close_reason="DONE"), "alice")
+        with self.assertRaises(esc.EscalationStoreError):
+            esc.build_resolution(_resolution_payload(verdict="MAYBE"), "alice")
+
+    def test_apply_close_with_resolution_stores_structure(self) -> None:
+        entry = esc.new_entry(_flow())
+        resolution = esc.build_resolution(_resolution_payload(), "alice")
+        esc.apply_close(entry, "alice", "", resolution)
+        self.assertEqual(entry["status"], "closed")
+        self.assertEqual(entry["resolution"]["actual_root_cause"], "优惠券服务数据库连接池耗尽")
+        self.assertEqual(entry["note"], "已扩容连接池并观察 30 分钟")
+        self.assertIn("已修复", entry["history"][-1]["detail"])
+        self.assertEqual(entry["history"][-1]["action"], "close")
+
+    def test_legacy_close_keeps_note_only(self) -> None:
+        """旧客户端（仅备注）不产生结构化记录，也不进入知识候选。"""
+        entry = esc.new_entry(_flow())
+        esc.apply_close(entry, "alice", "手动处理完毕")
+        self.assertIsNone(entry["resolution"])
+        self.assertEqual(entry["note"], "手动处理完毕")
+        self.assertEqual(esc.knowledge_status(entry), "")
+        with self.assertRaises(esc.EscalationStoreError):
+            esc.apply_knowledge_review(entry, "approve", "admin")
+
+    def test_plan_allows_open_entry_and_rejects_closed(self) -> None:
+        entry = esc.new_entry(_flow())
+        esc.apply_plan(entry, "值班核对日志后再重试", "alice")
+        self.assertEqual(entry["plan"], "值班核对日志后再重试")
+        self.assertEqual(entry["status"], "open")
+        self.assertEqual(entry["history"][-1]["action"], "plan")
+        esc.apply_close(entry, "alice", "误报")
+        with self.assertRaises(esc.EscalationStoreError):
+            esc.apply_plan(entry, "x", "alice")
+
+    def test_approve_then_revoke_state_machine(self) -> None:
+        entry = esc.new_entry(_flow())
+        esc.apply_close(
+            entry, "alice", "", esc.build_resolution(_resolution_payload(), "alice")
+        )
+        esc.apply_knowledge_review(entry, "approve", "admin")
+        self.assertEqual(esc.knowledge_status(entry), "APPROVED")
+        self.assertEqual(entry["resolution"]["knowledge_reviewed_by"], "admin")
+        with self.assertRaises(esc.EscalationStoreError):
+            esc.apply_knowledge_review(entry, "approve", "admin")
+
+        esc.apply_knowledge_review(entry, "revoke", "admin", "根因描述不完整")
+        self.assertEqual(esc.knowledge_status(entry), "REJECTED")
+        self.assertEqual(entry["resolution"]["knowledge_reject_reason"], "根因描述不完整")
+        self.assertEqual(entry["history"][-1]["action"], "knowledge:revoke")
+        with self.assertRaises(esc.EscalationStoreError):
+            esc.apply_knowledge_review(entry, "revoke", "admin")
+
+    def test_approve_rejects_unresolved_close(self) -> None:
+        """FALSE_POSITIVE / DUPLICATE 等未解决记录不得进入代码知识库。"""
+        entry = esc.new_entry(_flow())
+        resolution = esc.build_resolution(
+            _resolution_payload(close_reason="DUPLICATE", note="与 esc-1 重复"), "alice"
+        )
+        esc.apply_close(entry, "alice", "", resolution)
+        with self.assertRaises(esc.EscalationStoreError) as ctx:
+            esc.apply_knowledge_review(entry, "approve", "admin")
+        self.assertIn("已修复", str(ctx.exception))
+
+    def test_reject_records_reason(self) -> None:
+        entry = esc.new_entry(_flow())
+        esc.apply_close(
+            entry, "alice", "", esc.build_resolution(_resolution_payload(), "alice")
+        )
+        esc.apply_knowledge_review(entry, "reject", "admin", "含内部系统名")
+        self.assertEqual(esc.knowledge_status(entry), "REJECTED")
+        self.assertEqual(entry["resolution"]["knowledge_reject_reason"], "含内部系统名")
+
+    def test_decorate_exposes_labels(self) -> None:
+        entry = esc.new_entry(_flow())
+        esc.apply_close(
+            entry, "alice", "", esc.build_resolution(_resolution_payload(), "alice")
+        )
+        decorated = esc_routes._decorate(entry)
+        self.assertEqual(decorated["close_reason"], "RESOLVED")
+        self.assertEqual(decorated["close_reason_label"], "已修复")
+        self.assertEqual(decorated["knowledge_status"], "DRAFT")
+        self.assertEqual(decorated["knowledge_label"], "待审核")
+        legacy = esc_routes._decorate(esc.new_entry(_flow(wf_id="wf-legacy")))
+        self.assertIsNone(legacy["resolution"])
+        self.assertEqual(legacy["knowledge_label"], "未提交")
+
+    def test_structured_close_detection(self) -> None:
+        self.assertFalse(esc_routes._is_structured_close({"note": "仅备注"}))
+        self.assertTrue(esc_routes._is_structured_close({"close_reason": "RESOLVED"}))
+        self.assertTrue(esc_routes._is_structured_close({"knowledge_candidate": True}))
+
+
+class CloseReviewRouteTest(unittest.TestCase):
+    """关闭 / 计划 / 知识审核路由（M2）：结构化关闭 → 审核 → 导出全链路。
+
+    索引重建不在请求内触发（显式动作），这里只验证导出语料随审核状态增删。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.knowledge_path = Path(self._tmp.name) / "knowledge_records.json"
+        patchers = [
+            mock.patch.object(esc, "DATA_PATH", Path(self._tmp.name) / "escalations.json"),
+            mock.patch.object(esc_routes.knowledge, "export_path", return_value=self.knowledge_path),
+            mock.patch.object(esc_routes.audit, "write_audit"),
+        ]
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        esc.persist_entry(esc.new_entry(_flow()))
+
+    def _request(self, user: str = "alice"):
+        request = mock.Mock()
+        request.state.identity.user = user
+        return request
+
+    def _close(self, body: dict | None = None) -> dict:
+        return asyncio.run(
+            esc_routes.api_escalation_close(
+                self._request(), "esc-aiops-fix-order-a1", esc_routes.CloseBody(**(body or {}))
+            )
+        )
+
+    def _review(self, decision: str, reason: str = "") -> dict:
+        return asyncio.run(
+            esc_routes.api_escalation_knowledge_review(
+                self._request("admin"),
+                "esc-aiops-fix-order-a1",
+                esc_routes.KnowledgeReviewBody(decision=decision, reason=reason),
+            )
+        )
+
+    def test_structured_close_applies_sensitive_guard(self) -> None:
+        payload = _resolution_payload(sensitive_confirmed=False)
+        with self.assertRaises(ApiError) as ctx:
+            self._close(payload)
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("敏感", ctx.exception.message)
+        self.assertEqual(esc.get("esc-aiops-fix-order-a1")["status"], "open")
+
+    def test_open_close_approve_export_revoke_chain(self) -> None:
+        response = self._close(_resolution_payload())
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["escalation"]["knowledge_label"], "待审核")
+        # 待审核不导出（一次导出会覆盖文件，因此此时导出为空）
+        self.assertEqual(response["knowledge_export"]["exported"], 0)
+
+        approved = self._review("approve")
+        self.assertEqual(approved["escalation"]["knowledge_status"], "APPROVED")
+        self.assertEqual(approved["knowledge_export"]["exported"], 1)
+        records = json.loads(self.knowledge_path.read_text(encoding="utf-8"))
+        self.assertEqual([r["ticket_id"] for r in records], ["esc-aiops-fix-order-a1"])
+
+        revoked = self._review("revoke", "根因描述需补充")
+        self.assertEqual(revoked["escalation"]["knowledge_status"], "REJECTED")
+        self.assertEqual(revoked["knowledge_export"]["exported"], 0)
+        self.assertEqual(json.loads(self.knowledge_path.read_text(encoding="utf-8")), [])
+
+    def test_legacy_close_without_body_keeps_note_only(self) -> None:
+        response = asyncio.run(
+            esc_routes.api_escalation_close(self._request(), "esc-aiops-fix-order-a1", None)
+        )
+        self.assertTrue(response["ok"])
+        self.assertIsNone(response["escalation"]["resolution"])
+        self.assertNotIn("knowledge_export", response)
+
+    def test_plan_route_updates_open_entry(self) -> None:
+        response = asyncio.run(
+            esc_routes.api_escalation_plan(
+                self._request(), "esc-aiops-fix-order-a1", esc_routes.PlanBody(plan="周五前核对标签映射")
+            )
+        )
+        self.assertEqual(response["escalation"]["plan"], "周五前核对标签映射")
+        self.assertEqual(esc.get("esc-aiops-fix-order-a1")["status"], "open")
+
+
+class KnowledgeStatsTest(unittest.TestCase):
+    """知识审核计数（M2）：stats 暴露 draft/approved/rejected，供前端徽标。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        patcher = mock.patch.object(esc, "DATA_PATH", Path(self._tmp.name) / "escalations.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _closed(self, wf_id: str, decision: str | None = None) -> dict:
+        entry = esc.new_entry(_flow(wf_id=wf_id))
+        esc.apply_close(
+            entry, "alice", "", esc.build_resolution(_resolution_payload(), "alice")
+        )
+        if decision:
+            esc.apply_knowledge_review(entry, decision, "admin")
+        esc.persist_entry(entry)
+        return entry
+
+    def test_stats_counts_knowledge_states(self) -> None:
+        self._closed("wf-draft")
+        self._closed("wf-approved", "approve")
+        self._closed("wf-rejected", "reject")
+        esc.persist_entry(esc.new_entry(_flow(wf_id="wf-open")))
+        knowledge = esc.stats()["knowledge"]
+        self.assertEqual(knowledge, {"draft": 1, "approved": 1, "rejected": 1})
+
+
 class WiringTest(unittest.TestCase):
     """接线冒烟：路由挂载与角色规则（防遗漏注册导致 404 / 权限错配）。"""
 
@@ -591,12 +867,25 @@ class WiringTest(unittest.TestCase):
         self.assertIn("/api/escalations", paths)
         self.assertIn("/api/escalations/{esc_id}/assign", paths)
         self.assertIn("/api/escalations/{esc_id}/close", paths)
+        self.assertIn("/api/escalations/{esc_id}/plan", paths)
+        self.assertIn("/api/escalations/{esc_id}/knowledge/review", paths)
         self.assertIn("/api/escalations/{esc_id}/retry", paths)
 
     def test_write_role_rule_present(self) -> None:
         from bff.middleware import _WRITE_ROLE_RULES
 
         self.assertIn(("/api/escalations", "operator"), _WRITE_ROLE_RULES)
+
+    def test_knowledge_review_requires_admin(self) -> None:
+        """知识入库是受控动作：审核端点必须高于 operator 前缀规则。"""
+        from bff.middleware import required_role
+
+        self.assertEqual(
+            required_role("POST", "/api/escalations/esc-x/knowledge/review"), "admin"
+        )
+        self.assertEqual(required_role("POST", "/api/escalations/esc-x/plan"), "operator")
+        self.assertEqual(required_role("POST", "/api/escalations/esc-x/close"), "operator")
+        self.assertEqual(required_role("GET", "/api/escalations"), "viewer")
 
 
 if __name__ == "__main__":

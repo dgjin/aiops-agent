@@ -1,11 +1,15 @@
-"""转人工处置域：/api/escalations*（待办列表 / 指派 / 关闭 / 重试修复）。
+"""转人工处置域：/api/escalations*（待办列表 / 指派 / 处置计划 / 关闭 / 重试修复 / 知识审核）。
 
 读侧每次先做**幂等登记**（sync_from_flows：ESCALATED 流程 → open 待办），
-再返回列表与统计；写侧三动作全部落操作审计（wf_id 记录待办的 wf_id）：
+再返回列表与统计；写侧动作全部落操作审计（wf_id 记录待办的 wf_id）：
     - assign：指派/改派责任人（open/assigned 均可）；
-    - close：处置关闭（备注留档）；
+    - plan：登记未关闭待办的处理计划（允许保持 open，不强制清零）；
+    - close：处置关闭——新客户端提交结构化记录（关闭原因 / 实际根因 / 实际处置 /
+      验证结果 / 对智能体判断的评价），旧客户端仅传备注时行为不变；
     - retry：以**新幂等键**重启修复流程（同 alert_id 的旧流程已存在，不能复用 wf_id），
-      成功后待办自动关闭并注明新流程 ID。
+      成功后待办自动关闭并注明新流程 ID；
+    - knowledge/review：知识审核（approve / reject / revoke，仅管理员），批准后
+      同步导出 ``knowledge_records.json``，索引重建仍需显式执行。
 
 需求来源的 retry 特殊化：待办源于需求修复流（wf_id ``aiops-req-*``，或旧版误按
 告警流重启后级联的 ``req-N-retryM*``）时**重启需求修复流**（沿用批准版方案、
@@ -20,7 +24,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 
-from aiops_agent import app_registry, evidence_store
+from aiops_agent import app_registry, evidence_store, knowledge
 from aiops_agent.models import Alert
 
 from .. import audit, escalations, requirement_analyses
@@ -34,7 +38,29 @@ class AssignBody(BaseModel):
 
 
 class CloseBody(BaseModel):
-    note: str = Field(default="", max_length=500)
+    """结构化关闭请求：新字段全空时按旧客户端处理（仅备注关闭）。
+
+    关闭原因 ``RESOLVED`` 要求三项必填（实际根因 / 实际处置 / 验证结果），由
+    ``escalations.build_resolution`` 统一校验，路由不重复实现规则。
+    """
+
+    note: str = Field(default="", max_length=2000)
+    close_reason: str = Field(default="", max_length=32)
+    actual_root_cause: str = Field(default="", max_length=2000)
+    actual_action: str = Field(default="", max_length=2000)
+    verification: str = Field(default="", max_length=2000)
+    verdict: str = Field(default="", max_length=32)
+    knowledge_candidate: bool = False
+    sensitive_confirmed: bool = False
+
+
+class PlanBody(BaseModel):
+    plan: str = Field(default="", max_length=1000)
+
+
+class KnowledgeReviewBody(BaseModel):
+    decision: str = Field(min_length=1, max_length=16)
+    reason: str = Field(default="", max_length=500)
 
 
 # 需求来源识别：需求流的 alert_id 固定为 ``req-<条目ID>``（workflows.build_requirement_context），
@@ -94,6 +120,32 @@ def _system_map() -> dict[str, dict]:
     }
 
 
+def _sync_knowledge() -> dict:
+    """同步知识导出文件（关闭/审核后）；**不触发**嵌入与索引重建。
+
+    导出失败不阻断业务动作：待办状态已落库，重建索引前可重试导出（部署手册）。
+    """
+    try:
+        return knowledge.write_export(escalations.list_all())
+    except OSError as exc:
+        return {"exported": 0, "skipped": 0, "error": f"知识导出写入失败：{exc}"}
+
+
+def _is_structured_close(payload: dict) -> bool:
+    """是否为新版结构化关闭（任一结构化字段非空）；全空时保持旧客户端语义。"""
+    return any(
+        payload.get(key)
+        for key in (
+            "close_reason",
+            "actual_root_cause",
+            "actual_action",
+            "verification",
+            "verdict",
+            "knowledge_candidate",
+        )
+    )
+
+
 def _decorate(
     entry: dict, systems: dict[str, dict] | None = None, evidence: object = _EVIDENCE_UNSET
 ) -> dict:
@@ -117,6 +169,11 @@ def _decorate(
     app = (systems if systems is not None else _system_map()).get(service.strip().lower())
     # 处置分类：新记录读字段；历史记录按升级原因确定性回填（只读派生，不写库）
     category = escalations.entry_category(entry)
+    # 结构化关闭记录（M2）：旧数据为 null；标签供列表/详情直接展示
+    resolution = entry.get("resolution")
+    resolution = resolution if isinstance(resolution, dict) else None
+    close_reason = str((resolution or {}).get("close_reason") or "")
+    review_status = escalations.knowledge_status(entry)
     return {
         **entry,
         "category": category,
@@ -129,6 +186,11 @@ def _decorate(
         "system_managed": app is not None,
         # 日志证据摘要（转人工核对；无归档为 null）
         "evidence": evidence,
+        "resolution": resolution,
+        "close_reason": close_reason,
+        "close_reason_label": escalations.CLOSE_REASONS.get(close_reason, ""),
+        "knowledge_status": review_status,
+        "knowledge_label": escalations.KNOWLEDGE_LABELS.get(review_status, review_status),
     }
 
 
@@ -176,21 +238,83 @@ async def api_escalation_close(
     entry = escalations.get(esc_id)
     if entry is None:
         raise ApiError(404, f"未找到待办：{esc_id}")
+    actor = request.state.identity.user
+    payload = body.model_dump() if body else {}
+    # 结构化关闭：任何结构化字段非空即走新版校验；全空保持旧客户端「仅备注关闭」
+    resolution = None
+    if _is_structured_close(payload):
+        try:
+            resolution = escalations.build_resolution(payload, actor)
+        except escalations.EscalationStoreError as exc:
+            raise ApiError(400, str(exc)) from exc
     try:
-        updated = escalations.apply_close(
-            entry, request.state.identity.user, body.note if body else ""
-        )
+        updated = escalations.apply_close(entry, actor, str(payload.get("note") or ""), resolution)
+    except escalations.EscalationStoreError as exc:
+        raise ApiError(400, str(exc)) from exc
+    escalations.persist_entry(updated)
+    result: dict = {"ok": True, "escalation": _decorate(updated)}
+    if resolution is not None:
+        result["knowledge_export"] = _sync_knowledge()
+    audit.write_audit(
+        actor=actor,
+        action="escalation:close",
+        wf_id=updated["wf_id"],
+        target=esc_id,
+        params={
+            "note": updated["note"],
+            "close_reason": str((resolution or {}).get("close_reason") or ""),
+            "verdict": str((resolution or {}).get("verdict") or ""),
+            "knowledge_status": escalations.knowledge_status(updated),
+        },
+    )
+    return ok(result)
+
+
+@router.post("/api/escalations/{esc_id}/plan")
+async def api_escalation_plan(request: Request, esc_id: str, body: PlanBody) -> dict:
+    """登记/清空未关闭待办的处理计划（历史积压逐条给出责任动作，不批量关闭）。"""
+    entry = escalations.get(esc_id)
+    if entry is None:
+        raise ApiError(404, f"未找到待办：{esc_id}")
+    actor = request.state.identity.user
+    try:
+        updated = escalations.apply_plan(entry, body.plan, actor)
     except escalations.EscalationStoreError as exc:
         raise ApiError(400, str(exc)) from exc
     escalations.persist_entry(updated)
     audit.write_audit(
-        actor=request.state.identity.user,
-        action="escalation:close",
+        actor=actor,
+        action="escalation:plan",
         wf_id=updated["wf_id"],
         target=esc_id,
-        params={"note": updated["note"]},
+        params={"plan": updated["plan"]},
     )
     return ok({"ok": True, "escalation": _decorate(updated)})
+
+
+@router.post("/api/escalations/{esc_id}/knowledge/review")
+async def api_escalation_knowledge_review(
+    request: Request, esc_id: str, body: KnowledgeReviewBody
+) -> dict:
+    """知识审核（仅管理员，见 middleware 角色规则）：approve / reject / revoke。"""
+    entry = escalations.get(esc_id)
+    if entry is None:
+        raise ApiError(404, f"未找到待办：{esc_id}")
+    actor = request.state.identity.user
+    try:
+        updated = escalations.apply_knowledge_review(entry, body.decision, actor, body.reason)
+    except escalations.EscalationStoreError as exc:
+        raise ApiError(400, str(exc)) from exc
+    escalations.persist_entry(updated)
+    export = _sync_knowledge()
+    audit.write_audit(
+        actor=actor,
+        action=f"knowledge:{body.decision.strip().lower()}",
+        wf_id=updated["wf_id"],
+        target=esc_id,
+        params={"reason": body.reason, **export},
+    )
+    return ok({"ok": True, "escalation": _decorate(updated), "knowledge_export": export})
 
 
 @router.post("/api/escalations/{esc_id}/retry")

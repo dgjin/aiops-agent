@@ -191,16 +191,30 @@ ollama pull qwen3:8b          # 约 5.2GB；export AIOPS_TRIAGE_MODEL=qwen3:8b �
 ### 2.7 索引构建（Code RAG）
 
 ```bash
-.venv/bin/python index_codebase.py                     # 默认：demo-app → data/code_index.*
+.venv/bin/python index_codebase.py                     # 默认：demo-app + 历史工单 + 已审核处置知识 → data/code_index.*
 .venv/bin/python index_codebase.py --query "coupon null 空指针" --top-k 3   # 建库并立即冒烟检索
 ```
 
-预期输出（实测）：`索引完成：files=8 chunks=33 tickets=6 dim=1024 model=bge-m3:latest`，产物：
+预期输出（实测）：`索引完成：files=8 chunks=33 tickets=6 knowledge=0 dim=1024 model=bge-m3:latest`，产物：
 
 - `data/code_index.json`（全量元数据 + 向量）
 - `data/code_index.faiss`（FAISS 后端可用时生成；未装 faiss-cpu 则不生成，检索自动走纯 Python）
 
-**重建时机**：demo-app 源码或历史工单库（`data/historical_tickets.json`）变更后。
+**重建时机**：demo-app 源码、历史工单库（`data/historical_tickets.json`）或已审核知识库变更后。
+
+**审核知识回流（M2）**：待办关闭时勾选「提交知识库候选」→ 管理员在列表「详情」中审核（approve / reject / revoke）。
+审核通过的记录由 BFF 同步写 `data/knowledge_records.json`（`AIOPS_KNOWLEDGE_PATH` 可覆盖，默认随 `AIOPS_MODE` 数据根），
+关闭/审核请求**不会**触发嵌入或索引重建；需显式执行：
+
+```bash
+.venv/bin/python index_codebase.py --knowledge data/knowledge_records.json   # 显式重建（含已审核知识）
+.venv/bin/python index_codebase.py --knowledge /nonexistent.json             # 仅代码 + 历史工单（排除知识）
+```
+
+- 只有「已关闭 + 管理员批准 + 关闭原因 RESOLVED」的记录入索引；待审核、已拒绝、撤销、未解决与旧格式（仅备注）均不进入；
+- 导出前清洗凭据、令牌、内部地址、邮箱与手机号；清洗后仍命中敏感模式的记录整条跳过；
+- 记录保留 `source_esc_id` / `source_wf_id`，撤销审核后重新导出并重建索引即可从检索中移除；
+- 查询 `--query` 命中的知识块 `file` 为 `data/knowledge_records.json`（`kind=ticket`）。
 
 ### 2.8 稳定容器初始化（发布链路前置）
 

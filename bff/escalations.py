@@ -54,6 +54,29 @@ CATEGORY_GROUPS = {
     "evidence": "证据不足",
 }
 
+# M2 结构化关闭记录：关闭原因 / 智能体判断评价 / 知识审核状态。
+CLOSE_REASONS = {
+    "RESOLVED": "已修复",
+    "FALSE_POSITIVE": "误报",
+    "OBSERVABILITY_FIXED": "观测已修复",
+    "DUPLICATE": "重复告警",
+    "NO_CODE_CHANGE": "无需改代码",
+    "OTHER": "其他",
+}
+VERDICTS = {
+    "CORRECT": "判断正确",
+    "PARTLY_CORRECT": "部分正确",
+    "INCORRECT": "判断错误",
+    "UNKNOWN": "未评价",
+}
+KNOWLEDGE_STATUSES = ("", "DRAFT", "APPROVED", "REJECTED")
+KNOWLEDGE_LABELS = {
+    "": "未提交",
+    "DRAFT": "待审核",
+    "APPROVED": "已入库",
+    "REJECTED": "已拒绝",
+}
+
 
 class EscalationStoreError(ValueError):
     """处置操作校验错误（由 BFF 统一转 400/404）。"""
@@ -184,6 +207,8 @@ def new_entry(flow: dict, now: datetime | None = None) -> dict:
         "service": str(alert.get("service") or ""),
         "auto_reason": reason,
         "category": category,
+        "plan": "",
+        "resolution": None,
         "alert": alert,
         "status": "open",
         "assignee": "",
@@ -229,13 +254,146 @@ def apply_assign(entry: dict, assignee: str, actor: str) -> dict:
     return entry
 
 
-def apply_close(entry: dict, actor: str, note: str = "") -> dict:
+def build_resolution(payload: dict, actor: str, now: datetime | None = None) -> dict:
+    """校验并构造结构化关闭记录（新客户端）。
+
+    旧客户端只传 ``note``，不经过本函数（``apply_close`` 的 resolution=None 分支），
+    保持原有行为。新客户端按关闭原因动态校验：
+        - ``RESOLVED``：实际根因、实际处置、验证结果三项必填；
+        - 其他原因：备注 / 实际处置 / 实际根因至少一项说明；
+        - 建议入知识库（``knowledge_candidate``）时必须确认已检查敏感信息。
+    """
+    raw = payload or {}
+    reason = str(raw.get("close_reason") or "OTHER").strip().upper()
+    if reason not in CLOSE_REASONS:
+        raise EscalationStoreError(f"关闭原因非法：{reason}")
+    verdict = str(raw.get("verdict") or "UNKNOWN").strip().upper()
+    if verdict not in VERDICTS:
+        raise EscalationStoreError(f"智能体判断评价非法：{verdict}")
+    stamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+    resolution = {
+        "close_reason": reason,
+        "actual_root_cause": str(raw.get("actual_root_cause") or "").strip(),
+        "actual_action": str(raw.get("actual_action") or "").strip(),
+        "verification": str(raw.get("verification") or "").strip(),
+        "verdict": verdict,
+        "knowledge_candidate": bool(raw.get("knowledge_candidate")),
+        "sensitive_confirmed": bool(raw.get("sensitive_confirmed")),
+        "knowledge_status": "",
+        "knowledge_reviewed_by": "",
+        "knowledge_reviewed_at": "",
+        "knowledge_reject_reason": "",
+        "note": str(raw.get("note") or "").strip(),
+        "closed_by": actor,
+        "closed_at": stamp,
+    }
+    if reason == "RESOLVED":
+        required = (
+            ("actual_root_cause", "实际根因"),
+            ("actual_action", "实际处置"),
+            ("verification", "验证结果"),
+        )
+        missing = [label for key, label in required if not resolution[key]]
+        if missing:
+            raise EscalationStoreError("关闭原因为「已修复」时必须填写：" + "、".join(missing))
+    elif not (resolution["note"] or resolution["actual_action"] or resolution["actual_root_cause"]):
+        raise EscalationStoreError("请填写处置说明（备注或实际处置）")
+    if resolution["knowledge_candidate"] and not resolution["sensitive_confirmed"]:
+        raise EscalationStoreError("建议入知识库前必须确认已检查敏感信息")
+    if resolution["knowledge_candidate"]:
+        resolution["knowledge_status"] = "DRAFT"
+    return resolution
+
+
+def apply_close(
+    entry: dict, actor: str, note: str = "", resolution: dict | None = None
+) -> dict:
     if entry.get("status") == "closed":
         raise EscalationStoreError("该待办已关闭，无需重复处置")
     entry["status"] = "closed"
-    entry["note"] = (note or "").strip()
     entry["closed_at"] = _now()
-    _append_history(entry, "close", actor, entry["note"] or "已处置")
+    if resolution is not None:
+        entry["resolution"] = resolution
+        entry["note"] = str(resolution.get("note") or (note or "")).strip()
+        label = CLOSE_REASONS.get(str(resolution.get("close_reason") or ""), "已关闭")
+        detail = label + (f"：{entry['note']}" if entry["note"] else "")
+    else:
+        # 旧客户端：仅备注，保持关闭行为不变（不产生结构化记录，也不进入知识库）。
+        entry["resolution"] = None
+        entry["note"] = (note or "").strip()
+        detail = entry["note"] or "已处置"
+    _append_history(entry, "close", actor, detail)
+    return entry
+
+
+def apply_plan(entry: dict, plan: str, actor: str) -> dict:
+    """设置/清除未关闭待办的处理计划（M2；允许保持 open，不要求清零）。"""
+    if entry.get("status") == "closed":
+        raise EscalationStoreError("该待办已关闭，不能修改处置计划")
+    clean = (plan or "").strip()
+    entry["plan"] = clean
+    _append_history(entry, "plan", actor, f"处置计划：{clean}" if clean else "清空处置计划")
+    return entry
+
+
+def knowledge_status(entry: dict) -> str:
+    resolution = entry.get("resolution") or {}
+    if not isinstance(resolution, dict):
+        return ""
+    return str(resolution.get("knowledge_status") or "")
+
+
+def apply_knowledge_review(
+    entry: dict, decision: str, actor: str, reason: str = ""
+) -> dict:
+    """知识审核状态机（M2）：approve / reject / revoke；仅管理员可调用（路由层强制）。
+
+    - 仅关闭且提交过候选（knowledge_candidate）的待办可审核；
+    - 仅 ``RESOLVED`` 的记录可批准入知识库（未解决不得进索引）；
+    - 撤销只允许针对已入库记录，撤销后状态为 REJECTED，可重新审核。
+    """
+    if entry.get("status") != "closed":
+        raise EscalationStoreError("待办尚未关闭，无法审核知识候选")
+    resolution = entry.get("resolution") or {}
+    if not isinstance(resolution, dict) or not resolution.get("knowledge_candidate"):
+        raise EscalationStoreError("该待办未提交知识库候选，无法审核")
+    action = str(decision or "").strip().lower()
+    current = str(resolution.get("knowledge_status") or "")
+    note = str(reason or "").strip()
+    if action == "approve":
+        if current == "APPROVED":
+            raise EscalationStoreError("该记录已入库，无需重复批准")
+        if str(resolution.get("close_reason") or "") != "RESOLVED":
+            raise EscalationStoreError("仅「已修复（RESOLVED）」的关闭记录可进入知识库")
+        resolution.update(
+            knowledge_status="APPROVED",
+            knowledge_reviewed_by=actor,
+            knowledge_reviewed_at=_now(),
+            knowledge_reject_reason="",
+        )
+        detail = "审核通过，已加入知识库候选（待重建索引生效）"
+    elif action == "reject":
+        resolution.update(
+            knowledge_status="REJECTED",
+            knowledge_reviewed_by=actor,
+            knowledge_reviewed_at=_now(),
+            knowledge_reject_reason=note,
+        )
+        detail = "审核拒绝" + (f"：{note}" if note else "")
+    elif action == "revoke":
+        if current != "APPROVED":
+            raise EscalationStoreError("仅已入库记录可撤销")
+        resolution.update(
+            knowledge_status="REJECTED",
+            knowledge_reviewed_by=actor,
+            knowledge_reviewed_at=_now(),
+            knowledge_reject_reason=note or "已撤销",
+        )
+        detail = "撤销知识入库" + (f"：{note}" if note else "")
+    else:
+        raise EscalationStoreError(f"审核动作非法：{decision}")
+    entry["resolution"] = resolution
+    _append_history(entry, f"knowledge:{action}", actor, detail)
     return entry
 
 
@@ -269,6 +427,8 @@ def _row_to_entry(row) -> dict:
         "service": row["service"],
         "auto_reason": row["auto_reason"],
         "category": row["category"] if "category" in row else "",
+        "plan": row["plan"] if "plan" in row else "",
+        "resolution": row["resolution"] if "resolution" in row else None,
         "alert": row["alert"],
         "status": row["status"],
         "assignee": row["assignee"],
@@ -289,6 +449,8 @@ def _entry_values(entry: dict) -> dict:
         "service": entry.get("service") or "",
         "auto_reason": entry.get("auto_reason") or "",
         "category": entry.get("category") or "",
+        "plan": entry.get("plan") or "",
+        "resolution": entry.get("resolution"),
         "alert": entry.get("alert"),
         "status": entry.get("status") or "open",
         "assignee": entry.get("assignee") or "",
@@ -385,6 +547,15 @@ def stats() -> dict:
     for entry in entries:
         key = entry_category(entry)
         categories[key] = categories.get(key, 0) + 1
+    knowledge = {"draft": 0, "approved": 0, "rejected": 0}
+    for entry in entries:
+        status = knowledge_status(entry)
+        if status == "DRAFT":
+            knowledge["draft"] += 1
+        elif status == "APPROVED":
+            knowledge["approved"] += 1
+        elif status == "REJECTED":
+            knowledge["rejected"] += 1
     return {
         "total": len(entries),
         "open": sum(1 for e in entries if e.get("status") == "open"),
@@ -392,6 +563,7 @@ def stats() -> dict:
         "closed": sum(1 for e in entries if e.get("status") == "closed"),
         "re_escalated": sum(1 for e in entries if e.get("re_escalated")),
         "categories": categories,
+        "knowledge": knowledge,
         "sla_minutes": sla_minutes(),
     }
 

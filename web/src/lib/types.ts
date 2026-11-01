@@ -814,6 +814,62 @@ export type EscalationCategory =
   | 'requirement'
   | 'other'
 
+/** 结构化关闭原因（PRD M2）：RESOLVED 必须填写实际根因 / 处置 / 验证结果。 */
+export type EscalationCloseReason =
+  | 'RESOLVED'
+  | 'FALSE_POSITIVE'
+  | 'OBSERVABILITY_FIXED'
+  | 'DUPLICATE'
+  | 'NO_CODE_CHANGE'
+  | 'OTHER'
+
+/** 对智能体判断的评价（人工复盘口径）。 */
+export type AgentVerdict = 'CORRECT' | 'PARTLY_CORRECT' | 'INCORRECT' | 'UNKNOWN'
+
+/** 知识审核状态：'' 未提交；DRAFT 待审核；APPROVED 已入库；REJECTED 已拒绝/已撤销。 */
+export type KnowledgeStatus = '' | 'DRAFT' | 'APPROVED' | 'REJECTED'
+
+/** 结构化关闭记录（服务端 escalation.resolution）。 */
+export interface EscalationResolution {
+  close_reason: EscalationCloseReason
+  /** 实际根因（与智能体判断分开记录） */
+  actual_root_cause: string
+  actual_action: string
+  verification: string
+  verdict: AgentVerdict
+  /** 是否提交知识库候选（提交后进入 DRAFT 审核队列） */
+  knowledge_candidate: boolean
+  /** 入库前已确认检查敏感信息 */
+  sensitive_confirmed: boolean
+  knowledge_status: KnowledgeStatus
+  knowledge_reviewed_by: string
+  knowledge_reviewed_at: string
+  knowledge_reject_reason: string
+  note: string
+  closed_by: string
+  closed_at: string
+}
+
+/** 结构化关闭请求体；旧字段 note 仍兼容（仅备注关闭）。 */
+export interface EscalationClosePayload {
+  note?: string
+  close_reason?: EscalationCloseReason
+  actual_root_cause?: string
+  actual_action?: string
+  verification?: string
+  verdict?: AgentVerdict
+  knowledge_candidate?: boolean
+  sensitive_confirmed?: boolean
+}
+
+/** 知识导出同步结果（关闭/审核后由 BFF 写入 knowledge_records.json）。 */
+export interface KnowledgeExport {
+  exported: number
+  skipped: number
+  path?: string
+  error?: string
+}
+
 /** 转人工待办条目（读侧附加 overdue / sla_minutes 派生状态）。 */
 export interface EscalationEntry {
   id: string
@@ -826,6 +882,16 @@ export interface EscalationEntry {
   category?: EscalationCategory
   /** 分类中文标签（服务端派生，前端直接展示） */
   category_label?: string
+  /** 处置计划（未关闭待办的下一步动作；M2） */
+  plan?: string
+  /** 结构化关闭记录（历史数据为 null） */
+  resolution?: EscalationResolution | null
+  /** 关闭原因（服务端从 resolution 派生） */
+  close_reason?: EscalationCloseReason | ''
+  close_reason_label?: string
+  /** 知识审核状态与中文标签（服务端派生） */
+  knowledge_status?: KnowledgeStatus
+  knowledge_label?: string
   alert: AlertMeta | null
   status: 'open' | 'assigned' | 'closed'
   assignee: string
@@ -857,6 +923,8 @@ export interface EscalationStats {
   re_escalated: number
   /** 分类计数（key 为 EscalationCategory；含 other） */
   categories?: Record<string, number>
+  /** 知识审核计数（M2）：待审核 / 已入库 / 已拒绝 */
+  knowledge?: { draft: number; approved: number; rejected: number }
   sla_minutes: number
 }
 
@@ -872,6 +940,8 @@ export interface EscalationWriteResp extends Timed {
   escalation: EscalationEntry
   /** retry 专用：新启动的修复流程 ID */
   new_wf_id?: string
+  /** close / knowledge review 专用：知识导出同步结果 */
+  knowledge_export?: KnowledgeExport
 }
 
 // ----------------------------------------------------------------------

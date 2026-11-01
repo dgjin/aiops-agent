@@ -6,6 +6,7 @@ import type {
   AuditSummaryResp,
   AuthStatusResp,
   DiscoverMonitoredAppResp,
+  EscalationClosePayload,
   EscalationsResp,
   EscalationWriteResp,
   EvidenceResp,
@@ -307,12 +308,28 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ assignee }),
     }),
-  /** 处置关闭（备注留档）。 */
-  closeEscalation: (escId: string, note: string) =>
+  /** 处置关闭：结构化记录（关闭原因 / 实际根因 / 处置 / 验证 / 判断评价）或仅备注。 */
+  closeEscalation: (escId: string, payload: EscalationClosePayload) =>
     request<EscalationWriteResp>(`/api/escalations/${encodeURIComponent(escId)}/close`, {
       method: 'POST',
-      body: JSON.stringify({ note }),
+      body: JSON.stringify(payload),
     }),
+  /** 登记/清空未关闭待办的处理计划（允许保持 open，不批量关闭）。 */
+  planEscalation: (escId: string, plan: string) =>
+    request<EscalationWriteResp>(`/api/escalations/${encodeURIComponent(escId)}/plan`, {
+      method: 'POST',
+      body: JSON.stringify({ plan }),
+    }),
+  /** 知识审核（仅管理员）：approve / reject / revoke；批准后导出待重建索引。 */
+  reviewEscalationKnowledge: (
+    escId: string,
+    decision: 'approve' | 'reject' | 'revoke',
+    reason = '',
+  ) =>
+    request<EscalationWriteResp>(
+      `/api/escalations/${encodeURIComponent(escId)}/knowledge/review`,
+      { method: 'POST', body: JSON.stringify({ decision, reason }) },
+    ),
   /** 重试修复：以新幂等键重启修复流程，待办自动关闭。 */
   retryEscalation: (escId: string) =>
     request<EscalationWriteResp>(`/api/escalations/${encodeURIComponent(escId)}/retry`, {

@@ -1,12 +1,12 @@
 """代码索引 CLI（WP4 交付物）：建库与检索验证。
 
 用法：
-    .venv/bin/python index_codebase.py                                   # 索引 demo-app + 历史工单
+    .venv/bin/python index_codebase.py                                   # 索引 demo-app + 历史工单 + 已审核处置知识
     .venv/bin/python index_codebase.py --query "NullPointerException coupon" --top-k 3
     .venv/bin/python index_codebase.py --repo demo-app --index data/code_index.json
 
 输出：
-    建库模式：文件数 / 块数 / 工单数 / 向量维度 / 索引路径；
+    建库模式：文件数 / 块数 / 工单数 / 知识记录数 / 向量维度 / 索引路径；
     检索模式：top-k 命中（相似度、类型、文件::限定名、行号区间）。
 """
 
@@ -24,6 +24,11 @@ def main() -> None:
     parser.add_argument("--index", default=None, help=f"索引输出路径（默认 {code_rag.INDEX_PATH}）")
     parser.add_argument("--model", default=None, help=f"嵌入模型（默认 {code_rag.DEFAULT_EMBED_MODEL}）")
     parser.add_argument("--tickets", default=None, help=f"历史工单语料（默认 {code_rag.TICKETS_PATH}；传不存在的路径可排除）")
+    parser.add_argument(
+        "--knowledge",
+        default=None,
+        help="已审核处置知识语料（默认 AIOPS_KNOWLEDGE_PATH 或 data/knowledge_records.json；传不存在的路径可排除）",
+    )
     parser.add_argument("--query", default=None, help="检索查询（给出则进入检索模式）")
     parser.add_argument("--top-k", type=int, default=5, help="返回条数（默认 5）")
     args = parser.parse_args()
@@ -50,10 +55,12 @@ def main() -> None:
         index_path=Path(args.index) if args.index else None,
         model=args.model,
         tickets_path=Path(args.tickets) if args.tickets else None,
+        knowledge_path=Path(args.knowledge) if args.knowledge else None,
     )
     print(
         f"索引完成：files={stats['files']} chunks={stats['chunks']} "
-        f"tickets={stats['tickets']} dim={stats['dim']} model={stats['model']}"
+        f"tickets={stats['tickets']} knowledge={stats['knowledge']} "
+        f"dim={stats['dim']} model={stats['model']}"
     )
     print(f"索引文件：{stats['index']}")
 

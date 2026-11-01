@@ -1,11 +1,15 @@
-/** 转人工待办（P1-3）：ESCALATED 处置闭环——指派 / 处置关闭 / 重试修复。
+/** 转人工待办（P1-3）：ESCALATED 处置闭环——指派 / 处置计划 / 结构化关闭 / 重试修复 / 知识审核。
  *
  * - 列表 3 秒轮询；读侧自动幂等登记（ESCALATED 流程 → open 待办），已关闭不重开；
  * - 超 SLA（默认 30 分钟）未处置的条目由 BFF 后台巡检经通知渠道再升级一次，
  *   前端以「已超时未处置 / 已再升级」标记提示值班同学；
- * - 处置路径：指派责任人 → 手动关闭（备注留档）或「重试修复」（新幂等键重启完整修复链路）；
- *   需求来源的待办（entry.requirement）重试时重启需求修复流（批准版方案 → 沙箱 → 审批 → 发布）。
- * - 内容管理：关键词搜索（监控系统 / 服务 / 升级原因 / 告警 / 工作流 / 责任人 / 备注）+ 监控系统
+ * - 处置路径：指派责任人 → 登记处理计划（历史积压允许保持 open）→ 结构化关闭
+ *   （关闭原因 / 实际根因 / 实际处置 / 验证结果 / 对智能体判断的评价）或「重试修复」
+ *   （新幂等键重启完整修复链路）；需求来源的待办（entry.requirement）重试时重启需求
+ *   修复流（批准版方案 → 沙箱 → 审批 → 发布）。
+ * - 知识回流（M2）：关闭时勾选「提交知识库候选」进入 DRAFT；管理员在详情弹窗审核
+ *   （approve / reject / revoke），批准后 BFF 同步导出语料，索引重建仍是显式动作。
+ * - 内容管理：关键词搜索（监控系统 / 服务 / 升级原因 / 告警 / 工作流 / 责任人 / 备注 / 处置计划）+ 监控系统
  *   筛选（按当前数据动态生成选项与计数；纳管应用显示应用名，node / redis 等未纳管服务回退服务名
  *   并标注）+ 来源筛选（告警 / 需求）+ 仅看超时；
  *   状态页签带全量计数；列表为统一表格（监控系统 / 状态 / 升级原因 / 告警·工作流 / 责任人 /
@@ -21,6 +25,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { FileText, RefreshCw, Search, X } from 'lucide-react'
 import { api, describeError } from '../lib/api'
 import { cn, fmtDateTime } from '../lib/format'
+import { hasRole, useSelf } from '../lib/permission'
 import { compareValues, nextSort, type SortState } from '../lib/sort'
 import { useWriteAction } from '../lib/actions'
 import { ActionButton } from '../components/ActionButton'
@@ -38,7 +43,12 @@ import { Pagination, usePagination } from '../components/Pagination'
 import { PermissionGate } from '../components/PermissionGate'
 import { SortableTh } from '../components/SortableTh'
 import { Toast } from '../components/Toast'
-import type { EscalationEntry } from '../lib/types'
+import type {
+  AgentVerdict,
+  EscalationCloseReason,
+  EscalationEntry,
+  KnowledgeStatus,
+} from '../lib/types'
 
 const STATUS_TABS = [
   { value: 'all', label: '全部' },
@@ -90,6 +100,35 @@ const EVIDENCE_HINT: Record<string, { label: string; cls: string }> = {
   INSUFFICIENT_SIGNAL: { label: '信号不足', cls: 'border-warn/40 text-warn' },
   UNKNOWN: { label: '质量未记录', cls: 'border-line text-idle' },
 }
+
+/** 结构化关闭原因（M2；与服务端 CLOSE_REASONS 同源）。 */
+const CLOSE_REASONS: { value: EscalationCloseReason; label: string }[] = [
+  { value: 'RESOLVED', label: '已修复' },
+  { value: 'FALSE_POSITIVE', label: '误报' },
+  { value: 'OBSERVABILITY_FIXED', label: '观测已修复' },
+  { value: 'DUPLICATE', label: '重复告警' },
+  { value: 'NO_CODE_CHANGE', label: '无需改代码' },
+  { value: 'OTHER', label: '其他' },
+]
+
+/** 对智能体判断的评价（人工复盘口径）。 */
+const VERDICTS: { value: AgentVerdict; label: string }[] = [
+  { value: 'CORRECT', label: '判断正确' },
+  { value: 'PARTLY_CORRECT', label: '部分正确' },
+  { value: 'INCORRECT', label: '判断错误' },
+  { value: 'UNKNOWN', label: '未评价' },
+]
+
+/** 知识审核状态徽标（M2）。 */
+const KNOWLEDGE_META: Record<KnowledgeStatus, { label: string; cls: string }> = {
+  '': { label: '未提交', cls: 'border-line text-idle' },
+  DRAFT: { label: '待审核', cls: 'border-warn/40 text-warn' },
+  APPROVED: { label: '已入库', cls: 'border-ok/40 text-ok' },
+  REJECTED: { label: '已拒绝', cls: 'border-danger/40 text-danger' },
+}
+
+const verdictLabelOf = (value: AgentVerdict | undefined): string =>
+  VERDICTS.find((item) => item.value === value)?.label ?? '未评价'
 
 /** 分类取值（旧数据可能缺字段：按 other 归并，保证筛选不丢条目）。 */
 const categoryOf = (entry: EscalationEntry): string => entry.category || 'other'
@@ -219,23 +258,52 @@ function AssignDialog({ entry, onClose }: { entry: EscalationEntry | null; onClo
   )
 }
 
-/** 处置关闭：备注写入处置轨迹（history）与操作审计。 */
+/** 处置关闭（M2）：结构化记录写入 resolution，备注同时进入处置轨迹与操作审计。
+ *
+ * RESOLVED（已修复）必须填写实际根因 / 实际处置 / 验证结果——这是知识回流的入索引条件；
+ * 其他原因至少给出一句说明。勾选「提交知识库候选」须先确认已检查敏感信息。
+ */
 function CloseDialog({ entry, onClose }: { entry: EscalationEntry; onClose: () => void }) {
   const queryClient = useQueryClient()
+  const [reason, setReason] = useState<EscalationCloseReason>('RESOLVED')
+  const [rootCause, setRootCause] = useState('')
+  const [action, setAction] = useState('')
+  const [verification, setVerification] = useState('')
+  const [verdict, setVerdict] = useState<AgentVerdict>('UNKNOWN')
   const [note, setNote] = useState('')
+  const [candidate, setCandidate] = useState(false)
+  const [sensitive, setSensitive] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const close = () => {
-    if (busy) return
-    onClose()
+  const resolved = reason === 'RESOLVED'
+  const missing = resolved
+    ? !rootCause.trim() || !action.trim() || !verification.trim()
+    : !(note.trim() || action.trim() || rootCause.trim())
+  const disabled = busy || missing || (candidate && !sensitive)
+
+  const changeReason = (next: EscalationCloseReason) => {
+    setReason(next)
+    if (next !== 'RESOLVED') {
+      setCandidate(false)
+      setSensitive(false)
+    }
   }
 
   const submit = async () => {
     setBusy(true)
     setError(null)
     try {
-      await api.closeEscalation(entry.id, note.trim())
+      await api.closeEscalation(entry.id, {
+        close_reason: reason,
+        actual_root_cause: rootCause.trim(),
+        actual_action: action.trim(),
+        verification: verification.trim(),
+        verdict,
+        note: note.trim(),
+        knowledge_candidate: candidate,
+        sensitive_confirmed: sensitive,
+      })
       await queryClient.invalidateQueries()
       onClose()
     } catch (err) {
@@ -248,14 +316,20 @@ function CloseDialog({ entry, onClose }: { entry: EscalationEntry; onClose: () =
   return (
     <Modal
       open
+      size="lg"
       title="处置关闭"
-      onClose={close}
+      onClose={busy ? () => undefined : onClose}
       footer={
         <>
-          <button type="button" className={secondaryButtonClass} onClick={close}>
+          <button type="button" className={secondaryButtonClass} onClick={onClose}>
             取消
           </button>
-          <button type="button" className={primaryButtonClass} disabled={busy} onClick={submit}>
+          <button
+            type="button"
+            className={primaryButtonClass}
+            disabled={disabled}
+            onClick={submit}
+          >
             {busy ? '提交中…' : '确认关闭'}
           </button>
         </>
@@ -265,22 +339,367 @@ function CloseDialog({ entry, onClose }: { entry: EscalationEntry; onClose: () =
         <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted">
           <div>服务：{entry.service || '—'}</div>
           <div className="truncate" title={entry.auto_reason}>
-            原因：{entry.auto_reason || '—'}
+            智能体判断：{entry.auto_reason || '—'}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="mb-1 block text-xs text-muted">关闭原因 *</label>
+            <select
+              value={reason}
+              onChange={(event) => changeReason(event.target.value as EscalationCloseReason)}
+              className={fieldClass}
+            >
+              {CLOSE_REASONS.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-muted">对智能体判断的评价</label>
+            <select
+              value={verdict}
+              onChange={(event) => setVerdict(event.target.value as AgentVerdict)}
+              className={fieldClass}
+            >
+              {VERDICTS.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <label className="mb-1 block text-xs text-muted">
+            实际根因{resolved ? ' *' : ''}（与智能体判断分开记录）
+          </label>
+          <textarea
+            rows={2}
+            value={rootCause}
+            onChange={(event) => setRootCause(event.target.value)}
+            placeholder="例如：数据库连接池耗尽导致核销请求超时"
+            className={fieldClass}
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs text-muted">
+            实际处置{resolved ? ' *' : ''}
+          </label>
+          <textarea
+            rows={2}
+            value={action}
+            onChange={(event) => setAction(event.target.value)}
+            placeholder="例如：调大连接池上限并滚动重启，已提交变更单"
+            className={fieldClass}
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs text-muted">
+            验证结果{resolved ? ' *' : ''}（可核对的指标 / 日志 / 时长）
+          </label>
+          <textarea
+            rows={2}
+            value={verification}
+            onChange={(event) => setVerification(event.target.value)}
+            placeholder="例如：错误率回落至 0.1% 以下并持续 30 分钟"
+            className={fieldClass}
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs text-muted">处置备注（写入处置轨迹与操作审计）</label>
+          <textarea
+            rows={2}
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            placeholder="补充说明（其他原因时至少填写备注 / 处置 / 根因之一）"
+            className={fieldClass}
+          />
+        </div>
+
+        {resolved && (
+          <div className="space-y-2 rounded-lg border border-line/70 p-3">
+            <label className="flex items-start gap-2 text-xs text-muted">
+              <input
+                type="checkbox"
+                checked={candidate}
+                onChange={(event) => {
+                  setCandidate(event.target.checked)
+                  if (!event.target.checked) setSensitive(false)
+                }}
+                className="mt-0.5"
+              />
+              <span>
+                提交知识库候选（进入待审核队列）
+                <span className="mt-0.5 block text-[11px] text-idle">
+                  管理员审核通过后写入 knowledge_records.json；索引重建仍是显式动作。
+                </span>
+              </span>
+            </label>
+            {candidate && (
+              <label className="flex items-start gap-2 text-xs text-muted">
+                <input
+                  type="checkbox"
+                  checked={sensitive}
+                  onChange={(event) => setSensitive(event.target.checked)}
+                  className="mt-0.5"
+                />
+                <span>
+                  已检查以上内容不含凭据、令牌、内部地址与个人信息（必选）
+                </span>
+              </label>
+            )}
+          </div>
+        )}
+
+        {missing && (
+          <p className="text-xs text-idle">
+            {resolved
+              ? '关闭原因为「已修复」时，实际根因 / 实际处置 / 验证结果三项必填。'
+              : '请至少填写处置说明（备注 / 实际处置 / 实际根因之一）。'}
+          </p>
+        )}
+        {error && <p className="text-xs text-danger">{error}</p>}
+      </div>
+    </Modal>
+  )
+}
+
+/** 处置计划：未关闭待办登记下一步动作（允许保持 open，不批量关闭历史积压）。 */
+function PlanDialog({ entry, onClose }: { entry: EscalationEntry; onClose: () => void }) {
+  const queryClient = useQueryClient()
+  const [plan, setPlan] = useState(entry.plan ?? '')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const submit = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.planEscalation(entry.id, plan.trim())
+      await queryClient.invalidateQueries()
+      onClose()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal
+      open
+      title="处置计划"
+      onClose={onClose}
+      footer={
+        <>
+          <button type="button" className={secondaryButtonClass} onClick={onClose}>
+            取消
+          </button>
+          <button type="button" className={primaryButtonClass} disabled={busy} onClick={submit}>
+            {busy ? '保存中…' : '保存计划'}
+          </button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted">
+          <div>服务：{entry.service || '—'}</div>
+          <div className="truncate" title={entry.wf_id}>
+            工作流：<span className="font-mono text-xs">{entry.wf_id}</span>
           </div>
         </div>
         <div>
           <label className="mb-1 block text-xs text-muted">
-            处置备注（写入处置轨迹与操作审计）
+            下一步动作（谁在何时做什么；可留空清除）
           </label>
           <textarea
             rows={3}
-            value={note}
-            onChange={(event) => setNote(event.target.value)}
-            placeholder="例如：已人工回滚发布，错误率恢复；或已知问题，无需自动修复"
+            value={plan}
+            onChange={(event) => setPlan(event.target.value)}
+            placeholder="例如：本周五前核对 Loki 标签映射并重试；若日志仍缺失则转观测平台排查"
             className={fieldClass}
           />
         </div>
         {error && <p className="text-xs text-danger">{error}</p>}
+      </div>
+    </Modal>
+  )
+}
+
+/** 处置详情（M2）：三段式对照（智能体判断 / 实际根因 / 验证结果）+ 知识审核入口。 */
+function DetailDialog({ entry, onClose }: { entry: EscalationEntry; onClose: () => void }) {
+  const queryClient = useQueryClient()
+  const self = useSelf()
+  const isAdmin = hasRole(self?.role, 'admin')
+  const resolution = entry.resolution ?? null
+  const knowledge = (entry.knowledge_status ?? '') as KnowledgeStatus
+  const [reason, setReason] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const review = async (decision: 'approve' | 'reject' | 'revoke') => {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.reviewEscalationKnowledge(entry.id, decision, reason.trim())
+      await queryClient.invalidateQueries()
+      onClose()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const block = (title: string, value: string, empty = '—') => (
+    <div className="rounded-lg border border-line/70 p-3">
+      <div className="text-[11px] text-idle">{title}</div>
+      <div className="mt-1 whitespace-pre-wrap text-xs text-ink">{value || empty}</div>
+    </div>
+  )
+
+  return (
+    <Modal
+      open
+      size="lg"
+      title={`处置详情 · ${entry.service || '未知服务'}`}
+      onClose={onClose}
+      footer={
+        <button type="button" className={secondaryButtonClass} onClick={onClose}>
+          关闭
+        </button>
+      }
+    >
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted">
+          <div>
+            告警 <span className="font-mono">{entry.alert_id || '—'}</span>
+          </div>
+          <div className="truncate" title={entry.wf_id}>
+            工作流 <span className="font-mono">{entry.wf_id}</span>
+          </div>
+          <div>
+            关闭人：{resolution?.closed_by || entry.assignee || '—'}
+          </div>
+          <div>关闭时间：{resolution?.closed_at ? fmtDateTime(resolution.closed_at) : fmtDateTime(entry.closed_at)}</div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-1.5">
+          {entry.close_reason_label && (
+            <span className="rounded border border-line px-1.5 py-0.5 text-[10px] text-muted">
+              关闭原因：{entry.close_reason_label}
+            </span>
+          )}
+          <span className="rounded border border-line px-1.5 py-0.5 text-[10px] text-muted">
+            判断评价：{verdictLabelOf(resolution?.verdict)}
+          </span>
+          <span
+            className={cn(
+              'rounded border px-1.5 py-0.5 text-[10px]',
+              KNOWLEDGE_META[knowledge].cls,
+            )}
+          >
+            知识库：{KNOWLEDGE_META[knowledge].label}
+          </span>
+          {entry.plan && (
+            <span className="rounded border border-accent/40 px-1.5 py-0.5 text-[10px] text-accent">
+              处置计划：{entry.plan}
+            </span>
+          )}
+        </div>
+
+        <div className="grid gap-2 md:grid-cols-3">
+          {block('智能体判断（升级原因）', entry.auto_reason)}
+          {block('实际根因（人工）', resolution?.actual_root_cause ?? '')}
+          {block('验证结果（人工）', resolution?.verification ?? '')}
+        </div>
+        {block('实际处置（人工）', resolution?.actual_action ?? '')}
+        {resolution?.note && block('处置备注', resolution.note)}
+
+        {!resolution && (
+          <p className="rounded-lg border border-line/70 p-3 text-xs text-idle">
+            该待办为旧格式关闭（仅备注，无结构化处置记录），不参与知识回流；
+            备注：{entry.note || '—'}
+          </p>
+        )}
+
+        {resolution && !resolution.knowledge_candidate && (
+          <p className="text-xs text-idle">
+            本次关闭未提交知识库候选（仅 RESOLVED 且勾选候选的记录可进入知识库）。
+          </p>
+        )}
+
+        {resolution?.knowledge_candidate && (
+          <div className="space-y-2 rounded-lg border border-line/70 p-3">
+            <div className="text-xs text-muted">
+              知识审核：{KNOWLEDGE_META[knowledge].label}
+              {resolution.knowledge_reviewed_by && (
+                <span className="ml-2 text-idle">
+                  {resolution.knowledge_reviewed_by}
+                  {resolution.knowledge_reviewed_at
+                    ? ` · ${fmtDateTime(resolution.knowledge_reviewed_at)}`
+                    : ''}
+                </span>
+              )}
+            </div>
+            {resolution.knowledge_reject_reason && (
+              <div className="text-xs text-danger">
+                审核意见：{resolution.knowledge_reject_reason}
+              </div>
+            )}
+            {isAdmin ? (
+              <div className="space-y-2">
+                <input
+                  value={reason}
+                  onChange={(event) => setReason(event.target.value)}
+                  placeholder="审核意见（拒绝 / 撤销时填写）"
+                  className={fieldClass}
+                />
+                <div className="flex flex-wrap gap-1.5">
+                  {knowledge !== 'APPROVED' && (
+                    <button
+                      type="button"
+                      className={primaryButtonClass}
+                      disabled={busy}
+                      onClick={() => review('approve')}
+                    >
+                      批准入库
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className={secondaryButtonClass}
+                    disabled={busy}
+                    onClick={() => review('reject')}
+                  >
+                    拒绝
+                  </button>
+                  {knowledge === 'APPROVED' && (
+                    <button
+                      type="button"
+                      className={secondaryButtonClass}
+                      disabled={busy}
+                      onClick={() => review('revoke')}
+                    >
+                      撤销入库
+                    </button>
+                  )}
+                </div>
+                <p className="text-[11px] text-idle">
+                  批准后导出 knowledge_records.json，索引重建仍需显式执行（见部署手册）。
+                </p>
+              </div>
+            ) : (
+              <p className="text-[11px] text-idle">知识审核仅管理员可操作。</p>
+            )}
+            {error && <p className="text-xs text-danger">{error}</p>}
+          </div>
+        )}
       </div>
     </Modal>
   )
@@ -298,6 +717,8 @@ export function Escalations() {
   const [assignTarget, setAssignTarget] = useState<EscalationEntry | null>(null)
   const [closeTarget, setCloseTarget] = useState<EscalationEntry | null>(null)
   const [evidenceTarget, setEvidenceTarget] = useState<EscalationEntry | null>(null)
+  const [planTarget, setPlanTarget] = useState<EscalationEntry | null>(null)
+  const [detailTarget, setDetailTarget] = useState<EscalationEntry | null>(null)
 
   const { data, isError, error } = useQuery({
     queryKey: ['escalations', status],
@@ -339,6 +760,12 @@ export function Escalations() {
       entry.wf_id,
       entry.assignee,
       entry.note,
+      entry.plan,
+      entry.close_reason_label,
+      entry.knowledge_label,
+      entry.resolution?.actual_root_cause,
+      entry.resolution?.actual_action,
+      entry.resolution?.verification,
       entry.requirement ? '需求' : '告警',
       CATEGORY_META[categoryOf(entry)]?.label ?? '',
     ]
@@ -450,8 +877,20 @@ export function Escalations() {
           </button>
         ))}
         {data && (
-          <span className="ml-auto text-xs text-idle">
-            SLA {data.stats.sla_minutes} 分钟：超时未处置自动再升级一次（每单一次，防轰炸）
+          <span className="ml-auto flex items-center gap-3 text-xs text-idle">
+            {(data.stats.knowledge?.draft ?? 0) > 0 && (
+              <button
+                type="button"
+                onClick={() => setStatus('closed')}
+                title="已关闭且提交知识库候选、等待管理员审核的记录"
+                className="rounded border border-warn/40 px-1.5 py-0.5 text-[10px] text-warn transition-colors hover:bg-warn/10"
+              >
+                知识待审核 {data.stats.knowledge?.draft}
+              </button>
+            )}
+            <span>
+              SLA {data.stats.sla_minutes} 分钟：超时未处置自动再升级一次（每单一次，防轰炸）
+            </span>
           </span>
         )}
       </div>
@@ -728,9 +1167,44 @@ export function Escalations() {
                         <div className="truncate text-ink" title={entry.auto_reason}>
                           {entry.auto_reason || '—'}
                         </div>
+                        {open && entry.plan && (
+                          <div
+                            className="mt-0.5 truncate text-[10px] text-accent"
+                            title={`处置计划：${entry.plan}`}
+                          >
+                            计划：{entry.plan}
+                          </div>
+                        )}
                         {!open && entry.note && (
                           <div className="mt-0.5 truncate text-[10px] text-idle" title={entry.note}>
                             备注：{entry.note}
+                          </div>
+                        )}
+                        {!open && (entry.close_reason_label || entry.resolution?.knowledge_candidate) && (
+                          <div className="mt-1 flex flex-wrap items-center gap-1">
+                            {entry.close_reason_label && (
+                              <span
+                                className="rounded border border-line px-1 py-0.5 text-[10px] text-muted"
+                                title="结构化关闭原因"
+                              >
+                                {entry.close_reason_label}
+                              </span>
+                            )}
+                            {entry.resolution?.knowledge_candidate && (
+                              <span
+                                className={cn(
+                                  'rounded border px-1 py-0.5 text-[10px]',
+                                  KNOWLEDGE_META[(entry.knowledge_status ?? '') as KnowledgeStatus].cls,
+                                )}
+                                title={
+                                  entry.resolution.knowledge_reject_reason
+                                    ? `知识审核：${entry.knowledge_label ?? '未提交'}（${entry.resolution.knowledge_reject_reason}）`
+                                    : `知识审核：${entry.knowledge_label ?? '未提交'}`
+                                }
+                              >
+                                {entry.knowledge_label ?? '未提交'}
+                              </span>
+                            )}
                           </div>
                         )}
                       </td>
@@ -828,6 +1302,9 @@ export function Escalations() {
                               <ActionButton size="sm" onClick={() => setAssignTarget(entry)}>
                                 {entry.assignee ? '改派' : '指派'}
                               </ActionButton>
+                              <ActionButton size="sm" onClick={() => setPlanTarget(entry)}>
+                                计划
+                              </ActionButton>
                               <ActionButton size="sm" onClick={() => setCloseTarget(entry)}>
                                 关闭
                               </ActionButton>
@@ -836,7 +1313,22 @@ export function Escalations() {
                               </ActionButton>
                             </PermissionGate>
                           ) : (
-                            <span className="text-idle">—</span>
+                            <>
+                              <ActionButton size="sm" onClick={() => setDetailTarget(entry)}>
+                                详情
+                              </ActionButton>
+                              {entry.knowledge_status === 'DRAFT' && (
+                                <PermissionGate require="admin" fallback={null}>
+                                  <ActionButton
+                                    size="sm"
+                                    tone="accent"
+                                    onClick={() => setDetailTarget(entry)}
+                                  >
+                                    审核
+                                  </ActionButton>
+                                </PermissionGate>
+                              )}
+                            </>
                           )}
                         </div>
                       </td>
@@ -867,6 +1359,16 @@ export function Escalations() {
       )}
       {closeTarget && (
         <CloseDialog key={closeTarget.id} entry={closeTarget} onClose={() => setCloseTarget(null)} />
+      )}
+      {planTarget && (
+        <PlanDialog key={planTarget.id} entry={planTarget} onClose={() => setPlanTarget(null)} />
+      )}
+      {detailTarget && (
+        <DetailDialog
+          key={detailTarget.id}
+          entry={detailTarget}
+          onClose={() => setDetailTarget(null)}
+        />
       )}
       {evidenceTarget && (
         <Modal

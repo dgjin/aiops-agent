@@ -10,6 +10,7 @@
     build_index(repo_dir)
       → chunk_source：按语言语义切块（附行号区间）；
       → 历史工单语料（data/historical_tickets.json）以 kind=ticket 同库索引；
+      → 已审核的人工处置知识（data/knowledge_records.json，M2）合并索引；
       → embed_texts：Ollama /api/embed 批量嵌入（默认 bge-m3）；
       → 持久化 data/code_index.json（向量 + 元数据）。
 
@@ -40,6 +41,8 @@ import re
 import time
 import urllib.request
 from pathlib import Path
+
+from aiops_agent import knowledge
 
 DEFAULT_OLLAMA_URL = os.environ.get("AIOPS_OLLAMA_URL", "http://localhost:11434")
 DEFAULT_EMBED_MODEL = os.environ.get("AIOPS_EMBED_MODEL", "bge-m3:latest")
@@ -359,13 +362,42 @@ def _ticket_chunk(ticket: dict) -> dict:
     }
 
 
+def _knowledge_chunk(record: dict) -> dict:
+    """已审核关闭记录 → 知识块（kind=ticket，与历史工单同检索口径）。
+
+    记录由 ``aiops_agent.knowledge`` 清洗并做入索引判定（APPROVED + RESOLVED +
+    非敏感），此处只负责文本拼装，不再重复校验。
+    """
+    parts = [
+        f"{record.get('error_type') or '人工处置'}：{record.get('symptoms') or ''}",
+        f"根因：{record.get('root_cause') or ''}",
+        f"处置：{record.get('resolution') or ''}",
+    ]
+    if record.get("verification"):
+        parts.append(f"验证：{record['verification']}")
+    return {
+        "kind": "ticket",
+        "file": "data/knowledge_records.json",
+        "qualname": str(record.get("ticket_id") or ""),
+        "start_line": 0,
+        "end_line": 0,
+        "snippet": " ".join(parts),
+    }
+
+
 def build_index(
     repo_dir: Path | str | None = None,
     index_path: Path | str | None = None,
     model: str | None = None,
     tickets_path: Path | str | None = None,
+    knowledge_path: Path | str | None = None,
+    knowledge_service: str | None = None,
 ) -> dict:
-    """建向量索引：代码 AST 切块 + 历史工单 → 批量嵌入 → 持久化 JSON。"""
+    """建向量索引：代码 AST 切块 + 历史工单 + 已审核处置知识 → 批量嵌入 → 持久化 JSON。
+
+    ``knowledge_service`` 给出时只合并该服务的知识记录（被监控应用专属索引使用，
+    避免跨服务知识串入）；缺省合并全部已审核知识（全局索引）。
+    """
     repo_dir = Path(repo_dir) if repo_dir else DEFAULT_REPO_DIR
     index_path = Path(index_path) if index_path else INDEX_PATH
     tickets_path = Path(tickets_path) if tickets_path else TICKETS_PATH
@@ -398,6 +430,18 @@ def build_index(
             chunks.append(_ticket_chunk(ticket))
             ticket_count += 1
 
+    # 已审核的人工处置知识：knowledge.load 已按 APPROVED + RESOLVED + 非敏感过滤。
+    knowledge_records = knowledge.load(Path(knowledge_path) if knowledge_path else None)
+    if knowledge_service:
+        wanted = knowledge_service.strip().lower()
+        knowledge_records = [
+            record
+            for record in knowledge_records
+            if str(record.get("service") or "").strip().lower() == wanted
+        ]
+    for record in knowledge_records:
+        chunks.append(_knowledge_chunk(record))
+
     if not chunks:
         raise RuntimeError(f"未找到可索引内容: {repo_dir}")
 
@@ -424,6 +468,7 @@ def build_index(
         "dim": len(vectors[0]),
         "repo": str(repo_dir),
         "backend": backend,
+        "knowledge": len(knowledge_records),
         "chunks": indexed,
     }
     index_path.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
@@ -431,6 +476,7 @@ def build_index(
         "files": file_count,
         "chunks": len(chunks),
         "tickets": ticket_count,
+        "knowledge": len(knowledge_records),
         "dim": index["dim"],
         "model": used_model,
         "backend": backend,

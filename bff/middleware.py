@@ -196,6 +196,10 @@ def required_role(method: str, path: str) -> str:
             if path.startswith(prefix):
                 return role
         return "viewer"
+    # 知识审核（M2）：/api/escalations/{id}/knowledge/review 仅管理员，
+    # 必须先于下方 /api/escalations 的 operator 前缀规则判定（人工处置知识入库是受控动作）。
+    if path.startswith("/api/escalations/") and path.endswith("/knowledge/review"):
+        return "admin"
     for prefix, role in _WRITE_ROLE_RULES:
         if path.startswith(prefix):
             return role

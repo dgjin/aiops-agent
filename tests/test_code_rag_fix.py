@@ -711,7 +711,7 @@ class TestRetrieveIndexAutoAdapt(unittest.TestCase):
             repo.mkdir()
             index_path = Path(tmp) / "idx.json"
 
-            def fake_build(repo_dir, index_path, model=None, tickets_path=None):
+            def fake_build(repo_dir, index_path, model=None, tickets_path=None, **kwargs):
                 Path(index_path).write_text(
                     json.dumps({"repo": str(repo_dir), "chunks": []}), encoding="utf-8"
                 )
@@ -730,6 +730,8 @@ class TestRetrieveIndexAutoAdapt(unittest.TestCase):
                 activities._ensure_app_index("svc-auto", repo, index_path)
                 activities._ensure_app_index("svc-auto", repo, index_path)  # fast-path 复用
                 self.assertEqual(build.call_count, 1)
+                # 专属索引只合并本服务知识，避免跨服务串入
+                self.assertEqual(build.call_args.kwargs["knowledge_service"], "svc-auto")
 
     def test_ensure_app_index_rebuilds_on_repo_change(self) -> None:
         """索引存在但登记的仓库已变更 → 自动重建（避免用错仓库的引用）。"""
@@ -743,7 +745,7 @@ class TestRetrieveIndexAutoAdapt(unittest.TestCase):
                 json.dumps({"repo": str(repo_a), "chunks": []}), encoding="utf-8"
             )
 
-            def fake_build(repo_dir, index_path, model=None, tickets_path=None):
+            def fake_build(repo_dir, index_path, model=None, tickets_path=None, **kwargs):
                 Path(index_path).write_text(
                     json.dumps({"repo": str(repo_dir), "chunks": []}), encoding="utf-8"
                 )

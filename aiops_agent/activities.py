@@ -117,7 +117,9 @@ def _ensure_app_index(service: str, repo_dir: Path, index_path: Path) -> None:
         from . import code_rag
 
         started = time.monotonic()
-        summary = code_rag.build_index(repo_dir, index_path=index_path)
+        summary = code_rag.build_index(
+            repo_dir, index_path=index_path, knowledge_service=service
+        )
         log.info(
             "[rag] 应用 %s 专属索引自动构建完成：%d 文件 / %d 块（仓库=%s，耗时=%.1fs，索引=%s）",
             service,

@@ -175,6 +175,11 @@ escalations = Table(
     # 处置分类（M1）：model/approval/sandbox/release/observability/evidence/requirement/other；
     # 历史待办由 bff.escalations.backfill_categories 回填，只分类不改变状态。
     Column("category", String(32), nullable=False, server_default=""),
+    # 结构化关闭记录（M2）：close_reason/actual_root_cause/actual_action/verification/
+    # verdict/knowledge_candidate/knowledge_status 等；旧格式关闭为 NULL（前端按「未结构化」展示）
+    Column("resolution", JSON),
+    # 处置计划（M2）：未关闭待办的处理计划（关闭后保留，便于历史待办分派与追溯）
+    Column("plan", String(1024), nullable=False, server_default=""),
     Column("alert", JSON),
     Column(
         "status",
