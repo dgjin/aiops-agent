@@ -67,6 +67,26 @@ class MigrationBaselineTest(unittest.TestCase):
         columns = {item["name"] for item in inspect(engine).get_columns("monitored_apps")}
         self.assertIn("depends_on", columns)
 
+    def test_runs_kind_risk_added_and_downgraded(self) -> None:
+        """M5：kind/risk 列与联合索引；降级到 0003 移除，重放升级幂等。"""
+        command.upgrade(self._config(), "head")
+        engine = db.get_engine()
+        columns = {item["name"] for item in inspect(engine).get_columns("workflow_runs")}
+        self.assertIn("kind", columns)
+        self.assertIn("risk", columns)
+        indexes = {item["name"] for item in inspect(engine).get_indexes("workflow_runs")}
+        self.assertIn("idx_runs_close_kind", indexes)
+
+        command.downgrade(self._config(), "20261101_0003")
+        columns = {item["name"] for item in inspect(engine).get_columns("workflow_runs")}
+        self.assertNotIn("kind", columns)
+        self.assertNotIn("risk", columns)
+
+        command.upgrade(self._config(), "head")
+        columns = {item["name"] for item in inspect(engine).get_columns("workflow_runs")}
+        self.assertIn("kind", columns)
+        self.assertIn("risk", columns)
+
 
 if __name__ == "__main__":
     unittest.main()

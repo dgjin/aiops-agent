@@ -194,6 +194,8 @@ class TemporalGateway:
         base: dict = {
             "wf_id": wf.id,
             "run_id": wf.run_id,
+            # M5：运营指标按来源拆分（告警修复 vs 需求修复），不得混入同一自动完成率
+            "kind": "requirement" if wf.workflow_type == WF_TYPE_REQUIREMENT else "alert",
             "exec_status": wf.status.name if wf.status else "UNKNOWN",
             "start_time": _iso(wf.start_time),
             "close_time": _iso(wf.close_time),

@@ -1417,4 +1417,112 @@ kubectl -n argocd get application demo-app-<patch_id> -o jsonpath='{.status.oper
 | `STATIC_ONLY` 走到 MR/发布 | 确认 `require_real_tests_for_high_risk=true` 且 `patched("sandbox-verification-gate-v1")` 命中；不得关闭闸门 |
 | 金丝雀长期 `Progressing` | 查 `analysisrun` 是否卡住、`AIOPS_ROLLOUT_NAME` 是否配置 |
 
-容量与并发压测（背压、排队、灰度工具）属 M6 范围，本章不承诺并发上限；当前配额即上限。
+## 13 运营指标与值班看板（M5）
+
+本章让控制台「系统总览 → 运营度量」在 production 走 SQL 聚合，并给出值班告警的处置入口。
+口径定义见《AIOps 闭环生产化实施与验收》第 2 节，处置动作见 `docs/AIOps 值班 Runbook.md`，
+本节只讲数据面依赖、接口契约与验收命令。
+
+### 13.1 数据面依赖
+
+| 分量 | 来源 | 缺失时表现 |
+|---|---|---|
+| 流程维度 | `workflow_runs` 的 `kind` / `risk` / `stage` / `close_time` / `result` | `degraded=warehouse`，回退 Temporal 读侧 |
+| 介入动作 | `audit_events`（审批 / 发布指令 / 排队 / 转人工处置） | 人工干预率与 MTTA 分母变小，`degraded` 含 `audit` |
+| 证据质量 | `log_evidence.quality` | `evidence=None`，面板「暂无数据」 |
+| 服务覆盖率 | `monitored_apps`（`enabled` 且 `service` 非空） | `coverage=null` |
+| 采集心跳 | `<data_root>/log_ship_health.json`（production 为 `data/prod/`，`AIOPS_LOG_HEALTH_PATH` 可覆盖） | `logship.available=false`，告警记为 `unknown` |
+
+上线前必须先升级 schema：
+
+```bash
+AIOPS_MODE=production AIOPS_DATABASE_URL='<dsn>' .venv/bin/alembic upgrade head
+# 应看到 20261101_0004 已应用；确认列与索引
+mysql -e "SHOW COLUMNS FROM workflow_runs LIKE 'kind'; SHOW INDEX FROM workflow_runs WHERE Key_name='idx_runs_close_kind';"
+```
+
+`0004` 只加列与索引，不回填业务数据：存量行 `kind=alert`、`risk=''`，面板按「未标注」归桶。
+若历史数据需要真实 `kind`，走单独的一次性核对脚本，不要用 `UPDATE ... = 'alert'` 掩盖未知。
+
+### 13.2 接口契约与降级
+
+```bash
+# 7 天窗口（days 上限 30）
+curl -s -H "Authorization: Bearer $AIOPS_CONSOLE_TOKEN" \
+  'http://127.0.0.1:8000/api/metrics/ops?days=7' | jq '{
+    source, mirror_updated_at, degraded, closed_total,
+    auto_fix_rate, auto_fix_sample, human_intervention_rate, human_intervention_sample,
+    mttr, mtta, rollback, duty_alerts }'
+
+# Runbook 小节（与面板按钮同一接口、同一份 md）
+curl -s -H "Authorization: Bearer $AIOPS_CONSOLE_TOKEN" \
+  'http://127.0.0.1:8000/api/metrics/ops/runbook?code=log-stall' | jq '{code, known, title}'
+```
+
+- `source=warehouse` 表示走 SQL 镜像；`mirror_updated_at` 是最近一次 `/api/flows` 镜像时间，
+  长期不前进说明控制台没打开或 Worker 未写镜像。
+- `source=temporal` 且 `degraded` 含 `warehouse-empty`：镜像从未同步（空库或首次部署），
+  此时指标来自 Temporal 读侧，**不要**当成「窗口内没有流程」。
+- 分母为 0 的比率是 `null`，页面显示「暂无数据」；`0%` 只可能来自非零分母。
+- `level=unknown` 的告警表示分量不可读或样本不足，处置顺序是修数据面，不是调阈值。
+
+### 13.3 值班告警与首次核验
+
+| code | 触发 | 阈值来源 |
+|---|---|---|
+| `log-stall` | 心跳不健康服务 ≥3（1–2 为 warn） | `log_health.snapshot()` |
+| `escalation-backlog` | 存在超过 SLA 的开放待办 | `AIOPS_ESCALATION_SLA_MINUTES`（默认 30） |
+| `sandbox-failure-streak` | 最近流程连续 ≥3 次 `tests:failed` | `bff/ops_metrics.py::_consecutive` |
+| `model-quality-streak` | 最近流程连续 ≥3 次 `gate1:blocked:confidence` | 同上 |
+| `rollback` | 窗口内出现 `canary:degraded` | 事件链 |
+| `high-confidence-false-pass` | `gate1:composite:pass` 且置信度 ≥0.8 最终仍 `ESCALATED` | 事件链 + 终态 |
+
+首次上线后按顺序核验一次：先确认 `duty_alerts` 里 `unknown` 条目对应的分量（DB / 审计 /
+心跳）已可读，再逐条点开 Runbook 确认小节能渲染；`log-stall` 在采集未部署时保持 `unknown`
+是预期行为，不得为「变绿」而伪造心跳文件。
+
+### 13.4 验收命令与证据
+
+```bash
+# 1) SQL 手算与接口对齐（示例：7 天窗口分母、自动完成率，其余维度同法）
+mysql -e "SELECT COUNT(*) AS closed_total,
+                 SUM(stage='DONE') AS done
+            FROM workflow_runs
+           WHERE close_time >= UTC_TIMESTAMP() - INTERVAL 7 DAY
+             AND exec_status <> 'RUNNING';"
+# 接口应返回 closed_total / auto_fix_sample 与上面一致，auto_fix_rate = done / closed_total
+
+# 2) 分类型分母独立：需求流不得混入告警自动化率
+mysql -e "SELECT kind, COUNT(*) FROM workflow_runs
+           WHERE close_time >= UTC_TIMESTAMP() - INTERVAL 7 DAY GROUP BY kind;"
+
+# 3) 事件链是否已镜像（缺失会让拦截原因/沙箱结果无法回溯）
+mysql -e "SELECT COUNT(*) FROM workflow_runs
+           WHERE close_time >= UTC_TIMESTAMP() - INTERVAL 7 DAY
+             AND JSON_LENGTH(JSON_EXTRACT(result, '$.gate_events')) > 0;"
+
+# 4) 前端构建（改动运营度量组件后必跑）
+cd web && npm run build
+```
+
+证据口径：
+- 面板标题应显示数据源（`SQL 镜像` / `Temporal 读侧`）与镜像同步时间；
+- 每个维度至少抽 1 组分子分母与 SQL 对齐，`degraded` 为空才算通过；
+- 比对结果（窗口起止、SQL、接口值）记入验收记录 M5 的未完成项后再勾选。
+
+### 13.5 失败处置
+
+| 现象 | 处置 |
+|---|---|
+| `source=temporal` 且 `warehouse-empty` | 打开一次控制台触发 `/api/flows` 镜像，或确认 Worker 已写入 `workflow_runs` |
+| `degraded` 含 `audit` | 查 `audit_events` 是否可写；MTTA 会偏小，先修数据面再解读 |
+| 所有比率「暂无数据」 | 窗口内无终态流程或分母为 0，换窗口或先确认流程确实跑完 |
+| `duty_alerts` 为空但面板一片空 | 检查 `degraded`；告警只在数据可读时产生，空告警不等于健康 |
+| Runbook 抽屉显示「未收录」 | `docs/AIOps 值班 Runbook.md` 缺少 `## <code>` 小节，或 code 大小写不匹配 |
+| 镜像时间不前进 | Worker 未运行、`/api/flows` 未被调用、或 `result` 写失败（查 BFF 日志 `runs_store`） |
+
+
+### 13.6 边界
+
+容量与并发压测（背压、排队、灰度工具）属 M6 范围；第 12、13 章均不承诺并发上限，
+当前配额即上限。运营指标只描述已落库的终态流程，不用于实时容量判定。

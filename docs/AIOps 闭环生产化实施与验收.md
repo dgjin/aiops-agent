@@ -25,10 +25,17 @@
 - **MTTR**：`DONE` 流程从告警触发到发布完成的时长，报告样本数、均值与 P95。
 - **人工干预率**：窗口终态流程中，审批、发布指令、排队补丁或转人工处置审计触及的流程占比。
 - **证据充分率**：证据质量为 `OK` 的告警流程占比；观测异常不得计入模型低置信。
-- **真实沙箱通过率**：仅 `UNIT_TEST/CONTRACT_TEST` 结果；`STATIC_ONLY` 单列。
+- **MTTA**：人工介入的终态流程，`start_time` → 首个介入动作（审批/发布指令/排队/转人工处置）的均值与 P95，报告样本数。
+- **回滚率**：命中 `canary:degraded` 的流程 / 进入金丝雀（`canary:healthy` 或 `canary:degraded`）的流程。
+- **采集新鲜度与覆盖率**：按服务心跳（`log_ship_health.json`）计算 P95 心跳年龄与不健康数；覆盖率为有心跳的受管服务 / 启用且配置服务标签的条目。无心跳时一律「暂无数据」，不显示「正常」。
+- **补丁结构可应用率**：补丁具备 diff 与文件清单的占比（结构判定）；真实 `git apply` 结果由发布阶段判定，不并入该口径。
+- **人工改判率**：待办结构化关闭中 `verdict=INCORRECT` 的占比（样本为已给出评价的关闭记录）。
+- **真实沙箱通过率**：仅 `UNIT_TEST` 结果；`CONTRACT_TEST` / `STATIC_ONLY` / `UNKNOWN` 单列。
+- **待办口径**：开放时长均值/P95、处置时长均值、SLA 超时数、关闭原因分布、知识候选（待审核/已入库/已拒绝）；「采用情况」在索引重建回填前为 `null`。
+- **模型成本**：未接入真实计量前 `model_cost_usd=null`，不得以 0 展示。
 - **静态验收单列**：无套件/未声明契约的执行计入 `aiops_sandbox_static_runs_total{verification}`，与 `aiops_sandbox_runs_total` 分开统计；历史归档的空模式一律归一为 `UNKNOWN` 标签，不得进入真实沙箱通过率。
 - **高置信误放行**：达到自动放行分支但经人工判定根因或修复错误的流程数，不能用普通转人工率替代。
-- **空样本**：显示“暂无数据”，比率不得显示为误导性的 0% 或 100%。
+- **空样本**：显示“暂无数据”，比率不得显示为误导性的 0% 或 100%；接口对分母为 0 的比率返回 `null`。
 
 ## 3. 数据库迁移约定
 
@@ -36,6 +43,14 @@
 - `20261101_0001` 是当前结构基线，覆盖空库升级和历史 `ensure_schema` 缺列补齐。
 - 已存在且结构已核对的未版本化生产库，须先备份并在预生产演练后执行 `alembic stamp 20261101_0001`；禁止未经核对直接 stamp 或 downgrade。
 - 后续 schema 变更必须新增显式迁移；应用内 `ensure_schema` 暂时保留用于兼容启动，待全环境版本化后再收敛。
+- 迁移链：`0001` 基线 → `0002` 证据质量/待办分类 → `0003` 结构化关闭/处置计划 →
+  `0004` 运营维度（`workflow_runs.kind` 默认 `alert`、`workflow_runs.risk` 默认空串、
+  组合索引 `idx_runs_close_kind(close_time, kind)`）。
+- `0004` 对空库与历史库均幂等：缺列才加、索引不存在才建；**降级必须先 `drop_index` 再
+  `batch_alter_table` 删列**，否则 SQLite 重表时索引仍引用已删列，报 `no such column: kind`
+  （`tests/test_migrations.py::test_runs_kind_risk_added_and_downgraded` 已锁定该顺序）。
+- 存量行由 `server_default` 兜底（`kind=alert`、`risk=''`），不做无条件数据回填；运营指标
+  对缺失维度按「未标注」归桶，不以默认值冒充真实分类。
 - 基线 downgrade 只用于隔离空库演练，生产禁止直接回退全部业务表。
 
 ## 4. 验收记录
@@ -113,5 +128,21 @@
 - [ ] 在预生产主机完成一次真实健康发布（`SUBMITTED→SYNCING→SYNCED→HEALTHY`）与一次真实劣化回滚（`DEGRADED→ROLLED_BACK`），并把状态序列、AnalysisRun 结果、`rollout history` 回填本节；未执行前不得标记完成。
 - [ ] 固定 `AIOPS_SANDBOX_IMAGE` / `AIOPS_SANDBOX_LOADER_IMAGE` 的真实 `@sha256:` 摘要，并把摘要写入预生产 Secret/ConfigMap（当前代码强制校验，环境侧摘要待填）。
 - [ ] 节点侧 gVisor（runsc + `io.containerd.runsc.v1`）、ArgoCD/Rollouts 版本与 `aiops-worker` ServiceAccount 命名空间需在实机核对，步骤见 `deploy/staging/README.md` 第 2、6 节。
+
+### M5 运营指标与值班看板
+
+- [x] 维度落库：`workflow_runs.kind`（`alert` / `requirement`）与 `risk` 列由迁移 `20261101_0004` 幂等补齐；镜像写入 `bff/runs_store.py` 的变化签名纳入 `kind`、`gate_events` 数量、`test_report` 是否存在与 `patch.risk`，避免同阶段内证据增长被漏写。
+- [x] SQL 数据面：`bff/ops_warehouse.py` 一次窗口取 `workflow_runs`（含 `result` 中的 `gate_events` / `test_report` / `patch`）、`audit_events`、`log_evidence`、`monitored_apps`，行归一后交给纯函数聚合；单分量读取失败只降级该分量并记入 `degraded`。
+- [x] 双轨与降级：production 优先走 SQL 镜像（`source=warehouse`，附 `mirror_updated_at`）；镜像为空且从未同步时回退 Temporal 读侧并置 `degraded=warehouse-empty`，不以 0 条冒充「窗口内无流程」；demo 保持 Temporal + `data/evidence` 文件扫描。
+- [x] 分维度口径：按流程类型（告警/需求各自独立分母）、按服务、按风险等级分别给出自动完成率、人工干预率与 MTTR；`risk` 优先取镜像列，历史行回退 `patch.risk`；服务维度按流程数取前 10，其余不隐藏为 0。
+- [x] 新增指标（分母为 0 一律 `null`）：MTTA（`start_time` → 首个审批/发布指令/排队/转人工处置，均值 + P95 + 样本数）、回滚率（命中 `canary:degraded` / 进入金丝雀）、日志采集新鲜度与覆盖率（心跳 P95 年龄、不健康服务、受管服务覆盖率）、补丁结构可应用率、人工改判率（`verdict=INCORRECT` / 已评价关闭）、高置信误放行数。
+- [x] 沙箱口径：真实沙箱通过率只统计 `UNIT_TEST`；`CONTRACT_TEST` / `STATIC_ONLY` / `UNKNOWN` 单列计数，不并入分子分母；知识「采用情况」与模型成本在计量接入前保持 `null`，不以 0 展示。
+- [x] 值班告警与 Runbook：`log-stall` / `escalation-backlog` / `sandbox-failure-streak` / `model-quality-streak` / `rollback` / `high-confidence-false-pass` 六类告警，`level=unknown` 表示数据不足而非正常；新增 `GET /api/metrics/ops/runbook?code=`，由 `bff/runbooks.py` 从 `docs/AIOps 值班 Runbook.md` 的 `## <code>` 小节单源读取（正则校验 code，拒绝路径穿越）。
+- [x] 前端：系统总览的运营度量改成值班看板——值班告警置顶（等级徽标 / 观测值 / 阈值 / 明细 / Runbook 抽屉）、6 张 KPI 卡、分来源与分风险、证据与采集、沙箱与补丁质量、待办与知识、分服务前 10、拦截分档；比率为 `null` 时显示「暂无数据」，标题标注数据源与镜像同步时间。
+- [x] 文档：新增 `docs/AIOps 值班 Runbook.md`（通用读法 + 六节处置 + 阈值一览）；测试锁定「聚合产出的每个 `duty_alerts[].code` 必须有对应 Runbook 小节」，防止告警改码后文档失联。
+- [x] 单测覆盖：`test_ops_metrics_m5`（23）、`test_ops_warehouse`（11，含 SQL 数据面与手算一致性）、`test_runbooks`（8）、`test_migrations` 新增 kind/risk 升级与降级 1 例；全量 `Ran 1736 tests … OK (skipped=6)`（M4 结束 1693，本里程碑新增 43）。
+- [ ] 生产 MySQL 8 实机执行 `alembic upgrade head`（`0004`）并抽样核对存量行列值与索引命中计划；当前只在 SQLite 空库/历史库/回退路径验证。
+- [ ] 真实 7 天窗口的 `/api/metrics/ops` 与手工 SQL 聚合抽样比对（每个维度至少 1 组分子分母），确认 `source=warehouse` 且 `degraded` 为空。
+- [ ] 模型成本计量与知识采用情况回填（`cost.model_cost_usd`、`escalations.knowledge.adopted`）待计量数据源与索引重建记录接入后补齐。
 
 后续里程碑在此文件追加实测结果；未执行的真实环境项目不得标记完成。

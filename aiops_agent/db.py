@@ -150,6 +150,10 @@ workflow_runs = Table(
     Column("run_id", String(128), nullable=False, server_default=""),
     Column("stage", String(32), nullable=False, server_default=""),
     Column("exec_status", String(32), nullable=False, server_default=""),
+    # 流程来源（M5）：alert=告警修复 / requirement=需求修复；运营指标必须分开统计
+    Column("kind", String(16), nullable=False, server_default="alert"),
+    # 变更风险等级原文（M5）：来自 patch.risk，指标侧按高/中/低/未知分桶
+    Column("risk", String(32), nullable=False, server_default=""),
     Column("alert", JSON),
     Column("confidence", Float),
     Column("patch_id", String(128)),
@@ -161,6 +165,7 @@ workflow_runs = Table(
     Column("updated_at", DateTime, nullable=False),
     Index("idx_runs_stage", "stage"),
     Index("idx_runs_started", "start_time"),
+    Index("idx_runs_close_kind", "close_time", "kind"),
 )
 
 escalations = Table(

@@ -124,10 +124,16 @@ class RateTest(unittest.TestCase):
         self.assertEqual(sum(breakdown.values()), 3)
 
     def test_zero_total_rates(self) -> None:
+        """空样本：比率必须为 None（前端显示「暂无数据」），不得是 0.0 / 100%。"""
         data = ops_metrics.compute([], [], None, days=7, now=NOW)
-        self.assertEqual(data["auto_fix_rate"], 0.0)
-        self.assertEqual(data["human_intervention_rate"], 0.0)
-        self.assertEqual(data["gate_block_rate"], 0.0)
+        self.assertIsNone(data["auto_fix_rate"])
+        self.assertIsNone(data["human_intervention_rate"])
+        self.assertIsNone(data["gate_block_rate"])
+        self.assertIsNone(data["rollback"]["rate"])
+        self.assertIsNone(data["evidence"]["ok_rate"])
+        self.assertFalse(data["evidence"]["available"])
+        self.assertFalse(data["sandbox"]["available"])
+        self.assertIsNone(data["cost"]["model_cost_usd"])
 
     def test_escalations_snapshot_passthrough(self) -> None:
         stats = {"total": 3, "open": 1, "assigned": 1, "closed": 1}

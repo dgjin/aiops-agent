@@ -21,7 +21,7 @@ from aiops_agent import db as db_layer
 from aiops_agent import metrics, mode
 
 # 变化签名键（任一变化即触发 upsert）
-_SIGNATURE_FIELDS = ("stage", "exec_status", "close_time", "confidence", "patch_id")
+_SIGNATURE_FIELDS = ("stage", "exec_status", "close_time", "confidence", "patch_id", "kind")
 
 # 终态集合：首次出现时计 workflow_completed 指标（SHADOWED 为 P1-2 影子档终态）
 _TERMINAL_STAGES = {"DONE", "ESCALATED", "CANCELLED", "FAILED", "SHADOWED"}
@@ -30,7 +30,17 @@ _last_seen: dict[str, tuple] = {}
 
 
 def _signature(item: dict) -> tuple:
-    return tuple(item.get(field) for field in _SIGNATURE_FIELDS)
+    """变化签名：核心字段之外，闸门事件链、测试报告、风险必须参与比对。
+
+    运行时事件是追加式的（``gate1:blocked`` → ``tests:failed`` → ``gate2:approved``），
+    只看 stage 会漏掉「同阶段内证据增长」，导致 SQL 数据面缺事件链、
+    运营指标中的拦截原因与沙箱结果无法回溯。
+    """
+    return tuple(item.get(field) for field in _SIGNATURE_FIELDS) + (
+        len(item.get("gate_events") or []),
+        bool(item.get("test_report")),
+        str((item.get("patch") or {}).get("risk") or ""),
+    )
 
 
 def _clear_cache() -> None:
@@ -44,13 +54,23 @@ def _upsert(conn, item: dict) -> None:
         "run_id": item.get("run_id") or "",
         "stage": item.get("stage") or "",
         "exec_status": item.get("exec_status") or "",
+        # M5：运营指标按来源与风险分维度；历史行由 server_default/空串兜底
+        "kind": "requirement" if item.get("kind") == "requirement" else "alert",
+        "risk": str((item.get("patch") or {}).get("risk") or "")[:32],
         "alert": item.get("alert"),
         "confidence": item.get("confidence"),
         "patch_id": item.get("patch_id"),
         "start_time": db_layer.to_dt(item.get("start_time")),
         "close_time": db_layer.to_dt(item.get("close_time")),
         "duration_seconds": item.get("duration_seconds"),
-        "result": item.get("result"),
+        # M5：闸门事件链 / 测试报告 / 补丁元数据落 result，供运营指标的 SQL 数据面复用；
+        # 只存摘要（不含原始日志与 diff 全文以外的证据正文）
+        "result": {
+            "gate_events": list(item.get("gate_events") or []),
+            "test_report": item.get("test_report"),
+            "patch": item.get("patch"),
+            "root_cause": item.get("root_cause"),
+        },
         "mode": "production",
         "updated_at": db_layer.now_dt(),
     }

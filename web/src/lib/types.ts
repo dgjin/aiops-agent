@@ -945,7 +945,8 @@ export interface EscalationWriteResp extends Timed {
 }
 
 // ----------------------------------------------------------------------
-// 运营度量（P1-4）：MTTR / 自动修复率 / 人工干预率 / 闸门拦截率
+// 运营度量（M5）：分维度完成率 / MTTA / 回滚 / 证据 / 沙箱 / 待办 SLA / 值班告警
+// 口径：所有比率在分母为 0 时为 null，页面显示「暂无数据」，不得渲染成 0%。
 // ----------------------------------------------------------------------
 
 /** 闸门拦截分档计数（key 为事件族前缀）。 */
@@ -955,25 +956,155 @@ export interface OpsGateBreakdown {
   count: number
 }
 
+/** 单一口径块（总览 / 按来源复用同一结构）。 */
+export interface OpsRateBlock {
+  closed: number
+  done: number
+  auto_fix_rate: number | null
+  human_intervention_rate: number | null
+  human_intervention_sample: number
+  mttr: { avg_seconds: number | null; p95_seconds: number | null; sample: number }
+}
+
+export interface OpsRiskRow {
+  key: string
+  label: string
+  closed: number
+  done: number
+  auto_fix_rate: number | null
+}
+
+export interface OpsServiceRow {
+  service: string
+  closed: number
+  done: number
+  auto_fix_rate: number | null
+  human_intervention_rate: number | null
+}
+
+export interface OpsEvidenceStatusRow {
+  key: string
+  label: string
+  count: number
+  /** 观测面异常（Loki 不可用/无日志/过期/未映射）：不计入模型低置信 */
+  observability: boolean
+}
+
+export interface OpsEvidenceBlock {
+  available: boolean
+  sample: number
+  ok_rate: number | null
+  observability_share: number | null
+  by_status: OpsEvidenceStatusRow[]
+}
+
+export interface OpsLogShipBlock {
+  available: boolean
+  services: number
+  healthy: number
+  unhealthy: number
+  freshness_p95_seconds: number | null
+  coverage: { covered: number; total: number; rate: number | null } | null
+  unhealthy_services: string[]
+}
+
+export interface OpsSandboxModeRow {
+  key: string
+  label: string
+  count: number
+  passed: number
+  /** 仅 UNIT_TEST 计入真实通过率；CONTRACT_TEST / STATIC_ONLY 单列 */
+  is_real: boolean
+}
+
+export interface OpsSandboxBlock {
+  available: boolean
+  sample: number
+  by_mode: OpsSandboxModeRow[]
+  real_pass_rate: number | null
+  real_sample: number
+  static_count: number
+  contract_count: number
+  unknown_count: number
+  /** 结构可应用率：补丁具备 diff + 文件清单（真实 git apply 由发布阶段判定） */
+  patch_structural_rate: number | null
+  patch_structural_sample: number
+  /** 人工改判率：待办关闭时判定「AI 根因不正确」的占比 */
+  override_rate: number | null
+  override_sample: number
+  high_confidence_false_pass: number
+}
+
+export interface OpsEscalationDetailBlock {
+  available: boolean
+  open_sample: number
+  open_avg_seconds: number | null
+  open_p95_seconds: number | null
+  handle_avg_seconds: number | null
+  sla_minutes: number
+  sla_breach: number | null
+  close_reasons: Array<{ key: string; label: string; count: number }>
+  knowledge: { draft: number; approved: number; rejected: number; adopted: number | null }
+}
+
+export interface OpsDutyAlert {
+  code: string
+  label: string
+  /** danger / warn / unknown（数据不足时为 unknown，不冒充「正常」） */
+  level: string
+  value: number | null
+  threshold: string
+  detail: string
+  /** 仓库内 Runbook 相对路径 + 锚点（如 docs/AIOps 值班 Runbook.md#log-stall） */
+  runbook: string
+}
+
 export interface OpsMetricsResp extends Timed {
   period_days: number
+  /** 数据面：warehouse（production SQL 镜像）/ temporal（读侧回退） */
+  source: string
+  /** SQL 镜像最近同步时间（warehouse 数据面） */
+  mirror_updated_at?: string | null
   /** 窗口内终态流程总数（各项比率的共同分母） */
   closed_total: number
   by_stage: Record<string, number>
   /** 告警→发布完成时长（仅 DONE 样本） */
   mttr: { avg_seconds: number | null; p95_seconds: number | null; sample: number }
   /** DONE / 全部终态 */
-  auto_fix_rate: number
+  auto_fix_rate: number | null
   auto_fix_sample: number
   /** 被人工写操作（审批/指令/排队/转人工处置）触及的终态占比 */
-  human_intervention_rate: number
+  human_intervention_rate: number | null
   human_intervention_sample: number
+  /** 告警触发 → 首个人工动作 */
+  mtta: { avg_seconds: number | null; p95_seconds: number | null; sample: number }
   /** gate_events 命中拦截族的终态占比 */
-  gate_block_rate: number
+  gate_block_rate: number | null
   gate_block_sample: number
   gate_breakdown: OpsGateBreakdown[]
+  /** 分来源（alert=告警修复 / requirement=需求修复），分母各自独立 */
+  by_kind: Record<string, OpsRateBlock>
+  by_risk: OpsRiskRow[]
+  by_service: OpsServiceRow[]
+  /** 回滚率：degraded / 进入金丝雀（healthy 或 degraded） */
+  rollback: { rate: number | null; sample: number; released: number }
+  evidence: OpsEvidenceBlock
+  logship: OpsLogShipBlock
+  sandbox: OpsSandboxBlock
+  escalation_detail: OpsEscalationDetailBlock
+  cost: { available: boolean; model_cost_usd: number | null; note: string }
+  duty_alerts: OpsDutyAlert[]
   /** 转人工待办现状（存储不可读时为 null） */
   escalations: EscalationStats | null
-  /** 数据源降级的部件名（temporal / audit / escalations） */
+  /** 数据源降级的部件名（temporal / audit / escalations / warehouse…） */
   degraded: string[]
+}
+
+export interface OpsRunbookResp extends Timed {
+  code: string
+  title: string
+  body: string
+  path: string
+  /** 文件缺失或 code 未收录时为 false（前端给出人工排查指引） */
+  known: boolean
 }

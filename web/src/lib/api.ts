@@ -19,6 +19,7 @@ import type {
   MonitoredAppsResp,
   MonitoredAppWriteResp,
   OpsMetricsResp,
+  OpsRunbookResp,
   OverviewResp,
   RequirementAnalysesResp,
   RequirementAnalysisApproveResp,
@@ -336,8 +337,11 @@ export const api = {
       method: 'POST',
     }),
 
-  /** 运营度量（P1-4）：MTTR / 自动修复率 / 人工干预率 / 闸门拦截率。 */
+  /** 运营度量（M5）：分维度完成率 / MTTA / 证据 / 沙箱 / 待办 SLA / 值班告警。 */
   opsMetrics: (days = 7) => request<OpsMetricsResp>(`/api/metrics/ops${qs({ days })}`),
+  /** 值班 Runbook 片段（读 docs/AIOps 值班 Runbook.md，按告警 code 取小节）。 */
+  opsRunbook: (code: string) =>
+    request<OpsRunbookResp>(`/api/metrics/ops/runbook${qs({ code })}`),
 
   // 被监控应用维护（写盘即热生效）
   monitoredApps: () => request<MonitoredAppsResp>('/api/monitored-apps'),
