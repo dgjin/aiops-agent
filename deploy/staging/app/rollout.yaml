@@ -1,0 +1,99 @@
+# 预生产示例应用：Argo Rollouts 金丝雀（5% → 50% → 100%，劣化自动中止）
+#
+# 说明：
+#   - 镜像由 AIOps 发布流程写入（tag=<patch_id>）；此处为占位，禁止直接用于生产；
+#   - 5% 首步与 policy.canary.traffic_percent 对齐；
+#   - 每步暂停由 AnalysisRun 判定：成功率 <95% 或 P99 >500ms 即失败并回滚；
+#   - ArgoCD Application 指向本目录（deploy/staging/app）。
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: demo-app
+  namespace: aiops-staging
+  labels:
+    app: demo-app
+    aiops.io/managed-by: aiops-agent
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: demo-app
+  template:
+    metadata:
+      labels:
+        app: demo-app
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: demo-app
+          image: REPLACE_ME/aiops-demo-app:REPLACE_ME
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+  strategy:
+    canary:
+      # 金丝雀与稳定版共用一个 Service，按权重分流
+      stableService: demo-app-stable
+      canaryService: demo-app-canary
+      maxSurge: 1
+      maxUnavailable: 0
+      steps:
+        - setWeight: 5
+        - pause: { duration: 5m }
+        - analysis:
+            templates:
+              - templateName: demo-app-slo
+        - setWeight: 50
+        - pause: { duration: 5m }
+        - analysis:
+            templates:
+              - templateName: demo-app-slo
+        - setWeight: 100
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-app-stable
+  namespace: aiops-staging
+  labels:
+    app: demo-app
+spec:
+  selector:
+    app: demo-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-app-canary
+  namespace: aiops-staging
+  labels:
+    app: demo-app
+spec:
+  selector:
+    app: demo-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

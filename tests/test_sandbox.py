@@ -132,23 +132,29 @@ class TestDockerSandboxRunner(unittest.TestCase):
 
     def test_run_parses_completed_process(self) -> None:
         job = sandbox.SandboxJob(patch_id="p2", workspace=Path("/tmp/ws"))
-        proc = mock.Mock(returncode=0, stdout=b"", stderr=b"...\nRan 6 tests in 0.002s\n\nOK\n")
-        with mock.patch("aiops_agent.sandbox.subprocess.run", return_value=proc) as run:
+        result = sandbox._ExecResult(
+            exit_code=0, stdout="", stderr="...\nRan 6 tests in 0.002s\n\nOK\n"
+        )
+        with mock.patch("aiops_agent.sandbox._execute", return_value=result) as execute:
             outcome = sandbox.DockerSandboxRunner().run(job)
         self.assertTrue(outcome.passed)
         self.assertEqual(outcome.tests_run, 6)
         self.assertEqual(outcome.exit_code, 0)
-        args, kwargs = run.call_args
-        self.assertIsInstance(args[0], list)  # 参数列表调用（shell=False）
-        self.assertFalse(kwargs.get("shell", False))
+        cmd = execute.call_args[0][0]
+        self.assertIsInstance(cmd, list)  # 参数列表调用（shell=False）
+        self.assertEqual(cmd[0], "docker")
 
     def test_run_timeout_marks_failed(self) -> None:
         job = sandbox.SandboxJob(patch_id="p3", workspace=Path("/tmp/ws"), timeout_seconds=1)
-        expired = subprocess.TimeoutExpired(cmd="docker", timeout=1)
-        with mock.patch("aiops_agent.sandbox.subprocess.run", side_effect=expired):
+        timed_out = sandbox._ExecResult(exit_code=-1, stdout="", stderr="", timed_out=True)
+        clean = sandbox._ExecResult(exit_code=0, stdout="", stderr="")
+        with mock.patch(
+            "aiops_agent.sandbox._execute", side_effect=[clean, timed_out, clean, clean]
+        ):
             outcome = sandbox.DockerSandboxRunner().run(job)
         self.assertTrue(outcome.timed_out)
         self.assertFalse(outcome.passed)
+        self.assertTrue(outcome.cleanup_verified)
 
 
 class TestK8sManifest(unittest.TestCase):
@@ -230,7 +236,8 @@ class TestPrepareWorkspaceAndRunTests(unittest.TestCase):
         report = sandbox.run_patch_tests(patch, 0, sandbox_root=self.tmp, runner=fake)
         self.assertTrue(report.passed)
         self.assertEqual(report.unit_tests, "6/6 passed")
-        self.assertIn("demo-app/tests", report.regression_tests)
+        self.assertIn("6 用例", report.regression_tests)
+        self.assertEqual(report.verification_mode, sandbox.MODE_UNIT_TEST)
         job = fake.run.call_args[0][0]
         self.assertIsInstance(job, sandbox.SandboxJob)
         self.assertTrue((job.workspace / "order_service.py").is_file())

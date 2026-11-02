@@ -84,6 +84,10 @@ _GATE_EXACT = {
     "shadow:suggestion-only": ("影子模式：仅出建议，不执行变更", "idle"),
     "canary:degraded->rollback": ("金丝雀劣化 → 已自动回滚，转人工", "danger"),
     "canary:healthy->full-rollout": ("金丝雀健康 → 全量发布完成", "ok"),
+    "release:blocked:static-only:high-risk": (
+        "发布准入：静态验收不能作为高风险变更的唯一依据，已转人工",
+        "danger",
+    ),
 }
 
 

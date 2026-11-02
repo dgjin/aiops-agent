@@ -1,0 +1,26 @@
+# 预生产命名空间（M4）
+#
+# aiops-staging ：控制面（worker/BFF/webhook）+ 预生产应用
+# aiops-sandbox ：沙箱 Job 专用（不可信工作负载），与业务负载强隔离
+#
+# pod-security 标签：aiops-sandbox 强制 restricted（沙箱 Job 已满足该档：
+# runAsNonRoot、drop ALL、seccomp RuntimeDefault、只读根文件系统）。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aiops-staging
+  labels:
+    app.kubernetes.io/part-of: aiops-agent
+    aiops.io/environment: staging
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aiops-sandbox
+  labels:
+    app.kubernetes.io/part-of: aiops-agent
+    aiops.io/environment: staging
+    aiops.io/trust: untrusted-workload
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

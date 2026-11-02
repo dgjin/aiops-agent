@@ -1,0 +1,21 @@
+# 预生产一键应用（M4）
+#
+#   kubectl apply -k deploy/staging/
+#
+# 说明：
+#   - app/ 目录不在此处应用：它由 ArgoCD 按 Git 同步（Application 指向
+#     deploy/staging/app），避免两套控制器同时管理同一份工作负载；
+#   - secret.example.yaml 不在此处应用：凭证走命令行/External Secrets 注入；
+#   - policy.staging.yaml 是文件而非 K8s 对象：挂载进 Worker ConfigMap/卷后
+#     以 AIOPS_POLICY_PATH 指向。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - runtimeclass.yaml
+  - rbac.yaml
+  - networkpolicy.yaml
+  - sandbox-quota.yaml
+  - application.yaml
+commonLabels:
+  app.kubernetes.io/part-of: aiops-agent

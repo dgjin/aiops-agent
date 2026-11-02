@@ -1,0 +1,74 @@
+# 最小 RBAC（M4）：沙箱执行器与 Rollout 状态读取
+#
+# 设计约束：
+#   - Worker 只获得 aiops-sandbox 命名空间的 Job/Pod/日志/Secret 权限，
+#     不能读其他命名空间的 Secret，也不能 exec 进 Pod；
+#   - Rollouts 只读（get/list/watch），回滚走 ArgoCD API（令牌由 Secret 注入），
+#     不授予 CRD patch 权限；
+#   - 不绑定 cluster-admin，不使用 cluster-admin 的默认 ServiceAccount。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aiops-worker
+  namespace: aiops-staging
+  labels:
+    app.kubernetes.io/part-of: aiops-agent
+---
+# aiops-sandbox：Job 全生命周期 + 工作区 Secret + 日志读取
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aiops-sandbox-runner
+  namespace: aiops-sandbox
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aiops-worker-sandbox-runner
+  namespace: aiops-sandbox
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aiops-sandbox-runner
+subjects:
+  - kind: ServiceAccount
+    name: aiops-worker
+    namespace: aiops-staging
+---
+# aiops-staging：Argo Rollouts 进度只读（argo_status.rollout_state）
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aiops-rollout-reader
+  namespace: aiops-staging
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["rollouts", "analysisruns"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aiops-worker-rollout-reader
+  namespace: aiops-staging
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aiops-rollout-reader
+subjects:
+  - kind: ServiceAccount
+    name: aiops-worker
+    namespace: aiops-staging

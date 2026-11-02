@@ -1,0 +1,15 @@
+# gVisor RuntimeClass（M4）：沙箱 Job 的用户态内核隔离
+#
+# 前置条件（节点侧，见 README 2.1）：
+#   1. 安装 runsc 并把 runsc 注册到 containerd（k3s 的 /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl）
+#   2. 重启 k3s 后 `kubectl get runtimeclass` 应能看到本对象
+#
+# 注意：本对象不绑定 nodeSelector —— 单节点 k3s 上直接可用；
+# 多节点集群把沙箱固定到独立节点池的做法见 README 2.3（需同时改 Job 模板）。
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+  labels:
+    app.kubernetes.io/part-of: aiops-agent
+handler: runsc

@@ -26,6 +26,7 @@
 - **人工干预率**：窗口终态流程中，审批、发布指令、排队补丁或转人工处置审计触及的流程占比。
 - **证据充分率**：证据质量为 `OK` 的告警流程占比；观测异常不得计入模型低置信。
 - **真实沙箱通过率**：仅 `UNIT_TEST/CONTRACT_TEST` 结果；`STATIC_ONLY` 单列。
+- **静态验收单列**：无套件/未声明契约的执行计入 `aiops_sandbox_static_runs_total{verification}`，与 `aiops_sandbox_runs_total` 分开统计；历史归档的空模式一律归一为 `UNKNOWN` 标签，不得进入真实沙箱通过率。
 - **高置信误放行**：达到自动放行分支但经人工判定根因或修复错误的流程数，不能用普通转人工率替代。
 - **空样本**：显示“暂无数据”，比率不得显示为误导性的 0% 或 100%。
 
@@ -93,5 +94,24 @@
 - [ ] 27B holdout 完整评测（17 条修复 + 14 条弃权 + 26 条根因）需在评测机执行；未产出报告前 `data/model_quality_bar.json` 保持缺省，release 策略按设计一律转人工。
 - [ ] `data/eval_baseline.json` 待首个 holdout 全绿报告 `--write-baseline` 晋升后入库；当前报告结论为 `baseline_missing`（硬阈值仍生效）。
 - [ ] 自托管 `aiops-eval` runner 注册与首次每日任务实跑记录需在部署环境回填。
+
+### M4 沙箱对齐、K8s 执行器与预生产清单
+
+- [x] Docker 沙箱加固：`--user 65534:65534`、`--cap-drop ALL`、`no-new-privileges`、只读根 + `--tmpfs /tmp`、`--network none`、可选 seccomp；输出按流截断 256KiB、工作区上限 256MiB；超时 `killpg` 后按 `_reclaim` 二次核对，容器未回收即判失败而非静默放过（`tests/test_sandbox_hardening.py`）。
+- [x] 镜像固定：生产环境强制 `@sha256:` 摘要，缺摘要时报错文案直接给出 `python:<tag>@sha256:<digest>` 形式；摘要缺失不计入「已固定」。
+- [x] 执行计划：Python（pytest/unittest）与 Node（`package.json` 脚本、无 `test` 脚本时只跑 build/tsconfig/contract/static）分别生成步骤；缺依赖、缺脚本时不伪造通过。
+- [x] K8s Job 执行器（`K8sJobSandboxRunner`）：工作区打包为 Secret（>512KiB 显式失败）→ 幂等 Job 名 `aiops-sandbox-<patch>-<spec_hash>`（409 同 spec 复用、异 spec 重建）→ `runtimeClassName: gvisor`、`runAsNonRoot 65534`、`readOnlyRootFilesystem`、drop ALL、`seccompProfile: RuntimeDefault`、`automountServiceAccountToken: false` → 轮询 `activeDeadlineSeconds` → 读 Pod 日志 → 删除 Job/Secret 并核对 Pod 消失。
+- [x] 六类路径单测：成功、测试失败、镜像拉取失败、超时、日志读取失败、清理超时均有确定结论（`tests/test_k8s_sandbox.py`），另覆盖 Secret 超限、production 摘要强制、集群不可达与 API 404 重试。
+- [x] 验证口径修正：`verification_mode` 为空（历史归档）不再默认按 `UNIT_TEST` 渲染，统一归一为 `UNKNOWN` 并计入静态指标；仅 `UNIT_TEST` 计入 `aiops_sandbox_runs_total`。修复前空模式会让历史记录被计入真实沙箱通过率。
+- [x] 工作流静态验收闸门 `sandbox-verification-gate-v1`：高风险（受保护目录或风险等级含「高/高：」）变更必须是 `UNIT_TEST` 且确实跑过用例，否则 `ESCALATED`；`STATIC_ONLY` / `CONTRACT_TEST` / `UNKNOWN` 均不放行；开关关闭或 `patched()` 未命中时保持旧行为，重放不改变历史结论（`tests/test_workflow_static_gate.py`、`tests/test_release_replay.py`）。
+- [x] ArgoCD/Rollouts 状态机（`aiops_agent/argo_status.py`）：`RECORDED/SUBMITTED/SYNCING/SYNCED/HEALTHY/DEGRADED/ROLLED_BACK/FAILED` 八态，`derive_state` 覆盖 Sync/Health/OperationPhase 组合；`rollout_progress` 从 `spec.strategy.canary.steps` 读总步数；`rollback` 固定 `revision=0`（上一版本）；HTTP 错误统一包装为 `ArgoStatusError`。
+- [x] 集群发布：`release_executor()` 显式 `AIOPS_RELEASE_EXECUTOR` 优先，否则按 `AIOPS_ARGOCD_URL` 决定；`_run_cluster_canary` 只认 `HEALTHY`，`DEGRADED` 转 finalize 回滚，不可达/超时抛 `ReleaseSafetyError`；错误率与 P99 由 AnalysisRun 判定，本层返回 `-1` 并标注 `slo_source=argocd-rollout`，不伪造 0。
+- [x] 终态落盘修复：集群金丝雀原先只靠 `on_state` 回调写 journal，客户端不回调时记录停在 `SUBMITTED`；现于 `wait` 返回后显式 `record.update(release_status=state)`（`tests/test_release_cluster.py` 覆盖无回调场景）。
+- [x] 预生产清单（`deploy/staging/`）：独立命名空间与 restricted PSA、`RuntimeClass gvisor`、最小 RBAC（沙箱 Job/Pod/日志/Secret + Rollouts 只读，无原子级通配、无 `pods/exec`）、default-deny NetworkPolicy（沙箱连 DNS 一并拒绝；staging 仅放行 DNS/同命名空间/ingress-nginx/监控/443/Loki/OTLP/apiserver）、沙箱 ResourceQuota 20 Job / 40 Pod / 4 CPU / 8 GiB、示例 Secret（全占位）、`policy.staging.yaml`（`shadow_mode: true`、阈值 0.8 未放宽）、Rollout 5%→50%→100% 与两个 AnalysisTemplate 指标。
+- [x] 清单自检：`tests/test_staging_manifests.py`（23 例）校验 YAML 可解析、kustomize 引用存在、默认拒绝与端口白名单、无集群级绑定、配额与策略阈值、占位值只出现在允许文件、README 明确标注「真实集群未验证」。
+- [x] 全量回归：`Ran 1693 tests … OK (skipped=6)`（M3 结束 1586，M4 新增 107 例：沙箱加固 22、K8s 执行器 16、ArgoCD 状态 16、集群发布 20、静态闸门 10、清单自检 23）。
+- [ ] 在预生产主机完成一次真实健康发布（`SUBMITTED→SYNCING→SYNCED→HEALTHY`）与一次真实劣化回滚（`DEGRADED→ROLLED_BACK`），并把状态序列、AnalysisRun 结果、`rollout history` 回填本节；未执行前不得标记完成。
+- [ ] 固定 `AIOPS_SANDBOX_IMAGE` / `AIOPS_SANDBOX_LOADER_IMAGE` 的真实 `@sha256:` 摘要，并把摘要写入预生产 Secret/ConfigMap（当前代码强制校验，环境侧摘要待填）。
+- [ ] 节点侧 gVisor（runsc + `io.containerd.runsc.v1`）、ArgoCD/Rollouts 版本与 `aiops-worker` ServiceAccount 命名空间需在实机核对，步骤见 `deploy/staging/README.md` 第 2、6 节。
 
 后续里程碑在此文件追加实测结果；未执行的真实环境项目不得标记完成。

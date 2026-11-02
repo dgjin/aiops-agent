@@ -1,0 +1,162 @@
+# 预生产网络策略（M4）：默认拒绝 + 白名单
+#
+# aiops-sandbox：完全隔离（Ingress/Egress 全拒绝，且不放行 DNS）。
+#   沙箱 Job 执行命令为镜像内预装依赖，不需要出网；工作区经 Secret 注入。
+#   若确需内部制品库，必须新增 ipBlock 白名单而不是整体放开。
+#
+# aiops-staging：只放行控制面必需流量：
+#   - DNS（CoreDNS）
+#   - 同命名空间互访（worker↔temporal↔bff↔webhook）
+#   - ingress-nginx → BFF:8600
+#   - monitoring → webhook:8099 / BFF:8600
+#   - 出网：443（Git 平台 / Ollama / ArgoCD API / 通知回调）
+#   - 出网：Loki 3100 / OTLP 4318（observability 命名空间）
+#   - 出网：K8s API（k3s 默认 Service CIDR 10.43.0.0/16；其他发行版按实际调整）
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-default-deny
+  namespace: aiops-sandbox
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: staging-default-deny
+  namespace: aiops-staging
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: staging-allow-dns
+  namespace: aiops-staging
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: staging-allow-intra-namespace
+  namespace: aiops-staging
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - to:
+        - podSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: staging-allow-ingress-nginx-to-bff
+  namespace: aiops-staging
+spec:
+  podSelector:
+    matchLabels:
+      app: aiops-bff
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8600
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: staging-allow-monitoring
+  namespace: aiops-staging
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["aiops-webhook", "aiops-bff"]
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8099
+        - protocol: TCP
+          port: 8600
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: staging-allow-egress-web
+  namespace: aiops-staging
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: staging-allow-egress-observability
+  namespace: aiops-staging
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - protocol: TCP
+          port: 3100
+        - protocol: TCP
+          port: 4318
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: staging-allow-egress-apiserver
+  namespace: aiops-staging
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    # k3s 默认 Service CIDR；创建沙箱 Job / 读日志 / 读 Rollout 均经此路径
+    - to:
+        - ipBlock:
+            cidr: 10.43.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443

@@ -1,0 +1,30 @@
+# ArgoCD Application（预生产）：发布流程提交/等待的对象
+#
+# 与 aiops_agent/release.py 的约定：
+#   - Application 名称 = demo-app-<patch_id>（_cluster_app_name）；
+#   - 同步源为 Git 标签 refs/tags/<patch_id> 下的 deploy/staging/app；
+#   - 目标命名空间 aiops-staging；HEALTHY 才允许显示「发布完成」。
+#
+# 部署前把 REPLACE_ME 替换为真实 Git 仓库地址（不得使用占位地址做验收）。
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-app-staging
+  namespace: argocd
+  labels:
+    aiops.io/environment: staging
+spec:
+  project: aiops
+  source:
+    repoURL: https://REPLACE_ME/ops/demo-app.git
+    targetRevision: main
+    path: deploy/staging/app
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: aiops-staging
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false

@@ -72,6 +72,11 @@ if _AVAILABLE:
         "aiops_fix_duration_seconds", "修复生成耗时", ["provider", "mode"]
     )
     SANDBOX_RUNS = Counter("aiops_sandbox_runs_total", "沙箱执行数", ["passed", "mode"])
+    SANDBOX_STATIC_RUNS = Counter(
+        "aiops_sandbox_static_runs_total",
+        "静态验收次数（不计入真实沙箱通过率）",
+        ["passed", "verification", "mode"],
+    )
     SANDBOX_DURATION = Histogram("aiops_sandbox_duration_seconds", "沙箱执行耗时", ["mode"])
     CANARY_DEPLOYS = Counter("aiops_canary_deploys_total", "金丝雀发布数", ["healthy", "mode"])
     CANARY_ERROR_RATE = Histogram(
@@ -94,6 +99,7 @@ else:  # pragma: no cover - 降级分支
     FIX_ATTEMPTS = _NoopMetric()
     FIX_DURATION = _NoopMetric()
     SANDBOX_RUNS = _NoopMetric()
+    SANDBOX_STATIC_RUNS = _NoopMetric()
     SANDBOX_DURATION = _NoopMetric()
     CANARY_DEPLOYS = _NoopMetric()
     CANARY_ERROR_RATE = _NoopMetric()
@@ -215,6 +221,19 @@ def observe_sandbox_run(passed: bool, duration: float | None = None) -> None:
     SANDBOX_RUNS.labels(passed=str(bool(passed)).lower(), mode=current_mode()).inc()
     if duration is not None and duration >= 0:
         SANDBOX_DURATION.labels(mode=current_mode()).observe(duration)
+
+
+def observe_sandbox_static(passed: bool, verification: str) -> None:
+    """静态验收计数（CONTRACT_TEST / STATIC_ONLY），与真实沙箱执行分开统计。
+
+    真实沙箱通过率只允许使用 ``aiops_sandbox_runs_total``；静态验收单列，
+    不得伪装成「测试通过」参与发布质量门槛。
+    """
+    SANDBOX_STATIC_RUNS.labels(
+        passed=str(bool(passed)).lower(),
+        verification=_label(verification, fallback="unknown"),
+        mode=current_mode(),
+    ).inc()
 
 
 def observe_canary_deploy(healthy: bool, error_rate: float | None = None) -> None:

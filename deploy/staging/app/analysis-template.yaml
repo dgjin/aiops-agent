@@ -1,0 +1,36 @@
+# 金丝雀 SLO 判定（Argo Rollouts AnalysisTemplate）
+#
+# 指标来源为预生产独立 Prometheus（与生产隔离）。
+# 门槛与 release.py 的演示 SLO 对齐：错误率 ≤5%、P99 ≤500ms；
+# 未满足时 AnalysisRun 失败，Rollouts 按 strategy 自动中止并回滚。
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: demo-app-slo
+  namespace: aiops-staging
+spec:
+  metrics:
+    - name: error-rate
+      interval: 30s
+      count: 10
+      failureLimit: 1
+      successCondition: result[0] <= 0.05
+      provider:
+        prometheus:
+          address: http://prometheus.observability.svc.cluster.local:9090
+          query: |
+            sum(rate(http_requests_total{namespace="aiops-staging",service="demo-app-canary",status=~"5.."}[2m]))
+            /
+            clamp_min(sum(rate(http_requests_total{namespace="aiops-staging",service="demo-app-canary"}[2m])), 0.001)
+    - name: p99-latency
+      interval: 30s
+      count: 10
+      failureLimit: 1
+      successCondition: result[0] <= 500
+      provider:
+        prometheus:
+          address: http://prometheus.observability.svc.cluster.local:9090
+          query: |
+            histogram_quantile(0.99,
+              sum(rate(http_request_duration_seconds_bucket{namespace="aiops-staging",service="demo-app-canary"}[2m])) by (le)
+            ) * 1000

@@ -49,7 +49,12 @@ class Patch:
 
 @dataclass
 class TestReport:
-    """沙箱测试报告（设计方案 4.4）。"""
+    """沙箱测试报告（设计方案 4.4）。
+
+    verification_mode（M4）：UNIT_TEST=真实执行测试；CONTRACT_TEST=声明的静态契约；
+    STATIC_ONLY=无测试套件的静态验收。空串=历史归档（M4 前报告），按非真实测试处理，
+    不得计入「真实沙箱通过率」。
+    """
 
     patch_id: str
     passed: bool
@@ -57,6 +62,7 @@ class TestReport:
     regression_tests: str = ""
     sast: str = ""
     details: str = ""
+    verification_mode: str = ""
 
 
 @dataclass
@@ -90,8 +96,13 @@ class CanaryResult:
     error_rate: float
     p99_latency_ms: float
     observation: str = ""
-    # 发布模式：container=镜像+容器滚动（demo-app）；direct=补丁直连真实仓库（契约应用）
+    # 发布模式：container=镜像+容器滚动（demo-app）；direct=补丁直连真实仓库（契约应用）；
+    # argocd=集群内 ArgoCD Application + Rollouts（M4）
     mode: str = "container"
+    # M4：ArgoCD/Rollouts 状态（RECORDED/SUBMITTED/SYNCING/SYNCED/HEALTHY/DEGRADED/...）；
+    # slo_source=argocd-rollout 时 error_rate/p99 为 -1（数值未采集，判定来自 Rollouts）
+    release_status: str = "RECORDED"
+    slo_source: str = "local-probe"
 
 
 @dataclass
@@ -101,3 +112,5 @@ class ReleaseResult:
     version: str
     rolled_back: bool
     reason: str = ""
+    # M4：HEALTHY / ROLLED_BACK / FAILED（集群真实状态；留痕模式为 RECORDED）
+    status: str = ""

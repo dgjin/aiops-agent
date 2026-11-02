@@ -1,0 +1,40 @@
+# 沙箱资源上限（M4）：把「不可信工作负载」的爆炸半径限制在命名空间级别
+#
+# 单 Job 的 limits 由执行器写入清单（256Mi / 1 CPU / ephemeral-storage 1Gi），
+# 本文件是命名空间总闸：并发 Job 叠加后仍不得挤占控制面资源。
+# 8 vCPU / 16 GiB 基线中，沙箱预留 4 vCPU / 8 GiB。
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: sandbox-quota
+  namespace: aiops-sandbox
+spec:
+  hard:
+    count/jobs.batch: "20"
+    pods: "40"
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    requests.ephemeral-storage: 20Gi
+    limits.ephemeral-storage: 40Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: sandbox-limits
+  namespace: aiops-sandbox
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "1"
+        memory: 256Mi
+        ephemeral-storage: 1Gi
+      defaultRequest:
+        cpu: 100m
+        memory: 64Mi
+        ephemeral-storage: 256Mi
+      max:
+        cpu: "2"
+        memory: 2Gi

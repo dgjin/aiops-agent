@@ -1,0 +1,43 @@
+# 预生产（staging）策略：默认影子档，先验证「建议」质量再切全链路
+#
+# 用法：Worker 以 AIOPS_POLICY_PATH=/etc/aiops/policy.staging.yaml 启动；
+# 切全链路（真实 MR/审批/发布）时把 shadow_mode 改为 false 并受控重启，
+# 同时设置 AIOPS_POLICY_SHA256 固定快照（见部署手册第 11/12 章）。
+release_gate:
+  shadow_mode: true                 # 预生产默认只建议不执行；验收通过后再切 false
+  require_real_tests_for_high_risk: true   # M4：高风险变更不得只凭静态验收推进
+  triage:
+    confidence_threshold: 0.8       # 不得放宽
+    max_fix_retries: 2
+    composite_gate:
+      enabled: true
+      require_suspect_files: true
+    fix_routing:
+      require_quality_bar: true
+      quality_bar_path: ./data/model_quality_bar.json
+      prefer_qoder_for_multi_file: true
+  approval:
+    timeout: 30m
+    on_timeout: reject
+    on_timeout_escalation: phone
+    second_approval_dirs: [auth/**, payment/**, crypto/**]
+  notify_window:
+    countdown: 15m
+    deploy_on_expiry: true
+    allow_deploy_now: true
+    allow_cancel: true
+    new_patch_during_window:
+      strategy: queue
+      reset_timer: false
+      merge_with_current: false
+      queue_limit: 0
+      next_cycle: auto
+    feedback_circuit_breaker:
+      enabled: false
+    concurrency:
+      max_active_deployments: 1
+  canary:
+    traffic_percent: 5               # 预生产同样按 5% 金丝雀验证分流
+    observe_duration: 5m
+    health_metrics: [error_rate, p99_latency]
+    auto_rollback: true

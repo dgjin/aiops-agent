@@ -836,8 +836,11 @@ async def deploy_canary(
         if mode.is_production():
             if not resolved:
                 raise ReleaseSafetyError("production目标未注册或注册表不可读，禁止回退")
-            if not resolved.get("url"):
-                raise ReleaseSafetyError("production容器型交付未放行（仅支持已注册直连应用的全链路发布）")
+            if not resolved.get("url") and release.release_executor() != "argocd":
+                raise ReleaseSafetyError(
+                    "production容器型交付未放行（仅支持已注册直连应用，或 AIOPS_ARGOCD_URL "
+                    "配置的 ArgoCD 集群发布）"
+                )
             # 直连应用的全链路发布：影子档拦截在 release.shadow_release_only（按当前策略）统一判定
         if resolved and resolved.get("url"):
             return release.run_canary_direct(patch, resolved["repo"], resolved["url"],
@@ -871,6 +874,7 @@ async def finalize_release(canary: CanaryResult, auto_rollback: bool) -> Release
     if canary.mode == "direct":
         result = await _release_thread(release.run_finalize_direct, canary, auto_rollback)
     else:
+        # container（本机金丝雀）与 argocd（集群）共用 journal 终态校验
         result = await _release_thread(release.run_finalize, canary, auto_rollback)
-    log.info("[release] %s（%s）", result.reason, result.version)
+    log.info("[release] %s（%s，状态=%s）", result.reason, result.version, result.status)
     return result

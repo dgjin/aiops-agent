@@ -44,7 +44,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import quote
 
-from . import code_rag, sandbox, mode, kill_switch, release_journal as journal
+from . import code_rag, sandbox, mode, kill_switch, release_journal as journal, argo_status
 from .release_journal import ReleaseSafetyError
 from .fix_agent import (
     apply_unified_diff,
@@ -104,6 +104,18 @@ def _validate_patch(patch):
         raise ReleaseSafetyError("非法patch标识")
     if patch.degraded:
         raise ReleaseSafetyError("降级补丁禁止发布")
+
+
+def release_executor() -> str:
+    """发布执行器：docker（本机容器金丝雀）| argocd（集群内 ArgoCD + Rollouts）。
+
+    production 默认按 ArgoCD 地址是否存在选择：显式 AIOPS_RELEASE_EXECUTOR 优先，
+    未显式指定且配置了 AIOPS_ARGOCD_URL 时按 argocd（真实集群）执行。
+    """
+    explicit = (os.environ.get("AIOPS_RELEASE_EXECUTOR") or "").strip().lower()
+    if explicit in {"docker", "argocd"}:
+        return explicit
+    return "argocd" if os.environ.get("AIOPS_ARGOCD_URL", "").strip() else "docker"
 
 
 def shadow_release_only() -> bool:
@@ -608,6 +620,7 @@ def _run_finalize(
                 f"金丝雀达标，已全量发布（{runner.stable_container} 运行于 :{runner.stable_port}，"
                 f"镜像 {record.record['image']}）"
             ),
+            status="HEALTHY",
         )
     with recovering():
         _cleanup_canary(runner, record)
@@ -615,7 +628,201 @@ def _run_finalize(
         reason = "金丝雀劣化，自动回滚：金丝雀已回收，稳定版本保持不变"
     else:
         reason = "金丝雀劣化（自动回滚未开启）：金丝雀已回收，等待人工处理"
-    return ReleaseResult(version=version, rolled_back=True, reason=reason)
+    return ReleaseResult(
+        version=version, rolled_back=True, reason=reason, status="ROLLED_BACK"
+    )
+
+
+def _cluster_app_name(patch_id: str) -> str:
+    return f"demo-app-{patch_id}"
+
+
+def _run_cluster_canary(
+    alert: Alert,
+    patch: Patch,
+    traffic_percent: int,
+    observe_seconds: int,
+    *,
+    publisher: ArgoCDPublisher | None,
+    record,
+    client: argo_status.ArgoStatusClient | None = None,
+) -> CanaryResult:
+    """集群发布：提交 ArgoCD Application，等待真实 sync/health，按状态判定金丝雀。
+
+    HEALTHY 才算通过；DEGRADED 返回不健康由 finalize 回滚；FAILED（不可达/超时）
+    抛 ReleaseSafetyError 走恢复路径。错误率/P99 由 Argo Rollouts AnalysisRun 判定，
+    本层不采集数值，故返回 -1（未知）而不是伪造 0。
+    """
+    client = client or argo_status.ArgoStatusClient()
+    if not client.configured:
+        raise ReleaseSafetyError("argocd 执行器未配置 AIOPS_ARGOCD_URL")
+    version = release_version(patch.patch_id)
+    image = f"{CANARY_IMAGE_PREFIX}:{patch.patch_id}"
+    manifest = render_application(
+        {
+            "patch_id": patch.patch_id,
+            "alert_id": patch.alert_id,
+            "service": alert.service,
+            "image": image,
+            "traffic_percent": traffic_percent,
+            "observe_seconds": observe_seconds,
+            "version": version,
+        }
+    )
+    checkpoint()
+    publication = (publisher or ArgoCDPublisher()).apply(manifest)
+    if publication.get("mode") != "live":
+        raise ReleaseSafetyError("argocd 执行器提交未生效（recorded 模式），禁止继续")
+    app = manifest["metadata"]["name"]
+    record.update(
+        application=app, version=version, image=image, release_status="SUBMITTED"
+    )
+    transitions: list[str] = []
+
+    def on_state(state: str) -> None:
+        record.update(release_status=state)
+        if not transitions or transitions[-1] != state:
+            transitions.append(state)
+
+    outcome = client.wait(app, timeout=max(observe_seconds * 6, 120), on_state=on_state)
+    state = outcome["state"]
+    # 终态显式落盘：不依赖客户端是否回调 on_state（回调只在状态变化时触发）
+    record.update(release_status=state)
+    detail = (
+        f"sync={outcome.get('sync') or '未知'}，health={outcome.get('health') or '未知'}，"
+        f"状态序列={'→'.join(transitions) or state}"
+    )
+    rollout_name = (os.environ.get("AIOPS_ROLLOUT_NAME") or "").strip()
+    rollout_note = ""
+    if rollout_name:
+        progress = client.rollout_state(
+            os.environ.get("AIOPS_ROLLOUT_NAMESPACE", "aiops-staging"), rollout_name
+        )
+        rollout_note = (
+            f"；Rollout {progress['phase'] or '未知'}"
+            f"（步骤 {progress['current_step'] + 1}/{progress['total_steps']}，"
+            f"{'暂停中' if progress['paused'] else '推进中'}）"
+            if progress["total_steps"] >= 0
+            else f"；Rollout {progress['phase'] or '未知'}"
+        )
+    if state == "HEALTHY":
+        return CanaryResult(
+            patch_id=patch.patch_id,
+            traffic_percent=traffic_percent,
+            healthy=True,
+            error_rate=-1.0,
+            p99_latency_ms=-1.0,
+            observation=f"ArgoCD 报告 HEALTHY（{detail}{rollout_note}）",
+            mode="argocd",
+            release_status=state,
+            slo_source="argocd-rollout",
+        )
+    if state == "DEGRADED":
+        return CanaryResult(
+            patch_id=patch.patch_id,
+            traffic_percent=traffic_percent,
+            healthy=False,
+            error_rate=-1.0,
+            p99_latency_ms=-1.0,
+            observation=(
+                f"ArgoCD 报告 DEGRADED（{detail}{rollout_note}）"
+                f"：{outcome.get('message') or '集群健康劣化'}"
+            ),
+            mode="argocd",
+            release_status=state,
+            slo_source="argocd-rollout",
+        )
+    raise ReleaseSafetyError(
+        f"ArgoCD 未能确认健康（{state}）：{outcome.get('message') or detail}"
+    )
+
+
+def _run_canary_cluster(
+    alert, patch, traffic_percent, observe_seconds, *, workflow_id, namespace, cancel_check
+) -> CanaryResult:
+    """集群发布的 journal 包装：目标为 ArgoCD Application，恢复动作=回滚上一版本。"""
+    token = _CANCEL.set(cancel_check)
+    try:
+        with journal.locked():
+            j = _identity(patch.patch_id, workflow_id, namespace)
+            app = _cluster_app_name(patch.patch_id)
+            target = {"kind": "argocd-application", "name": app}
+            resources = ["argocd-app:" + app]
+            if j.record is None:
+                j.claim(
+                    journal.digest({"diff": patch.diff, "files": patch.files}),
+                    target,
+                    resources,
+                )
+            client = argo_status.ArgoStatusClient()
+
+            def action():
+                return _run_cluster_canary(
+                    alert, patch, traffic_percent, observe_seconds,
+                    publisher=ArgoCDPublisher(), record=j, client=client,
+                )
+
+            def restore():
+                client.rollback(app)
+                j.update(release_status="ROLLED_BACK")
+
+            return _execute(
+                j,
+                "canary",
+                {
+                    "traffic": traffic_percent,
+                    "observe": observe_seconds,
+                    "alert": dataclasses.asdict(alert),
+                    "executor": "argocd",
+                },
+                action,
+                restore,
+                CanaryResult,
+            )
+    finally:
+        _CANCEL.reset(token)
+
+
+def run_finalize_cluster(
+    canary: CanaryResult,
+    auto_rollback: bool,
+    *,
+    workflow_id: str | None = None,
+    namespace: str | None = None,
+) -> ReleaseResult:
+    """集群发布终态：HEALTHY 才显示完成；劣化按开关回滚到上一版本。"""
+    j = _identity(canary.patch_id, workflow_id, namespace)
+    record = j.record or {}
+    version = record.get("version") or release_version(canary.patch_id)
+    app = record.get("application") or _cluster_app_name(canary.patch_id)
+    if canary.healthy:
+        return ReleaseResult(
+            version=version,
+            rolled_back=False,
+            reason=f"ArgoCD 报告 HEALTHY，发布完成（{app}）",
+            status="HEALTHY",
+        )
+    if not auto_rollback:
+        return ReleaseResult(
+            version=version,
+            rolled_back=True,
+            reason=f"金丝雀劣化（自动回滚未开启）：ArgoCD 状态 {canary.release_status}，等待人工处理",
+            status=canary.release_status or "DEGRADED",
+        )
+    try:
+        argo_status.ArgoStatusClient().rollback(app)
+    except argo_status.ArgoStatusError as exc:
+        raise ReleaseSafetyError(f"ArgoCD 自动回滚失败，必须人工处理：{exc}") from exc
+    try:
+        j.update(release_status="ROLLED_BACK")
+    except Exception:  # noqa: BLE001 - 留痕失败不掩盖回滚事实
+        pass
+    return ReleaseResult(
+        version=version,
+        rolled_back=True,
+        reason=f"金丝雀劣化（{canary.release_status or 'DEGRADED'}），已按 ArgoCD 回滚到上一版本",
+        status="ROLLED_BACK",
+    )
 
 
 def _cleanup_canary(runner, record):
@@ -639,6 +846,11 @@ def run_canary(alert, patch, traffic_percent, observe_seconds=10, *, repo_dir=No
                namespace=None, cancel_check=None):
     _validate_patch(patch)
     _production_gate()
+    if release_executor() == "argocd":
+        return _run_canary_cluster(
+            alert, patch, traffic_percent, observe_seconds,
+            workflow_id=workflow_id, namespace=namespace, cancel_check=cancel_check,
+        )
     runner = runner or DockerRolloutRunner()
     token = _CANCEL.set(cancel_check)
     try:
@@ -698,25 +910,35 @@ def _finalize(canary, auto_rollback, *, runner=None, workflow_id=None, namespace
             if j.record["stages"].get("canary", {}).get("result") != dataclasses.asdict(canary):
                 raise ReleaseSafetyError("canary结果与持久化记录不符")
             target = j.record["target"]
-            if target["kind"] != canary.mode:
-                raise ReleaseSafetyError("发布类型不符")
-            if canary.mode == "direct":
-                restore = lambda: _restore_direct(j)
+            if canary.mode == "argocd":
+                if target["kind"] != "argocd-application":
+                    raise ReleaseSafetyError("发布类型不符")
+                restore = lambda: argo_status.ArgoStatusClient().rollback(target["name"])
                 def action():
                     _production_gate()
-                    for rel, item in j.record["before"].items():
-                        expected = item["after"] if canary.healthy else item["original"]
-                        if _file_state(Path(target["repo"]), rel)[0] != expected:
-                            raise ReleaseSafetyError("第三方编辑，禁止确认直连发布")
-                    return _run_finalize_direct(canary, auto_rollback)
+                    return run_finalize_cluster(
+                        canary, auto_rollback, workflow_id=workflow_id, namespace=namespace
+                    )
             else:
-                runner = runner or DockerRolloutRunner(stable_container=target["name"], stable_port=target["port"])
-                if runner.stable_container != target["name"] or runner.stable_port != target["port"]:
-                    raise ReleaseSafetyError("finalize目标变化")
-                restore = lambda: _restore_container(runner, j)
-                def action():
-                    _production_gate()
-                    return _run_finalize(canary, auto_rollback, runner=runner, record=j)
+                if target["kind"] != canary.mode:
+                    raise ReleaseSafetyError("发布类型不符")
+                if canary.mode == "direct":
+                    restore = lambda: _restore_direct(j)
+                    def action():
+                        _production_gate()
+                        for rel, item in j.record["before"].items():
+                            expected = item["after"] if canary.healthy else item["original"]
+                            if _file_state(Path(target["repo"]), rel)[0] != expected:
+                                raise ReleaseSafetyError("第三方编辑，禁止确认直连发布")
+                        return _run_finalize_direct(canary, auto_rollback)
+                else:
+                    runner = runner or DockerRolloutRunner(stable_container=target["name"], stable_port=target["port"])
+                    if runner.stable_container != target["name"] or runner.stable_port != target["port"]:
+                        raise ReleaseSafetyError("finalize目标变化")
+                    restore = lambda: _restore_container(runner, j)
+                    def action():
+                        _production_gate()
+                        return _run_finalize(canary, auto_rollback, runner=runner, record=j)
             result = _execute(j, "finalize", {"canary": dataclasses.asdict(canary), "rollback": auto_rollback},
                               action, restore, ReleaseResult)
             if canary.mode == "container" and not j.record.get("cleanup_complete"):
@@ -954,10 +1176,13 @@ def _run_finalize_direct(canary: CanaryResult, auto_rollback: bool) -> ReleaseRe
             version=version,
             rolled_back=False,
             reason=f"直连发布达标，已全量发布（补丁已应用至真实仓库并生效: {canary.observation}）",
+            status="HEALTHY",
         )
     reason = (
         "直连发布劣化，自动回滚：补丁前文件已还原"
         if auto_rollback
         else "直连发布劣化（自动回滚未开启）：等待人工处理"
     )
-    return ReleaseResult(version=version, rolled_back=True, reason=reason)
+    return ReleaseResult(
+        version=version, rolled_back=True, reason=reason, status="ROLLED_BACK"
+    )

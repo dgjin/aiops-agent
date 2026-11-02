@@ -235,6 +235,8 @@ class ReleaseGatePolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     shadow_mode: bool = False
+    # M4：高风险变更（受保护目录 / 高风险标记）不得仅凭静态验收推进发布
+    require_real_tests_for_high_risk: bool = True
     triage: TriageConfig = Field(default_factory=TriageConfig)
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     notify_window: NotifyWindowConfig = Field(default_factory=NotifyWindowConfig)
@@ -392,6 +394,10 @@ def snapshot_for_workflow(policy: Policy) -> dict:
         "temporal_task_queue": runtime_mode.temporal_task_queue(),
         # P1-2：shadow 档透传（工作流读取用 .get 兜底，旧快照无此键时行为不变）
         "shadow_mode": gate.shadow_mode,
+        # M4：静态验收不足以支撑高风险发布的开关（旧快照缺省时按开启处理）
+        "sandbox": {
+            "require_real_tests_for_high_risk": gate.require_real_tests_for_high_risk,
+        },
         "triage": {
             "confidence_threshold": gate.triage.confidence_threshold,
             "max_fix_retries": gate.triage.max_fix_retries,

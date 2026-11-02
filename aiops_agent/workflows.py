@@ -408,6 +408,22 @@ class AIOpsFixWorkflow:
             )
             return self._final(alert, root_cause, patch, None, started)
 
+        # ---------- 发布准入：静态验收不得单独支撑高风险发布（M4） ----------
+        protected = self._is_protected(patch.files, approval_cfg["second_approval_dirs"])
+        block_reason = ""
+        if workflow.patched("sandbox-verification-gate-v1"):
+            block_reason = self._static_verification_block(
+                patch,
+                test_report,
+                protected,
+                bool(self._policy.get("sandbox", {}).get("require_real_tests_for_high_risk", True)),
+            )
+        if block_reason:
+            self.stage = "ESCALATED"
+            self._gate_events.append("release:blocked:static-only:high-risk")
+            await self._call(activities.escalate_to_human, alert, block_reason)
+            return self._final(alert, root_cause, patch, None, started)
+
         mr = await self._call(activities.create_merge_request, patch, test_report)
         self._gate_events.append(f"mr:created:{mr['mr_id']}")
 
@@ -415,7 +431,7 @@ class AIOpsFixWorkflow:
         self.stage = "WAIT_APPROVAL"
         self._approval = None  # 清空历史信号，防幽灵审批
         self._second_approval = None
-        needs_second = self._is_protected(patch.files, approval_cfg["second_approval_dirs"])
+        needs_second = protected
         self._needs_second = needs_second
         await self._call(
             activities.notify_approvers, alert, root_cause, patch, test_report, needs_second
@@ -588,6 +604,30 @@ class AIOpsFixWorkflow:
                 if path == prefix or path.startswith(prefix + "/"):
                     return True
         return False
+
+    @staticmethod
+    def _static_verification_block(
+        patch: Patch, report: TestReport | None, protected: bool, enabled: bool
+    ) -> str:
+        """静态验收（CONTRACT_TEST / STATIC_ONLY）不得单独支撑高风险发布（M4）。
+
+        高风险 = 受保护目录，或补丁风险描述含「高 / high」。返回空串表示放行；
+        非空为转人工原因。仅 UNIT_TEST（真实执行测试）可通过，历史空模式按静态处理。
+        """
+        if not enabled or report is None:
+            return ""
+        if (report.verification_mode or "") == "UNIT_TEST":
+            return ""
+        risk_text = str(patch.risk or "")
+        high_risk = protected or "高" in risk_text or "high" in risk_text.lower()
+        if not high_risk:
+            return ""
+        mode = report.verification_mode or "UNKNOWN"
+        return (
+            f"发布准入：本次验证为 {mode}（{report.unit_tests or '未执行测试'}），"
+            f"不构成高风险变更的真实测试证据（补丁风险：{risk_text or '未标注'}，"
+            f"受保护目录：{'是' if protected else '否'}）；已停止推进并转人工复核"
+        )
 
     async def _start_next_cycle(self) -> None:
         """队列保留：当前发布结束/取消后，队首补丁自动开启新周期（锁定策略）。"""

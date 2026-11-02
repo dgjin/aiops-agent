@@ -1316,3 +1316,105 @@ SQL stdout 直接写入 600 暂存文件，不捕获到整块内存；逐行 SQL
 - 数据集版本不一致：运行 `scripts/gen_eval_v2_datasets.py` 重新生成并复核 diff，不得手改 `dataset_version`。
 - 新增安全回归误放行：先复现单样本（`--id <ID>`），确认是分类信号缺口还是模型输出问题；信号缺口补 `gate_decision` 并加单测，模型问题记录失败分类（`high_confidence_false_pass` / `route_mismatch` / `over_blocked`）。
 - 质量证据过期（模型或提示词变更）：删除 `data/model_quality_bar.json` 对应条目重新评测，禁止沿用旧证据放行。
+
+## 12 预生产环境：gVisor 沙箱与集群金丝雀（M4）
+
+本章目标是让「沙箱真实执行」和「集群金丝雀发布」两条链路在 Linux 预生产环境可复现。
+清单与逐条命令集中在 `deploy/staging/`（含 `README.md`），本章只讲部署决策、顺序与验收口径。
+代码侧能力已由单测覆盖，**环境侧在预生产主机跑通前不得标记验收完成**。
+
+### 12.1 基线拆分
+
+单机 8 vCPU / 16 GiB / 80 GiB：控制面 1C/1.5GiB/10GiB，Temporal+MySQL 2C/4GiB/30GiB，
+BFF+Worker 2C/3GiB/10GiB，Loki+Prometheus 1C/4GiB/20GiB，ArgoCD+Rollouts 1C/2GiB/5GiB，
+沙箱按需 1C/1GiB/5GiB（命名空间配额硬顶 20 Job / 40 Pod / 4 CPU / 8 GiB）。
+预生产 MySQL、Loki、Prometheus 必须与生产物理隔离，禁止复用生产 DSN 或指标后端。
+
+### 12.2 节点运行时
+
+1. 安装 gVisor（apt 仓库优先，记录 `runsc --version` 作为基线）；
+2. 在 k3s 的 `/var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl` 注册
+   `runtimes.runsc.runtime_type = "io.containerd.runsc.v1"`，重启 k3s；
+3. 应用 `deploy/staging/runtimeclass.yaml`（`name: gvisor`、`handler: runsc`），
+   与 `sandbox.py` 的 `runtimeClassName: gvisor` 保持一致。
+
+containerd 2.x 需改用 `version = 3` 头；升级 containerd/gVisor 后必须重跑 12.6 的冒烟命令。
+
+### 12.3 沙箱隔离与权限
+
+- 命名空间 `aiops-sandbox` 打 restricted PSA；`sandbox-default-deny` 同时拒绝 Ingress/Egress，
+  连 DNS 都不放行（沙箱依赖镜像内预装依赖，工作区经 Secret 注入）。
+- Worker 使用 `aiops-worker` ServiceAccount，仅获 `aiops-sandbox` 的 Job/Pod/日志/Secret 权限，
+  以及 `aiops-staging` 的 Rollouts/AnalysisRuns 只读；不使用 `cluster-admin`，不授予 `pods/exec`。
+- 沙箱 Job 自身 `automountServiceAccountToken: false`、`runAsNonRoot: 65534`、只读根、
+  drop ALL、`seccompProfile: RuntimeDefault`；单 Job 上限 256Mi / 1 CPU / 1Gi ephemeral。
+
+Worker 若部署在 `aiops-system` 而非 `aiops-staging`，必须同步改 `rbac.yaml` 里
+`subjects[].namespace`，否则表现为 403（不会被当成「测试通过」）。
+
+### 12.4 Worker 关键环境变量
+
+| 变量 | 预生产取值 | 说明 |
+|---|---|---|
+| `AIOPS_SANDBOX_RUNTIME` | `k8s` | 切到 `K8sJobSandboxRunner`；默认 `docker` |
+| `AIOPS_SANDBOX_NAMESPACE` | `aiops-sandbox` | 与配额/RBAC 一致 |
+| `AIOPS_SANDBOX_IMAGE` | `<image>@sha256:<digest>` | production 强制摘要，缺失直接失败 |
+| `AIOPS_SANDBOX_LOADER_IMAGE` | `busybox:1.36@sha256:<digest>` | initContainer 解包工作区 |
+| `AIOPS_RELEASE_EXECUTOR` | `argocd` | 显式选择集群发布 |
+| `AIOPS_ARGOCD_URL` / `AIOPS_ARGOCD_TOKEN` | `<argocd 地址>` / Secret | 未配置则发布退化为留痕模式，集群路径直接拒绝 |
+| `AIOPS_ROLLOUT_NAME` / `AIOPS_ROLLOUT_NAMESPACE` | `demo-app` / `aiops-staging` | 金丝雀观测附带 Rollout 进度 |
+| `AIOPS_POLICY_PATH` | `/etc/aiops/policy.staging.yaml` | 指向 ConfigMap 挂载的策略文件 |
+| `AIOPS_POLICY_SHA256` | 策略摘要 | 固定快照，防止运行中被改 |
+
+### 12.5 应用顺序
+
+```bash
+kubectl apply -k deploy/staging/                                  # 命名空间/RuntimeClass/RBAC/NetworkPolicy/配额/Application
+kubectl -n aiops-staging create secret generic aiops-secrets ...   # 真实凭证，命令行注入
+kubectl -n aiops-staging create configmap aiops-policy --from-file=policy.staging.yaml=deploy/staging/policy.staging.yaml
+kubectl -n argocd get application demo-app-staging                 # 由 ArgoCD 同步 app/ 目录
+```
+
+`kustomization.yaml` 有意不包含 `app/`（ArgoCD 独占同步）、`secret.example.yaml`（凭证不落盘）、
+`policy.staging.yaml`（走 ConfigMap）。先用 `policy.staging.yaml` 的 `shadow_mode: true` 跑通建议质量，
+再改 `false` 并受控重启，阈值 `confidence_threshold=0.8` 全程不放宽。
+
+### 12.6 验收命令与证据
+
+```bash
+# 1) gVisor 生效：dmesg 首行应为 Starting gVisor...
+kubectl -n aiops-sandbox run probe --rm -it --restart=Never --image=python:3.12-slim \
+  --overrides='{"spec":{"runtimeClassName":"gvisor"}}' -- dmesg
+
+# 2) 断网：必须超时/被拒，不能返回 200
+kubectl -n aiops-sandbox run probe-egress --rm -it --restart=Never --image=busybox:1.36 \
+  --overrides='{"spec":{"runtimeClassName":"gvisor"}}' -- wget -T 3 -qO- http://example.com
+
+# 3) 一次健康发布
+kubectl -n argocd get application demo-app-<patch_id> -o jsonpath='{.status.sync.status}/{.status.health.status}'
+kubectl -n aiops-staging get rollout demo-app -o wide
+kubectl -n aiops-staging get analysisrun
+
+# 4) 一次真实劣化回滚
+kubectl -n aiops-staging rollout history demo-app     # revision 结构
+kubectl -n argocd get application demo-app-<patch_id> -o jsonpath='{.status.operationState.phase}'
+```
+
+证据口径：
+- 控制台状态序列应为 `SUBMITTED → SYNCING → SYNCED → HEALTHY`，劣化时为 `DEGRADED → ROLLED_BACK`；
+- 集群发布的错误率/P99 由 AnalysisRun 判定，控制台显示「未知」并标注 `slo_source=argocd-rollout`，
+  这是设计行为，不是数据缺失；
+- 一次真实回滚必须同时留下 `rollout history` 的 revision 变化与发布记录的「自动回滚」留痕。
+
+### 12.7 失败处置
+
+| 现象 | 处置 |
+|---|---|
+| Job 卡 `Pending`、事件 `exceeded quota` | 等前序 Job 清理；不得调大配额来「通过」测试 |
+| `no runtime for "gvisor"` | 回到 12.2 检查模板与 `systemctl restart k3s` |
+| 沙箱 403 `cannot create resource "jobs"` | 核对 `aiops-worker` 所在命名空间与 RoleBinding |
+| 发布停在 `SUBMITTED` | 检查 `AIOPS_ARGOCD_URL`、Application 是否存在、令牌权限 |
+| `STATIC_ONLY` 走到 MR/发布 | 确认 `require_real_tests_for_high_risk=true` 且 `patched("sandbox-verification-gate-v1")` 命中；不得关闭闸门 |
+| 金丝雀长期 `Progressing` | 查 `analysisrun` 是否卡住、`AIOPS_ROLLOUT_NAME` 是否配置 |
+
+容量与并发压测（背压、排队、灰度工具）属 M6 范围，本章不承诺并发上限；当前配额即上限。

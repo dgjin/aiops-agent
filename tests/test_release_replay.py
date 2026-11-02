@@ -179,8 +179,12 @@ class ReleaseHistoryReplayTest(unittest.IsolatedAsyncioTestCase):
                 workflows.workflow, "info", return_value=mock.Mock(workflow_id="test")), mock.patch.object(
                 workflows.workflow, "wait_condition", new=mock.AsyncMock()):
             result = await instance._fix_to_release(ALERT, CAUSE, NOW)
-        self.assertEqual(marker.call_args_list, [mock.call("fix-start-notify-g1"), mock.call("release-safety-g1")] + (
-            [mock.call("release-safety-failure-g1")] if old_attempt else []))
+        # patched 调用序列即历史兼容边界：新增门必须出现在旧门之后（重放不产生额外命令）
+        self.assertEqual(marker.call_args_list, [
+            mock.call("fix-start-notify-g1"),
+            mock.call("sandbox-verification-gate-v1"),
+            mock.call("release-safety-g1"),
+        ] + ([mock.call("release-safety-failure-g1")] if old_attempt else []))
         self.assertEqual(result["stage"], "ESCALATED")
         if failure_at is activities.deploy_canary:
             self.assertNotIn("finalize_release", [name for name, _ in calls])
