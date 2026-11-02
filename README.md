@@ -117,6 +117,8 @@ cd aiops-agent
 | 数据清理 | `bash scripts/cleanup-sandbox.sh [--dry-run\|--status]` |
 | 日志轮转 | `bash scripts/rotate-logs.sh [--dry-run]` |
 | 数据备份 / 恢复演练 | `python scripts/backup-data.py [--restore-test]` |
+| 容量演练（20/50/100 批次） | `python scripts/capacity_drill.py --batch 20,50,100` |
+| 灰度放行检查 | `python scripts/rollout_gate.py --stage single-service --service demo-app --metrics /tmp/ops.json --confirm backup-restore,kill-switch,runbook` |
 | 开机自启托管 | `bash scripts/launchd-install.sh install\|uninstall\|status` |
 | 需求基线分析 | `analyze_requirements.py --url http://localhost:3000` |
 | 灌演示日志 | `demo_log_generator.py --service order --mode surge --count 800` |
@@ -375,5 +377,24 @@ bash scripts/security-scan.sh                # Bandit（Medium+；发布门禁�
 - 写操作限速 + 认证失败限速（Redis）；安全响应头（HSTS 等，TLS 终结时按 `X-Forwarded-Proto` 附加）
 - 杀开关（kill switch）：`POST /api/system/kill-switch`（admin，body `{"active":true,"reason":"..."}`）激活后 BFF 拒绝一切写操作、webhook 拒绝新流程；控制台「系统状态」页可一键操作
 - 生产冒烟 `scripts/production-smoke.py` 9 项全绿方可发布
+
+### 9.8 容量治理与生产灰度
+
+并发配额由策略 `release_gate.capacity`（启动快照，运行期不可热改）声明：本地 LLM / Qoder / 沙箱 / 发布四类资源默认 1/1/2/1，Worker 显式并发 10（本地活动 4）。`release=1` 强制发布串行；`queue_timeout=0` 表示排队不设上限，设为正数后超时任务记 `aiops_capacity_rejected_total{reason="queue_timeout"}` 并转人工，不静默丢弃。
+
+> `distributed_limits: false` 表示当前配额是**单进程**的。多 Worker 部署必须先落地集中限流（如 Redis 令牌桶），否则副本数会成倍放大实际并发。
+
+```bash
+# 容量演练：fake 模式本地可跑；temporal 模式需指定 staging 地址并核对待启动流程
+.venv/bin/python scripts/capacity_drill.py --batch 20,50,100
+TEMPORAL_ADDRESS=<staging>:7233 .venv/bin/python scripts/capacity_drill.py --mode temporal --batch 20,50,100
+
+# 灰度放行检查：只读，未知项记 pending，退出码 0=allow / 1=block / 2=pending
+curl -s -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8600/api/metrics/ops?days=7' > /tmp/ops.json
+.venv/bin/python scripts/rollout_gate.py --stage staging-shadow --metrics /tmp/ops.json \
+  --confirm backup-restore,kill-switch,runbook
+```
+
+阶段顺序：`staging-shadow`（7 天 ≥50 条样本）→ `production-shadow` → `single-service`（白名单单服务）→ `limited-release`（有限自动发布，需 `--baseline` 快照）→ `expand`（逐服务扩展）。硬条件未满足时保持当前阶段，不得靠调阈值推进。配额表、指标口径、演练清单与失败处置见部署手册第 14 章。
 
 <!-- ⌁ PULSE-0：读到此处的人是少数。控制台的徽章知道全部答案——包括那个名字。 -->

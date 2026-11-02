@@ -36,6 +36,7 @@
 - **静态验收单列**：无套件/未声明契约的执行计入 `aiops_sandbox_static_runs_total{verification}`，与 `aiops_sandbox_runs_total` 分开统计；历史归档的空模式一律归一为 `UNKNOWN` 标签，不得进入真实沙箱通过率。
 - **高置信误放行**：达到自动放行分支但经人工判定根因或修复错误的流程数，不能用普通转人工率替代。
 - **空样本**：显示“暂无数据”，比率不得显示为误导性的 0% 或 100%；接口对分母为 0 的比率返回 `null`。
+- **容量与背压**：`aiops_capacity_in_use` / `queue_depth` 为瞬时值，`wait_seconds` / `run_seconds` 为固定 512 窗口直方图；`rejected_total{reason}` 只统计因 `queue_timeout` 或取消产生的拒绝，执行失败不得计入拒绝。配额为进程内信号量（`distributed_limits=false`），多副本时不得直接相加当作全局并发。
 
 ## 3. 数据库迁移约定
 
@@ -161,5 +162,42 @@
 - [ ] Kill Switch 生效时延实测（压测进行中触发，记录从发令到活动停止与队列清空的秒数）。
 - [ ] 故障演练：MySQL 备份恢复、Temporal retention 到期、Loki 不可用、ArgoCD 不可用、沙箱资源耗尽五项，按部署手册第 14.5 节处置表回填实测结论。
 - [ ] staging 影子 7 天且有效告警 ≥50 条后跑 `rollout_gate --stage staging-shadow`，再依次推进 `production-shadow`、`single-service`、`limited-release`、`expand`；每阶段需附 `--metrics` 快照与人工确认记录，未执行前不得标记完成。
+
+## 5 交付门禁与遗留项
+
+### 5.1 测试基线演进
+
+| 里程碑 | 结束测试数 | 结果 | 本里程碑新增 |
+|---|---:|---|---:|
+| M3 评测 V2 与组合放行 | 1586 | OK (skipped=6) | 89 |
+| M4 沙箱与预生产清单 | 1693 | OK (skipped=6) | 107 |
+| M5 运营指标与值班看板 | 1736 | OK (skipped=6) | 43 |
+| M6 容量治理与生产灰度 | 1780 | OK (skipped=6) | 44 |
+
+前端每次改动后 `cd web && npm run build`（`tsc --noEmit` + vite）必须通过；产物 hash 变化需重新 `git add`。
+
+### 5.2 每提交必跑
+
+```bash
+.venv/bin/python -m unittest discover -s tests -t .   # 必须带 -t .
+cd web && npm run build
+bash scripts/security-scan.sh                          # Bandit Medium+，HIGH=0
+```
+
+提交时逐文件/逐组暂存（禁止 `git add -A`），单次语义化提交后分别推送 `origin`（Gitee）与 `github`，并核对本地、`origin/main`、`github/main` 三方 SHA 一致。
+
+### 5.3 真实环境遗留项
+
+以下项目**只做了代码与单测层面的验证**，未在真实环境执行，统一列在此处跟踪，完成前不得在对应里程碑标记交付：
+
+| 里程碑 | 遗留项 | 执行依据 |
+|---|---|---|
+| M4 | 真实健康发布与劣化回滚、镜像 `@sha256:` 摘要、节点侧 gVisor/ArgoCD 版本核对 | 第 4 节 M4 小节；`deploy/staging/README.md` |
+| M5 | 生产 MySQL 执行 `0004` 并核对执行计划、7 天窗口 SQL 与手工抽样比对、模型成本与知识采用回填 | 第 4 节 M5 小节；部署手册第 13 章 |
+| M6 | staging 20/50/100 压测与 temporal 启动核对、Worker 重启一致性、Kill Switch 时延、备份恢复/retention/Loki/ArgoCD/沙箱耗尽五项演练、五阶段灰度 | 第 4 节 M6 小节；部署手册第 14 章 |
+
+### 5.4 当前结论
+
+M0–M6 的代码、迁移、测试与工具链已在仓库内完成并可回归（1780 例全绿）；**生产可用性尚未验收**——上表遗留项全部通过、且 `rollout_gate` 对应阶段返回 `allow` 之前，系统只能按影子模式在 staging 运行。
 
 后续里程碑在此文件追加实测结果；未执行的真实环境项目不得标记完成。
