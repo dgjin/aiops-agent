@@ -1473,6 +1473,17 @@ curl -s -H "Authorization: Bearer $AIOPS_CONSOLE_TOKEN" \
 - 分母为 0 的比率是 `null`，页面显示「暂无数据」；`0%` 只可能来自非零分母。
 - `level=unknown` 的告警表示分量不可读或样本不足，处置顺序是修数据面，不是调阈值。
 
+数据面抽样核对（只读，仅 production）：
+
+```bash
+.venv/bin/python scripts/verify_ops_metrics_sql.py --days 7
+.venv/bin/python scripts/verify_ops_metrics_sql.py --days 30
+```
+
+脚本对 `workflow_runs` / `audit_events` / `log_evidence` 独立聚合，与接口同窗口逐项比对
+42 项；差异非 0 退出 1。窗口内没有 `DONE` 流程时 MTTR 与回滚样本为 0、比率为 `null`
+属正常，不得为凑样本放宽窗口或改口径。
+
 ### 13.3 值班告警与首次核验
 
 | code | 触发 | 阈值来源 |
@@ -1599,6 +1610,13 @@ temporal 模式在环境不可达时退出码 2，**不得当作通过**。
 
 staging 还需人工完成并留痕：Worker 重启后流程状态一致、Kill Switch 生效时延、
 MySQL 备份恢复、Temporal retention、Loki 不可用、ArgoCD 不可用、沙箱资源耗尽。
+
+**备份恢复演练（可复用）**：把迁移前 dump 导入临时 MySQL 8.0（独立容器 + tmpfs，
+不暴露到公网），逐表比对行数后，用 `AIOPS_DATABASE_URL` 指向临时库执行
+`alembic upgrade head`，核对版本、新列与索引，再销毁实例。2026-11-02 实测：
+13 张表行数一致（90/42/14），升级到 `20261101_0004` 后行数不变、6 个新列与
+`idx_runs_close_kind` 齐全。该演练只验证「备份可恢复 + 迁移可重放」，
+真实切换窗口、流量回切与回滚仍须在 staging 留痕。
 
 ### 14.4 灰度阶段与放行检查
 

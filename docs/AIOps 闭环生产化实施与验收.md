@@ -143,7 +143,7 @@
 - [x] 文档：新增 `docs/AIOps 值班 Runbook.md`（通用读法 + 六节处置 + 阈值一览）；测试锁定「聚合产出的每个 `duty_alerts[].code` 必须有对应 Runbook 小节」，防止告警改码后文档失联。
 - [x] 单测覆盖：`test_ops_metrics_m5`（23）、`test_ops_warehouse`（11，含 SQL 数据面与手算一致性）、`test_runbooks`（8）、`test_migrations` 新增 kind/risk 升级与降级 1 例；全量 `Ran 1736 tests … OK (skipped=6)`（M4 结束 1693，本里程碑新增 43）。
 - [x] 生产 MySQL 8 实机迁移（2026-11-02）：`alembic current` 为空（从未版本化）→ 备份 `backups/aiops-before-migrations-20261102-091516.sql`（185 KB，`Dump completed`，13 条 INSERT）→ `alembic upgrade head` 一次补齐 `0001`–`0004`。核对结果：`workflow_runs` 90 行全部 `kind=alert`；`escalations` 42 行、`log_evidence` 14 行保留；`idx_runs_close_kind(close_time, kind)` 存在，且窗口内按 `close_time` + `kind` 的聚合/倒序查询均命中该索引（`range` + `Using index` / `Backward index scan`）；readiness `schema_current`、`/readyz` 200。补齐的列：`log_evidence.quality`、`escalations.category/plan/resolution`、`workflow_runs.kind/risk`。
-- [ ] 真实 7 天窗口的 `/api/metrics/ops` 与手工 SQL 聚合抽样比对（每个维度至少 1 组分子分母），确认 `source=warehouse` 且 `degraded` 为空。
+- [x] 真实窗口 SQL 抽样比对（2026-11-02，`scripts/verify_ops_metrics_sql.py`，只读）：7 天窗口 42 项全一致——终态 13、`gate1:blocked` 12/13（拦截率 0.9231）、证据 13 条（均 `UNKNOWN`，迁移前历史归档）、按服务 Top10 与按类型分母一致；该窗口无 `DONE`，MTTR/回滚比率为 `null`。另跑 30 天窗口 42 项全一致——终态 90、`DONE` 17（自动完成率 0.1889）、MTTR 565.0s / P95 1534.9s、MTTA 23.5s / P95 329.0s（14 例）、人工干预 14、拦截 29（0.3222）、回滚 0/5；`source=warehouse`、`degraded=[]`、镜像时间 `2026-11-02T01:42:56Z`。分母为 0 的维度保持 `null`，未凑样本。
 - [ ] 模型成本计量与知识采用情况回填（`cost.model_cost_usd`、`escalations.knowledge.adopted`）待计量数据源与索引重建记录接入后补齐。
 
 ### M6 容量治理与生产灰度
@@ -160,7 +160,8 @@
 - [ ] staging 真实 20/50/100 三档压测（含重复告警、无日志、模型超时、沙箱排队）与 `temporal` 模式启动核对：需核对无重复工作流、无未解释 OOM、队列可恢复、失败分类与报告一致。
 - [ ] Worker 重启状态一致性：重启期间排队与执行中活动的最终归属、幂等键复用、指标计数连续性（当前仅单测覆盖进程内行为）。
 - [ ] Kill Switch 生效时延实测（压测进行中触发，记录从发令到活动停止与队列清空的秒数）。
-- [ ] 故障演练：MySQL 备份恢复、Temporal retention 到期、Loki 不可用、ArgoCD 不可用、沙箱资源耗尽五项，按部署手册第 14.5 节处置表回填实测结论。
+- [x] 故障演练（1/5）：MySQL 备份恢复（2026-11-02）——将迁移前 dump 导入临时 MySQL 8.0 实例，13 张表逐表行数一致（`workflow_runs` 90 / `escalations` 42 / `log_evidence` 14）；以 `AIOPS_DATABASE_URL` 指向临时库执行 `alembic upgrade head`，版本 `20261101_0004`、6 个新列与 `idx_runs_close_kind` 齐全、行数不变；演练后销毁临时实例，生产库未参与写入。该演练只证明「备份可恢复 + 迁移可重放」，不替代真实切换窗口演练。
+- [ ] 故障演练：Temporal retention 到期、Loki 不可用、ArgoCD 不可用、沙箱资源耗尽四项，按部署手册第 14.5 节处置表回填实测结论。
 - [ ] staging 影子 7 天且有效告警 ≥50 条后跑 `rollout_gate --stage staging-shadow`，再依次推进 `production-shadow`、`single-service`、`limited-release`、`expand`；每阶段需附 `--metrics` 快照与人工确认记录，未执行前不得标记完成。
 
 ## 5 交付门禁与遗留项
@@ -193,8 +194,8 @@ bash scripts/security-scan.sh                          # Bandit Medium+，HIGH=0
 | 里程碑 | 遗留项 | 执行依据 |
 |---|---|---|
 | M4 | 真实健康发布与劣化回滚、镜像 `@sha256:` 摘要、节点侧 gVisor/ArgoCD 版本核对 | 第 4 节 M4 小节；`deploy/staging/README.md` |
-| M5 | 生产 MySQL 执行 `0004` 并核对执行计划、7 天窗口 SQL 与手工抽样比对、模型成本与知识采用回填 | 第 4 节 M5 小节；部署手册第 13 章 |
-| M6 | staging 20/50/100 压测与 temporal 启动核对、Worker 重启一致性、Kill Switch 时延、备份恢复/retention/Loki/ArgoCD/沙箱耗尽五项演练、五阶段灰度 | 第 4 节 M6 小节；部署手册第 14 章 |
+| M5 | 模型成本计量与知识采用回填（`cost.model_cost_usd`、`escalations.knowledge.adopted`） | 第 4 节 M5 小节；部署手册第 13 章 |
+| M6 | staging 20/50/100 压测与 temporal 启动核对、Worker 重启一致性、Kill Switch 时延、retention/Loki/ArgoCD/沙箱耗尽四项演练、五阶段灰度 | 第 4 节 M6 小节；部署手册第 14 章 |
 
 ### 5.4 当前结论
 

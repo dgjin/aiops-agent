@@ -329,6 +329,9 @@ export AIOPS_CONSOLE_AUTH_TOKENS='{"<强随机令牌>":{"user":"admin","role":"a
 
 # 启动 worker / BFF 后，跑生产冒烟（9 项：建表/审计/令牌指纹鉴权/应用 CRUD/workflow_runs/kill switch/清理预演）
 .venv/bin/python scripts/production-smoke.py
+
+# 运营指标数据面抽样核对（M5，只读）：接口聚合与独立 SQL 逐项比对 42 项
+.venv/bin/python scripts/verify_ops_metrics_sql.py --days 7
 ```
 
 ### 9.3 可观测（Prometheus + Grafana）
