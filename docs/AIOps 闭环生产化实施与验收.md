@@ -113,10 +113,11 @@
 
 ### M4 沙箱对齐、K8s 执行器与预生产清单
 
-- [x] Docker 沙箱加固：`--user 65534:65534`、`--cap-drop ALL`、`no-new-privileges`、只读根 + `--tmpfs /tmp`、`--network none`、可选 seccomp；输出按流截断 256KiB、工作区上限 256MiB；超时 `killpg` 后按 `_reclaim` 二次核对，容器未回收即判失败而非静默放过（`tests/test_sandbox_hardening.py`）。
-- [x] 镜像固定：生产环境强制 `@sha256:` 摘要，缺摘要时报错文案直接给出 `python:<tag>@sha256:<digest>` 形式；摘要缺失不计入「已固定」。
+- [x] Docker 沙箱加固：`--user <宿主非 root uid:gid>`（`AIOPS_SANDBOX_UID` 可覆盖为 `65534:65534`；Docker Desktop 的 bind mount 按宿主属主映射，固定 65534 即使目录 777 也无法写工作区）、`--cap-drop ALL`、`no-new-privileges`、只读根 + `--tmpfs /tmp`、`--network none`、可选 seccomp；输出按流截断 256KiB、工作区上限 256MiB；超时 `killpg` 后按 `_reclaim` 二次核对，容器未回收即判失败而非静默放过（`tests/test_sandbox_hardening.py`）。
+- [x] 镜像固定：生产环境强制 `@sha256:` 摘要，缺摘要时按执行计划给出 `AIOPS_SANDBOX_IMAGE`/python 或 `AIOPS_SANDBOX_NODE_IMAGE`/node 的正确变量与形式；摘要缺失不计入「已固定」。
 - [x] 执行计划：Python（pytest/unittest）与 Node（`package.json` 脚本、无 `test` 脚本时只跑 build/tsconfig/contract/static）分别生成步骤；缺依赖、缺脚本时不伪造通过。
-- [x] K8s Job 执行器（`K8sJobSandboxRunner`）：工作区打包为 Secret（>512KiB 显式失败）→ 幂等 Job 名 `aiops-sandbox-<patch>-<spec_hash>`（409 同 spec 复用、异 spec 重建）→ `runtimeClassName: gvisor`、`runAsNonRoot 65534`、`readOnlyRootFilesystem`、drop ALL、`seccompProfile: RuntimeDefault`、`automountServiceAccountToken: false` → 轮询 `activeDeadlineSeconds` → 读 Pod 日志 → 删除 Job/Secret 并核对 Pod 消失。
+- [x] Node 真实构建/测试链路（2026-11-02）：工作区排除宿主 `node_modules`（macOS 原生模块在 Linux 容器无法加载），由 `scripts/prepare_node_sandbox_deps.sh` 用固定镜像预构建 Linux 依赖树并按 `package-lock.json` 摘要校验；运行时复制进工作区（vite 需要写 `node_modules/.vite-temp`，只读挂载会 EACCES）；Node 计划独立资源 2400s / 4g / 2 CPU / 512 pids / 2048MiB 配额；vitest 汇总行解析用例数（不再把单元/回归测试显示为「未执行」）。实测：typecheck 15s、build 38s、`vitest run` 2424 用例全通过（24m42s）；端到端 `run_patch_tests` 用时 1497s、`passed=true`、报告展示「2424/2424 passed / 全量 2424 用例：通过」。vitest 输出到管道仍带 ANSI 颜色码（`\x1b[2m      Tests`），解析前必须剥离，否则行首正则全部落空；总数按千分位（2,424）并兼容 skipped 段。
+- [x] K8s Job 执行器（`K8sJobSandboxRunner`）：工作区打包为 Secret（>512KiB 显式失败）→ 幂等 Job 名 `aiops-sandbox-<patch>-<spec_hash>`（409 同 spec 复用、异 spec 重建）→ `runtimeClassName: gvisor`、`runAsNonRoot 65534`、`readOnlyRootFilesystem`、drop ALL、`seccompProfile: RuntimeDefault`、`automountServiceAccountToken: false` → 轮询 `activeDeadlineSeconds` → 读 Pod 日志 → 删除 Job/Secret 并核对 Pod 消失。容器资源 limits 跟随执行计划（Node 4g/2 CPU），Docker 的 `256m`/`4g` 由 `k8s_memory()` 转为 K8s 的 `256Mi`/`4Gi`（`M`/`G` 是十进制，直接透传会缩小上限）。
 - [x] 六类路径单测：成功、测试失败、镜像拉取失败、超时、日志读取失败、清理超时均有确定结论（`tests/test_k8s_sandbox.py`），另覆盖 Secret 超限、production 摘要强制、集群不可达与 API 404 重试。
 - [x] 验证口径修正：`verification_mode` 为空（历史归档）不再默认按 `UNIT_TEST` 渲染，统一归一为 `UNKNOWN` 并计入静态指标；仅 `UNIT_TEST` 计入 `aiops_sandbox_runs_total`。修复前空模式会让历史记录被计入真实沙箱通过率。
 - [x] 工作流静态验收闸门 `sandbox-verification-gate-v1`：高风险（受保护目录或风险等级含「高/高：」）变更必须是 `UNIT_TEST` 且确实跑过用例，否则 `ESCALATED`；`STATIC_ONLY` / `CONTRACT_TEST` / `UNKNOWN` 均不放行；开关关闭或 `patched()` 未命中时保持旧行为，重放不改变历史结论（`tests/test_workflow_static_gate.py`、`tests/test_release_replay.py`）。

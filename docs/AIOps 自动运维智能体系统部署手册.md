@@ -116,6 +116,10 @@ python3.12 -m venv .venv
 | `faiss-cpu` | 可选 | 向量检索 FAISS 后端；未安装自动回退纯 Python（功能等价，仅规模性能差异） |
 
 > 说明：沙箱与金丝雀发布使用 Docker CLI（subprocess 调用），无需 Python 侧额外依赖；沙箱镜像 `python:3.12-slim` 首次运行时自动拉取或提前 `docker pull python:3.12-slim`。
+>
+> Node 仓库（前端/Node 服务）额外需要一次离线依赖准备：沙箱 `--network none` 且工作区不含 `node_modules`，直接运行裸 `node` 镜像会因缺少 `vite/tsc/vitest` 及 Linux 原生模块（rollup/esbuild）失败。部署后执行
+> `scripts/prepare_node_sandbox_deps.sh <被监控仓库目录>`，用与运行期相同的固定镜像 `npm ci` 生成
+> `data/sandbox/node-deps/<仓库目录名>/node_modules`；`package-lock.json` 变更后需重新执行（沙箱按摘要校验，过期即明确失败）。
 
 ### 2.4 Temporal 服务端
 
@@ -512,7 +516,11 @@ export AIOPS_MCP_TOKEN=<控制台令牌>                 # 透传 BFF 鉴权；�
 | `AIOPS_FIX_MODEL` | 跟随 triage | fix_agent | 修复模型（import 时快照） |
 | `AIOPS_EMBED_MODEL` | `bge-m3:latest` | code_rag | 嵌入模型（改后需重建索引） |
 | `AIOPS_VECTOR_BACKEND` | `auto` | code_rag | `auto` / `faiss` / `python` |
-| `AIOPS_SANDBOX_IMAGE` | `python:3.12-slim` | sandbox | 沙箱镜像 |
+| `AIOPS_SANDBOX_IMAGE` | `python:3.12-slim` | sandbox | Python 套件沙箱镜像（production 要求 `@sha256:` 摘要） |
+| `AIOPS_SANDBOX_NODE_IMAGE` | `node:22-bookworm-slim` | sandbox | Node 仓库镜像（production 要求 `@sha256:` 摘要） |
+| `AIOPS_SANDBOX_NODE_DEPS` | `data/sandbox/node-deps` | sandbox | Node 离线依赖树根目录；`scripts/prepare_node_sandbox_deps.sh <仓库>` 预构建，锁文件变更后需重建 |
+| `AIOPS_SANDBOX_NODE_TIMEOUT` / `_MEMORY` / `_CPUS` / `_WORKSPACE_MB` | `2400` / `4g` / `2` / `2048` | sandbox | Node 步骤总超时、内存、CPU、工作区配额（全量 `vite build` + `vitest run` 远超默认 90s/256MiB） |
+| `AIOPS_SANDBOX_UID` | 宿主非 root uid:gid | sandbox | 容器运行用户；Docker Desktop 的 bind mount 需与宿主属主一致才能写工作区 |
 | `AIOPS_SANDBOX_ROOT` | `data/sandbox` | sandbox / cleanup / release | 沙箱产物根目录（生产建议指向独立卷/tmpfs，与 data/ 持久数据物理隔离；清理侧 `cleanup-sandbox.sh` 同源取值） |
 | `AIOPS_LOKI_URL` | `http://localhost:3101` | logs / 检测器 | Loki 地址 |
 | `AIOPS_WEBHOOK_PORT` | `8099` | alert_webhook | 接入服务端口 |

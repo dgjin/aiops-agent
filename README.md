@@ -227,6 +227,15 @@ export AIOPS_QODER_BIN="$HOME/.local/bin/qodercli"   # 建议显式指定
 
 > 沙箱与 Qoder 工作区须位于**容器可挂载路径**：colima 默认仅挂载 `$HOME`，把 `AIOPS_QODER_ROOT` / 沙箱目录放在 `/tmp` 会导致容器内工作区为空（测试报 `Start directory is not importable`）。
 
+> Node 仓库的沙箱验证需要一次离线依赖准备：`./scripts/prepare_node_sandbox_deps.sh <被监控仓库目录>`（用固定摘要的 `AIOPS_SANDBOX_NODE_IMAGE` 执行 `npm ci --ignore-scripts`，产物在 `data/sandbox/node-deps/<仓库目录名>/`）。沙箱 `--network none` 且工作区不含宿主 `node_modules`；`package-lock.json` 变更后需重建，沙箱按摘要校验并在过期时明确失败。生产配置示例：
+>
+> ```bash
+> AIOPS_SANDBOX_NODE_IMAGE=node:22-bookworm-slim@sha256:<digest>
+> # 全量 build+vitest 远超默认 90s/256MiB，Node 计划默认 2400s/4g/2048MiB
+> ```
+>
+> Docker Desktop（macOS/Windows）的 bind mount 按宿主属主映射：容器默认以宿主非 root uid 运行（`AIOPS_SANDBOX_UID` 可覆盖），固定 65534 会无法写工作区（vite 需要建 `node_modules/.vite-temp`）。
+
 ### ChatOps（IM 指令查询/审批）
 
 IM 群里直接查询与审批（操作入口前移，P2-3）：IM 机器人出口把群消息 POST 到 BFF `/api/im/command`，回复 `{"ok", "reply"}` 原样发回群即可。兼容通用 `{"sender","text"}`、飞书事件 v2、钉钉回调三种载荷。
