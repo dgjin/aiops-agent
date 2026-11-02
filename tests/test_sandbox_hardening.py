@@ -36,6 +36,22 @@ def _new_file_diff(path: str) -> str:
     )
 
 
+def _node_plan(**overrides) -> sandbox.ProjectPlan:
+    """测试用 Node 计划：默认不绑定依赖树/配额，便于单测精确控制。"""
+    payload = dict(
+        kind="node",
+        verification_mode=sandbox.MODE_STATIC_ONLY,
+        image=sandbox.node_sandbox_image(),
+        image_env=sandbox.NODE_IMAGE_ENV,
+        command=["/bin/sh", "-c", "npm run --silent build"],
+        steps=["build"],
+        workspace_writable=True,
+        workspace_quota_mb=0,
+    )
+    payload.update(overrides)
+    return sandbox.ProjectPlan(**payload)
+
+
 class LimitsTest(unittest.TestCase):
     def test_env_limits_and_invalid_fallback(self) -> None:
         with mock.patch.dict(os.environ, {"AIOPS_SANDBOX_MAX_STREAM_KB": "8"}, clear=False):
@@ -53,8 +69,40 @@ class LimitsTest(unittest.TestCase):
         with mock.patch.object(mode, "is_production", return_value=True):
             self.assertIn("@sha256:", sandbox.resolve_image_error("python:3.12-slim"))
             self.assertEqual(sandbox.resolve_image_error("python:3.12@sha256:abc"), "")
+            # Node 计划要指向 AIOPS_SANDBOX_NODE_IMAGE，而不是 python 变量
+            node_error = sandbox.resolve_image_error(
+                "node:22-bookworm-slim",
+                env_var=sandbox.NODE_IMAGE_ENV,
+                example="node:<tag>@sha256:<digest>",
+            )
+            self.assertIn("AIOPS_SANDBOX_NODE_IMAGE", node_error)
+            self.assertIn("node:<tag>@sha256:<digest>", node_error)
+            self.assertNotIn("python:", node_error)
         with mock.patch.object(mode, "is_production", return_value=False):
             self.assertEqual(sandbox.resolve_image_error("python:3.12-slim"), "")
+
+    def test_images_are_lazy_so_dotenv_loading_late_still_applies(self) -> None:
+        """config.load_dotenv 可能晚于 sandbox 导入：运行期取值必须跟随环境。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text(
+                json.dumps({"scripts": {"build": "tsc"}}), encoding="utf-8"
+            )
+            with mock.patch.dict(
+                os.environ, {"AIOPS_SANDBOX_NODE_IMAGE": "node:22@sha256:feed"}, clear=False
+            ):
+                self.assertEqual(sandbox.project_plan(root).image, "node:22@sha256:feed")
+        with mock.patch.dict(
+            os.environ, {"AIOPS_SANDBOX_IMAGE": "python:3.12@sha256:beef"}, clear=False
+        ):
+            self.assertEqual(sandbox.sandbox_image(), "python:3.12@sha256:beef")
+
+    def test_container_user_defaults_to_host_uid_and_can_be_overridden(self) -> None:
+        expected = f"{os.getuid()}:{os.getgid()}" if os.getuid() != 0 else "65534:65534"
+        with mock.patch.dict(os.environ, {"AIOPS_SANDBOX_UID": ""}, clear=False):
+            self.assertEqual(sandbox.sandbox_user(), expected)
+        with mock.patch.dict(os.environ, {"AIOPS_SANDBOX_UID": "65534:65534"}, clear=False):
+            self.assertEqual(sandbox.sandbox_user(), "65534:65534")
 
     def test_workspace_quota_error_reports_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -64,6 +112,15 @@ class LimitsTest(unittest.TestCase):
             error = sandbox.workspace_quota_error(root, limit=1024)
             self.assertIn("超过配额", error)
             self.assertIn("2048B", error)
+
+    def test_k8s_memory_uses_binary_quantity(self) -> None:
+        """Docker 的 m/g 是二进制，K8s 只能写 Mi/Gi（M/G 是十进制，会缩小上限）。"""
+        self.assertEqual(sandbox.k8s_memory("256m"), "256Mi")
+        self.assertEqual(sandbox.k8s_memory("4g"), "4Gi")
+        self.assertEqual(sandbox.k8s_memory("1k"), "1Ki")
+        # 已合规或未知写法原样返回
+        self.assertEqual(sandbox.k8s_memory("512Mi"), "512Mi")
+        self.assertEqual(sandbox.k8s_memory(""), "")
 
 
 class StepParsingTest(unittest.TestCase):
@@ -89,6 +146,117 @@ class StepParsingTest(unittest.TestCase):
         self.assertIn(f"{sandbox._STEP_START}' 'build", script)
         self.assertIn(f"{sandbox._STEP_OK}' 'test", script)
         self.assertLess(script.index("build"), script.index("test"))
+
+    def test_parse_vitest_summary_as_real_tests(self) -> None:
+        text = (
+            " Test Files  172 passed (172)\n"
+            "      Tests  2424 passed (2424)\n"
+            "   Duration  1479.15s\n"
+        )
+        parsed = sandbox.parse_unittest_output(text)
+        self.assertEqual(parsed["tests_run"], 2424)
+        self.assertEqual(parsed["failed_tests"], [])
+
+    def test_parse_vitest_failures(self) -> None:
+        text = "\n".join(
+            [
+                " FAIL  src/utils/dataScope.test.ts > scope > filters rows",
+                " Test Files  1 failed | 171 passed (172)",
+                "      Tests  1 failed | 2423 passed (2424)",
+            ]
+        )
+        parsed = sandbox.parse_unittest_output(text)
+        self.assertEqual(parsed["tests_run"], 2424)
+        self.assertEqual(
+            parsed["failed_tests"], ["src/utils/dataScope.test.ts > scope > filters rows"]
+        )
+        self.assertIn("1 个 vitest 用例未通过", parsed["error_summary"])
+
+    def test_parse_vitest_output_with_ansi_and_thousands(self) -> None:
+        """vitest 输出到管道仍带 ANSI；总数用千分位且可能含 skipped。"""
+        text = (
+            "\x1b[2m      Tests \x1b[22m \x1b[1m\x1b[32m2,424 passed\x1b[39m"
+            "\x1b[22m\x1b[90m (2,424)\x1b[39m\n"
+        )
+        parsed = sandbox.parse_unittest_output(text)
+        self.assertEqual(parsed["tests_run"], 2424)
+        skipped = (
+            "\x1b[2m      Tests \x1b[22m\x1b[33m1 failed\x1b[39m | "
+            "\x1b[32m2,420 passed\x1b[39m | \x1b[90m3 skipped\x1b[39m (2,424)\n"
+        )
+        parsed = sandbox.parse_unittest_output(skipped)
+        self.assertEqual(parsed["tests_run"], 2424)
+        self.assertIn("1 个 vitest 用例未通过", parsed["error_summary"])
+
+    def test_node_report_shows_real_case_count(self) -> None:
+        """step 标记 + 真实用例数并存时，报告要展示用例数而不是「未执行」。"""
+        outcome = sandbox.SandboxOutcome(
+            exit_code=0,
+            passed=True,
+            tests_run=2424,
+            duration_seconds=1497.4,
+            runner="docker-container",
+            image="node:22@sha256:abc",
+            verification_mode=sandbox.MODE_UNIT_TEST,
+            steps=[
+                {"name": "build", "ok": True},
+                {"name": "typecheck", "ok": True},
+                {"name": "test", "ok": True},
+            ],
+        )
+        with mock.patch.object(metrics, "observe_sandbox_run"):
+            report = sandbox._report_from_outcome(_patch(["a.ts"], ""), 3, outcome, "SAST 通过")
+        self.assertEqual(report.unit_tests, "2424/2424 passed")
+        self.assertEqual(report.regression_tests, "全量 2424 用例：通过")
+        self.assertIn("共 2424 个用例", report.details)
+
+
+class NodeDepsTest(unittest.TestCase):
+    def _repo(self, root: Path, lock: str = "{}") -> Path:
+        repo = root / "repo"
+        repo.mkdir()
+        (repo / "package-lock.json").write_text(lock, encoding="utf-8")
+        return repo
+
+    def test_missing_deps_tree_is_explicit_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = self._repo(root)
+            plan = _node_plan(node_deps=root / "deps")
+            error = sandbox.install_node_deps(root / "ws", plan, repo)
+        self.assertIn("依赖未准备", error)
+        self.assertIn("prepare_node_sandbox_deps.sh", error)
+
+    def test_stale_lock_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = self._repo(root)
+            deps = root / "deps"
+            (deps / "node_modules").mkdir(parents=True)
+            (deps / "package-lock.sha256").write_text("stale", encoding="utf-8")
+            error = sandbox.install_node_deps(
+                root / "ws", _node_plan(node_deps=deps), repo
+            )
+        self.assertIn("不一致", error)
+        self.assertIn("重新运行", error)
+
+    def test_matching_lock_copies_modules_into_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = self._repo(root)
+            deps = root / "deps"
+            (deps / "node_modules" / "vite").mkdir(parents=True)
+            (deps / "node_modules" / "vite" / "package.json").write_text("{}", encoding="utf-8")
+            (deps / "package-lock.sha256").write_text(
+                sandbox._sha256_file(repo / "package-lock.json"), encoding="utf-8"
+            )
+            workspace = root / "ws"
+            workspace.mkdir()
+            error = sandbox.install_node_deps(
+                workspace, _node_plan(node_deps=deps), repo
+            )
+            self.assertEqual(error, "")
+            self.assertTrue((workspace / "node_modules" / "vite" / "package.json").is_file())
 
 
 class ProjectPlanTest(unittest.TestCase):
@@ -116,9 +284,14 @@ class ProjectPlanTest(unittest.TestCase):
             plan = sandbox.project_plan(root)
         self.assertEqual(plan.kind, "node")
         self.assertEqual(plan.verification_mode, sandbox.MODE_UNIT_TEST)
-        self.assertEqual(plan.image, sandbox.NODE_SANDBOX_IMAGE)
+        self.assertEqual(plan.image, sandbox.node_sandbox_image())
+        self.assertEqual(plan.image_env, sandbox.NODE_IMAGE_ENV)
         self.assertEqual(plan.steps, ["build", "test"])
         self.assertTrue(plan.workspace_writable)
+        # Node 全量构建+测试远超 90s 默认值，资源与配额独立
+        self.assertGreaterEqual(plan.timeout_seconds, 1800)
+        self.assertEqual(plan.memory_limit, "4g")
+        self.assertGreaterEqual(plan.workspace_quota_mb, 1024)
         script = plan.command[-1]
         self.assertIn("npm run --silent build", script)
         self.assertIn("npm test --silent", script)
@@ -158,7 +331,7 @@ class DockerHardeningTest(unittest.TestCase):
     def test_hardening_flags_present(self) -> None:
         job = sandbox.SandboxJob(patch_id="m4-s1", workspace=Path("/tmp/ws"))
         cmd = sandbox.DockerSandboxRunner()._build_cmd(job)
-        self.assertEqual(cmd[cmd.index("--user") + 1], "65534:65534")
+        self.assertEqual(cmd[cmd.index("--user") + 1], sandbox.sandbox_user())
         self.assertEqual(cmd[cmd.index("--cap-drop") + 1], "ALL")
         self.assertEqual(cmd[cmd.index("--security-opt") + 1], "no-new-privileges")
         self.assertEqual(cmd[cmd.index("--name") + 1], "aiops-sandbox-m4-s1")
@@ -290,7 +463,11 @@ class RunPatchTestsNodeTest(unittest.TestCase):
             )
             with mock.patch.object(metrics, "observe_sandbox_static") as static, mock.patch.object(
                 metrics, "observe_sandbox_run"
-            ) as real:
+            ) as real, mock.patch.object(
+                sandbox, "project_plan", return_value=_node_plan()
+            ), mock.patch.object(
+                sandbox, "install_node_deps", return_value=""
+            ):
                 report = sandbox.run_patch_tests(
                     _patch(["src/app.ts"], _new_file_diff("src/app.ts")),
                     0,
@@ -303,7 +480,8 @@ class RunPatchTestsNodeTest(unittest.TestCase):
         job = runner.run.call_args[0][0]
         self.assertEqual(job.verification_mode, sandbox.MODE_STATIC_ONLY)
         self.assertEqual(job.steps, ["build"])
-        self.assertEqual(job.image, sandbox.NODE_SANDBOX_IMAGE)
+        self.assertEqual(job.image, sandbox.node_sandbox_image())
+        self.assertEqual(job.image_env, sandbox.NODE_IMAGE_ENV)
         self.assertTrue(job.workspace_writable)
         self.assertTrue(report.passed)
         self.assertEqual(report.verification_mode, sandbox.MODE_STATIC_ONLY)
@@ -315,7 +493,13 @@ class RunPatchTestsNodeTest(unittest.TestCase):
             repo.mkdir()
             (repo / "package.json").write_text(json.dumps(manifest), encoding="utf-8")
             runner = mock.Mock()
-            with mock.patch.object(sandbox, "max_workspace_bytes", return_value=1):
+            with mock.patch.object(
+                sandbox, "project_plan", return_value=_node_plan()
+            ), mock.patch.object(
+                sandbox, "install_node_deps", return_value=""
+            ), mock.patch.object(
+                sandbox, "workspace_quota_error", return_value="工作区体积 2B 超过配额 1B"
+            ):
                 report = sandbox.run_patch_tests(
                     _patch(["src/app.ts"], _new_file_diff("src/app.ts")),
                     0,
@@ -350,7 +534,13 @@ class RunPatchTestsNodeTest(unittest.TestCase):
             (repo / "package.json").write_text(json.dumps(manifest), encoding="utf-8")
             runner = mock.Mock()
             runner.run.side_effect = _grow
-            with mock.patch.object(sandbox, "max_workspace_bytes", return_value=1024):
+            with mock.patch.object(
+                sandbox, "project_plan", return_value=_node_plan()
+            ), mock.patch.object(
+                sandbox, "install_node_deps", return_value=""
+            ), mock.patch.object(
+                sandbox, "max_workspace_bytes", return_value=1024
+            ):
                 report = sandbox.run_patch_tests(
                     _patch(["src/app.ts"], _new_file_diff("src/app.ts")),
                     0,

@@ -48,6 +48,10 @@ with workflow.unsafe.imports_passed_through():
     )
 
 _ACTIVITY_TIMEOUT = timedelta(seconds=60)
+# 沙箱验证活动：Node 全量构建 + vitest 实测 24m42s（2424 用例），必须在工作区准备与
+# 计划超时（Node 默认 2400s）之上；否则 Temporal 会在 60s 直接取消活动，测试永远跑不完。
+# 固定常量（不在 workflow 模块读环境变量，避免 Temporal 沙箱的非确定性限制）。
+_SANDBOX_ACTIVITY_TIMEOUT = timedelta(seconds=3000)
 # 金丝雀发布为长时活动：含镜像构建、容器滚动与真实观测窗口（生产 observe 可达 5m），单独放宽
 _CANARY_ACTIVITY_TIMEOUT = timedelta(seconds=600)
 # 修复活动超时：Qoder 提供者为仓库级多轮自主修复（实测约 50s 起），显著长于本地 LLM 单次生成。
@@ -379,7 +383,11 @@ class AIOpsFixWorkflow:
             self._patch = patch
             self.stage = "TESTING"
             test_report = await self._call(
-                activities.run_tests_in_sandbox, alert, patch, attempt
+                activities.run_tests_in_sandbox,
+                alert,
+                patch,
+                attempt,
+                timeout=_SANDBOX_ACTIVITY_TIMEOUT,
             )
             self._test_report = test_report
             if test_report.passed:

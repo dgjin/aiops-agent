@@ -24,10 +24,19 @@
 
 镜像固定：production 要求 ``AIOPS_SANDBOX_IMAGE``（或 Node 镜像）带 ``@sha256:``
 摘要，未固定时拒绝执行；demo 允许 tag 但报告中标注来源。
+Node 依赖：工作区不含 node_modules（避免把宿主 macOS 依赖树带进 Linux 容器），
+按锁文件预构建的 Linux 依赖树由 ``scripts/prepare_node_sandbox_deps.sh`` 生成，
+运行时复制进工作区（容器内只读根下 node_modules 必须可写）。
 
 环境变量：
     AIOPS_SANDBOX_IMAGE          沙箱镜像（默认 python:3.12-slim）
     AIOPS_SANDBOX_NODE_IMAGE     Node 仓库镜像（默认 node:22-bookworm-slim）
+    AIOPS_SANDBOX_NODE_DEPS      Node 依赖树根目录（默认 data/sandbox/node-deps）
+    AIOPS_SANDBOX_NODE_TIMEOUT   Node 步骤总超时秒（默认 2400，全量构建+测试）
+    AIOPS_SANDBOX_NODE_MEMORY    Node 内存上限（默认 4g）
+    AIOPS_SANDBOX_NODE_CPUS      Node CPU 上限（默认 2）
+    AIOPS_SANDBOX_NODE_WORKSPACE_MB  Node 工作区配额（默认 2048）
+    AIOPS_SANDBOX_UID            容器运行用户（默认宿主非 root uid:gid）
     AIOPS_SANDBOX_ROOT           沙箱产物根目录（默认 data/sandbox）
     AIOPS_SANDBOX_MAX_STREAM_KB  单流输出上限（默认 256）
     AIOPS_SANDBOX_MAX_WORKSPACE_MB  工作区与产物配额（默认 256）
@@ -56,8 +65,11 @@ from .models import Patch, TestReport
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_SANDBOX_ROOT = BASE_DIR / "data" / "sandbox"
+# 镜像名惰性读取（config.load_dotenv 可能晚于本模块导入）；常量保留给导入时快照/诊断
 SANDBOX_IMAGE = os.environ.get("AIOPS_SANDBOX_IMAGE", "python:3.12-slim")
 NODE_SANDBOX_IMAGE = os.environ.get("AIOPS_SANDBOX_NODE_IMAGE", "node:22-bookworm-slim")
+IMAGE_ENV = "AIOPS_SANDBOX_IMAGE"
+NODE_IMAGE_ENV = "AIOPS_SANDBOX_NODE_IMAGE"
 
 # verification_mode 取值（TestReport）：仅 UNIT_TEST 计入真实沙箱通过率
 MODE_UNIT_TEST = "UNIT_TEST"
@@ -84,6 +96,48 @@ def default_sandbox_root() -> Path:
 
 # 容器内执行的测试命令（与本地基线一致：CWD=demo-app 根）
 DEFAULT_COMMAND = ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
+
+
+def sandbox_image() -> str:
+    """Python 套件镜像（惰性读取，保证 .env 在导入后加载也生效）。"""
+    return os.environ.get(IMAGE_ENV, "python:3.12-slim")
+
+
+def node_sandbox_image() -> str:
+    """Node 仓库镜像（惰性读取，保证 .env 在导入后加载也生效）。"""
+    return os.environ.get(NODE_IMAGE_ENV, "node:22-bookworm-slim")
+
+
+def sandbox_user() -> str:
+    """容器运行用户：默认宿主非 root uid:gid，可用 AIOPS_SANDBOX_UID 覆盖。
+
+    Docker Desktop（macOS/Windows）把 bind mount 的属主映射为宿主用户，
+    容器内其他 uid（如 65534）即使目录 777 也无法写入工作区；改用宿主 uid
+    仍是 unprivileged（无 capabilities、只读根、无网络），隔离语义不变。
+    """
+    override = (os.environ.get("AIOPS_SANDBOX_UID") or "").strip()
+    if override:
+        return override
+    getuid, getgid = getattr(os, "getuid", None), getattr(os, "getgid", None)
+    if getuid and getgid and getuid() != 0:
+        return f"{getuid()}:{getgid()}"
+    return "65534:65534"
+
+
+_K8S_MEMORY_UNITS = {"k": "Ki", "m": "Mi", "g": "Gi", "t": "Ti"}
+
+
+def k8s_memory(value: str) -> str:
+    """Docker 内存单位转 K8s quantity（256m→256Mi、4g→4Gi）。
+
+    Docker 的 k/m/g 与 K8s 的 Ki/Mi/Gi 同为二进制语义，故数值可直接沿用；
+    K8s 的 M/G 是十进制（会缩小上限），不能直接透传。已带单位或其他写法原样返回。
+    """
+    match = re.fullmatch(r"(\d+)([kmgt])", (value or "").strip())
+    if match:
+        return f"{match.group(1)}{_K8S_MEMORY_UNITS[match.group(2)]}"
+    return value
+
 
 # 高危模式（SAST 演示实现）：新增行命中即拦截补丁进入审批链路
 _DANGEROUS_PATTERNS: list[tuple[re.Pattern, str]] = [
@@ -117,7 +171,9 @@ _FRONTEND_DANGEROUS_PATTERNS: list[tuple[re.Pattern, str]] = [
 ]
 
 _IGNORE = shutil.ignore_patterns(
-    "__pycache__", "*.pyc", ".venv", ".git", "data",
+    # backups：历史备份数据（实测单仓库可达 1.9G），与构建/测试无关；
+    # 复制进沙箱既拖慢准备又必然撞配额。
+    "__pycache__", "*.pyc", ".venv", ".git", "data", "backups",
     "node_modules", "dist", "build", "coverage", ".next", "out", "logs",
 )
 
@@ -127,7 +183,9 @@ class SandboxJob:
 
     patch_id: str
     workspace: Path
-    image: str = SANDBOX_IMAGE
+    image: str = field(default_factory=sandbox_image)
+    # 镜像未固定时的提示变量（Python=AIOPS_SANDBOX_IMAGE / Node=..._NODE_IMAGE）
+    image_env: str = IMAGE_ENV
     command: list[str] = field(default_factory=lambda: list(DEFAULT_COMMAND))
     timeout_seconds: int = 90
     network_disabled: bool = True
@@ -171,12 +229,22 @@ class ProjectPlan:
 
     kind: str  # python / node / static
     verification_mode: str
-    image: str = SANDBOX_IMAGE
+    image: str = field(default_factory=sandbox_image)
+    image_env: str = IMAGE_ENV
     command: list[str] = field(default_factory=lambda: list(DEFAULT_COMMAND))
     steps: list[str] = field(default_factory=list)
     workspace_writable: bool = False
     # 静态契约/自动静态：不进入运行时（保留原因供报告说明）
     static_reason: str = ""
+    # Node 构建/全量测试比 Python 套件重得多：独立资源与超时（不被 90s 默认值截断）
+    timeout_seconds: int = 90
+    memory_limit: str = "256m"
+    cpus: str = "1"
+    pids_limit: int = 128
+    # 0=沿用 AIOPS_SANDBOX_MAX_WORKSPACE_MB；Node 需容纳依赖树与构建产物
+    workspace_quota_mb: int = 0
+    # 预构建的 Linux 依赖树（Node）；运行时复制进工作区
+    node_deps: Path | None = None
 
 
 @dataclass
@@ -209,12 +277,21 @@ def image_is_pinned(image: str) -> bool:
     return "@sha256:" in (image or "")
 
 
-def resolve_image_error(image: str) -> str:
-    """production 未固定镜像摘要时返回错误文案（空串=通过）。"""
+def resolve_image_error(
+    image: str,
+    *,
+    env_var: str = IMAGE_ENV,
+    example: str = "python:<tag>@sha256:<digest>",
+) -> str:
+    """production 未固定镜像摘要时返回错误文案（空串=通过）。
+
+    env_var/example 按执行计划区分：Node 仓库要用 AIOPS_SANDBOX_NODE_IMAGE 与
+    node 镜像，提示 python 变量会把人引到错误配置上。
+    """
     if mode.is_production() and not image_is_pinned(image):
         return (
             f"production 要求沙箱镜像固定摘要（@sha256:），当前为 {image!r}；"
-            "请设置 AIOPS_SANDBOX_IMAGE 为 python:<tag>@sha256:<digest> 形式"
+            f"请设置 {env_var} 为 {example} 形式"
         )
     return ""
 
@@ -284,6 +361,51 @@ def _package_scripts(repo_dir: Path) -> dict:
     return scripts if isinstance(scripts, dict) else {}
 
 
+def node_deps_dir(repo_dir: Path) -> Path:
+    """Node 离线依赖树目录：<AIOPS_SANDBOX_NODE_DEPS>/<仓库目录名>。"""
+    root = Path(
+        os.environ.get("AIOPS_SANDBOX_NODE_DEPS") or (default_sandbox_root() / "node-deps")
+    )
+    return root / Path(repo_dir).resolve().name
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def install_node_deps(workspace: Path, plan: ProjectPlan, repo_dir: Path) -> str:
+    """把预构建的 Linux 依赖树复制进工作区（返回错误文案，空串=成功）。
+
+    必须在容器内可写：vite 加载 TS 配置时会在 node_modules/.vite-temp 建临时文件，
+    只读挂载直接 EACCES。依赖树与 package-lock.json 摘要绑定，锁文件变更后旧树
+    视为过期——否则会拿错版本依赖得出「假通过/假失败」。
+    """
+    if not plan.node_deps:
+        return "Node 沙箱依赖目录未配置；先运行 scripts/prepare_node_sandbox_deps.sh"
+    deps_root = Path(plan.node_deps)
+    modules = deps_root / "node_modules"
+    if not modules.is_dir():
+        return (
+            f"Node 沙箱依赖未准备（{modules} 不存在）；"
+            f"先运行 scripts/prepare_node_sandbox_deps.sh {repo_dir}"
+        )
+    lock = Path(repo_dir) / "package-lock.json"
+    stamp = deps_root / "package-lock.sha256"
+    if lock.is_file() and stamp.is_file():
+        if stamp.read_text(encoding="utf-8").strip() != _sha256_file(lock):
+            return (
+                "Node 沙箱依赖与 package-lock.json 不一致（依赖树已过期）；"
+                "请重新运行 scripts/prepare_node_sandbox_deps.sh"
+            )
+    target = Path(workspace) / "node_modules"
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.copytree(modules, target, symlinks=True)
+    return ""
+
+
 def project_plan(repo_dir: Path, contract: dict | None = None) -> ProjectPlan:
     """按仓库形态选择执行计划（M4：Node 走真实构建/类型检查/测试，禁止联网安装）。
 
@@ -313,11 +435,18 @@ def project_plan(repo_dir: Path, contract: dict | None = None) -> ProjectPlan:
             return ProjectPlan(
                 kind="node",
                 verification_mode=MODE_UNIT_TEST if real_test else MODE_STATIC_ONLY,
-                image=NODE_SANDBOX_IMAGE,
+                image=node_sandbox_image(),
+                image_env=NODE_IMAGE_ENV,
                 command=["/bin/sh", "-c", _node_script(commands)],
                 steps=[name for name, _ in commands],
                 # 构建/测试会写 dist、coverage 等产物；root 仍只读、配额另计
                 workspace_writable=True,
+                timeout_seconds=_env_int("AIOPS_SANDBOX_NODE_TIMEOUT", 2400),
+                memory_limit=(os.environ.get("AIOPS_SANDBOX_NODE_MEMORY") or "4g").strip(),
+                cpus=(os.environ.get("AIOPS_SANDBOX_NODE_CPUS") or "2").strip(),
+                pids_limit=_env_int("AIOPS_SANDBOX_NODE_PIDS", 512),
+                workspace_quota_mb=_env_int("AIOPS_SANDBOX_NODE_WORKSPACE_MB", 2048),
+                node_deps=node_deps_dir(repo_dir),
             )
     if contract:
         return ProjectPlan(kind="contract", verification_mode=MODE_CONTRACT_TEST)
@@ -542,13 +671,49 @@ def _apply_patch_to_workspace(patch: Patch, workspace: Path) -> str:
     return ""
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def _strip_ansi(text: str) -> str:
+    """去掉终端颜色/样式转义码。
+
+    vitest 即使输出到管道仍带 ANSI（行首是 ``\\x1b[2m      Tests``），
+    不剥离则按行首匹配的汇总行/失败行全部落空，报告退化成「未执行」。
+    """
+    return _ANSI_RE.sub("", text or "")
+
+
 def parse_unittest_output(text: str) -> dict:
-    """解析 unittest 输出：用例数 / 失败用例名 / 首个错误摘要 / OK 标记。"""
+    """解析 unittest 输出：用例数 / 失败用例名 / 首个错误摘要 / OK 标记。
+
+    vitest 汇总行同口径解析（``Tests  2424 passed (2424)`` /
+    ``Tests  1 failed | 2423 passed (2424)``）：Node 仓库只按步骤标记判定会让
+    报告显示「回归测试 未执行」，与真实用例数不符。
+    """
+    text = _strip_ansi(text)
     match = re.search(r"Ran (\d+) tests? in", text)
     tests_run = int(match.group(1)) if match else 0
     failed_tests = re.findall(r"^(?:FAIL|ERROR): (\S+)", text, re.MULTILINE)
     errors = re.findall(r"^([A-Za-z_.]*(?:Error|Exception)): (.+)$", text, re.MULTILINE)
     error_summary = f"{errors[-1][0]}: {errors[-1][1]}" if errors else ""
+    if not tests_run:
+        # 汇总行形如 `Tests  1 failed | 2420 passed | 3 skipped (2424)`；
+        # 总数取末尾括号（vitest 用千分位：2,424），无括号时退回 passed 数
+        vitest = re.search(r"^\s*Tests\s+(.+)$", text, re.MULTILINE)
+        if vitest:
+            line = vitest.group(1)
+            total = re.search(r"\(\s*([\d,]+)\s*\)\s*$", line)
+            passed = re.search(r"([\d,]+)\s+passed", line)
+            failed = re.search(r"([\d,]+)\s+failed", line)
+            source = total or passed
+            if source:
+                tests_run = int(source.group(1).replace(",", ""))
+                failed_count = int(failed.group(1).replace(",", "")) if failed else 0
+                failed_tests = [
+                    item.strip() for item in re.findall(r"^\s*FAIL\s+(.+)$", text, re.M)
+                ]
+                if failed_count and not error_summary:
+                    error_summary = f"{failed_count} 个 vitest 用例未通过"
     return {
         "tests_run": tests_run,
         "failed_tests": failed_tests,
@@ -583,7 +748,7 @@ class DockerSandboxRunner:
             "--name", name or self._container_name(job),
             "--label", f"aiops.patch-id={job.patch_id}",
             "--network", "none" if job.network_disabled else "bridge",
-            "--user", "65534:65534",
+            "--user", sandbox_user(),
             "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges",
             "--memory", job.memory_limit,
@@ -807,7 +972,13 @@ class K8sJobSandboxRunner:
                                     "capabilities": {"drop": ["ALL"]},
                                 },
                                 "resources": {
-                                    "limits": {"memory": "256Mi", "cpu": "1", "ephemeral-storage": "1Gi"},
+                                    # 跟随执行计划（Node 需 4g/2 CPU；写死 256Mi 会直接 OOM）；
+                                    # Docker 单位 m/g 需转成 K8s 的 Mi/Gi（十进制 M/G 会缩小上限）
+                                    "limits": {
+                                        "memory": k8s_memory(job.memory_limit),
+                                        "cpu": job.cpus,
+                                        "ephemeral-storage": "1Gi",
+                                    },
                                     "requests": {"memory": "64Mi", "cpu": "100m"},
                                 },
                                 "volumeMounts": [
@@ -846,7 +1017,8 @@ class K8sJobSandboxRunner:
         if len(payload) > self.SECRET_MAX_BYTES:
             return None, (
                 f"工作区归档 {len(payload)}B 超过 Secret 上限 {self.SECRET_MAX_BYTES}B；"
-                "需接入制品库（对象存储）后再启用 K8s 执行器"
+                "需接入制品库（对象存储）后再启用 K8s 执行器；"
+                "Node 依赖树应预装进沙箱镜像，不要打包进工作区"
             )
         return payload, ""
 
@@ -1005,7 +1177,15 @@ class K8sJobSandboxRunner:
 
     def run(self, job: SandboxJob) -> SandboxOutcome:
         started = self._clock()
-        image_error = resolve_image_error(job.image)
+        image_error = resolve_image_error(
+            job.image,
+            env_var=job.image_env,
+            example=(
+                "node:<tag>@sha256:<digest>"
+                if job.image_env == NODE_IMAGE_ENV
+                else "python:<tag>@sha256:<digest>"
+            ),
+        )
         if image_error:
             return SandboxOutcome(
                 exit_code=-1, passed=False, tests_run=0,
@@ -1207,7 +1387,15 @@ def run_patch_tests(
     if plan.kind in {"contract", "static"}:
         return _contract_report(patch, attempt, sast_detail, auto=plan.kind == "static")
 
-    image_error = resolve_image_error(plan.image)
+    image_error = resolve_image_error(
+        plan.image,
+        env_var=plan.image_env,
+        example=(
+            "node:<tag>@sha256:<digest>"
+            if plan.kind == "node"
+            else "python:<tag>@sha256:<digest>"
+        ),
+    )
     if image_error:
         return TestReport(
             patch_id=patch.patch_id,
@@ -1218,7 +1406,22 @@ def run_patch_tests(
             details=f"{image_error}（attempt={attempt}）",
             verification_mode=plan.verification_mode,
         )
-    quota_error = workspace_quota_error(workspace)
+    if plan.kind == "node":
+        deps_error = install_node_deps(workspace, plan, repo_dir)
+        if deps_error:
+            return TestReport(
+                patch_id=patch.patch_id,
+                passed=False,
+                unit_tests="未执行（Node 沙箱依赖未就绪）",
+                regression_tests="未执行",
+                sast=sast_detail,
+                details=f"{deps_error}（attempt={attempt}）",
+                verification_mode=plan.verification_mode,
+            )
+    quota_error = workspace_quota_error(
+        workspace,
+        plan.workspace_quota_mb * 1024 * 1024 if plan.workspace_quota_mb else None,
+    )
     if quota_error:
         return TestReport(
             patch_id=patch.patch_id,
@@ -1250,10 +1453,15 @@ def run_patch_tests(
         patch_id=patch.patch_id,
         workspace=workspace,
         image=plan.image,
+        image_env=plan.image_env,
         command=list(plan.command),
         verification_mode=plan.verification_mode,
         workspace_writable=plan.workspace_writable,
         steps=list(plan.steps),
+        timeout_seconds=plan.timeout_seconds,
+        memory_limit=plan.memory_limit,
+        cpus=plan.cpus,
+        pids_limit=plan.pids_limit,
     )
     before = dir_size_bytes(workspace)
     outcome = (runner or default_runner()).run(job)
@@ -1305,10 +1513,17 @@ def _report_from_outcome(
         details = outcome.error_summary or "沙箱内未发现任何测试用例（attempt=%d）" % attempt
     elif outcome.passed:
         unit = f"{tests_run}/{tests_run} passed"
-        details = (
-            f"隔离执行[{outcome.runner}] Ran {tests_run} tests in {outcome.duration_seconds:.2f}s"
-            f"（镜像 {outcome.image}，attempt={attempt}）"
-        )
+        if outcome.steps:
+            names = "/".join(step["name"] for step in outcome.steps)
+            details = (
+                f"隔离执行[{outcome.runner}] Node 步骤 {names} 通过，"
+                f"共 {tests_run} 个用例（镜像 {outcome.image}，attempt={attempt}）"
+            )
+        else:
+            details = (
+                f"隔离执行[{outcome.runner}] Ran {tests_run} tests in {outcome.duration_seconds:.2f}s"
+                f"（镜像 {outcome.image}，attempt={attempt}）"
+            )
     else:
         passed_count = max(tests_run - failed, 0)
         unit = f"{passed_count}/{tests_run} passed（{failed} 个用例未通过）"
