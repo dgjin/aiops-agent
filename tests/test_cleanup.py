@@ -146,6 +146,17 @@ class WorkspacesTest(_TmpRootsTest):
         self.assertTrue(fresh.exists())
         self.assertTrue(stray.exists())  # 根下散文件不属于工作区，不删
 
+    def test_node_deps_tree_is_kept_as_long_term_asset(self) -> None:
+        """node-deps 是预构建依赖树（长期资产），不能按工作区 TTL 删除。"""
+        deps = self.root / "sandbox" / "node-deps" / "repo" / "node_modules"
+        deps.mkdir(parents=True)
+        (deps / "vite").mkdir()
+        _utime(self.root / "sandbox" / "node-deps", 30)
+        _utime(self.root / "sandbox" / "node-deps" / "repo", 30)
+        report = self._run()
+        self.assertEqual(report["deleted"]["sandbox_workspaces"], 0)
+        self.assertTrue(deps.is_dir())
+
     def test_qoder_workspaces_and_records(self) -> None:
         old_ws = self.root / "qoder" / "p-wp5-old"
         fresh_ws = self.root / "qoder" / "p-wp5-new"

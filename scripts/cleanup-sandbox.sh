@@ -15,6 +15,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 TARGETS="${AIOPS_SANDBOX_ROOT:-data/sandbox} ${AIOPS_QODER_ROOT:-data/qoder}"
+# node-deps 是 scripts/prepare_node_sandbox_deps.sh 预构建的离线依赖树（长期资产），
+# 不是一次性工作区产物；按 7 天 TTL 删掉会让 Node 需求验证直接失败。
+KEEP_NAMES="-name node-deps -prune -o"
 
 DAYS=7
 DRY_RUN=0
@@ -44,12 +47,12 @@ fi
 total_expired=0
 for dir in ${TARGETS}; do
   [ -d "${dir}" ] || continue
-  found=$(find "${dir}" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')
-  expired=$(find "${dir}" -mindepth 1 -maxdepth 1 -mtime +"${DAYS}" | wc -l | tr -d ' ')
+  found=$(find "${dir}" -mindepth 1 -maxdepth 1 ${KEEP_NAMES} -print | wc -l | tr -d ' ')
+  expired=$(find "${dir}" -mindepth 1 -maxdepth 1 ${KEEP_NAMES} -mtime +"${DAYS}" -print | wc -l | tr -d ' ')
   total_expired=$((total_expired + expired))
   echo "== ${dir}：共 ${found} 项，其中 ${expired} 项超过 ${DAYS} 天 =="
   if [ "${expired}" -gt 0 ] && [ "${DRY_RUN}" -eq 1 ]; then
-    find "${dir}" -mindepth 1 -maxdepth 1 -mtime +"${DAYS}" | sed 's/^/  [将删除] /'
+    find "${dir}" -mindepth 1 -maxdepth 1 ${KEEP_NAMES} -mtime +"${DAYS}" -print | sed 's/^/  [将删除] /'
   fi
 done
 
@@ -68,7 +71,7 @@ for dir in ${TARGETS}; do
   while IFS= read -r -d '' item; do
     rm -rf -- "${item}"
     deleted=$((deleted + 1))
-  done < <(find "${dir}" -mindepth 1 -maxdepth 1 -mtime +"${DAYS}" -print0)
+  done < <(find "${dir}" -mindepth 1 -maxdepth 1 ${KEEP_NAMES} -mtime +"${DAYS}" -print0)
 done
 
 echo "✔ 已删除 ${deleted} 项（保留最近 ${DAYS} 天）"

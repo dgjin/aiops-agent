@@ -100,13 +100,18 @@ def _cleanup_files(
     return count
 
 
-def _cleanup_workspaces(root: Path, cutoff: datetime, dry_run: bool) -> int:
-    """删除根目录下 mtime 早于 cutoff 的直接子目录（工作区）。"""
+def _cleanup_workspaces(
+    root: Path, cutoff: datetime, dry_run: bool, keep: set[str] | None = None
+) -> int:
+    """删除根目录下 mtime 早于 cutoff 的直接子目录（工作区）。
+
+    keep：长期资产目录名（如 Node 离线依赖树 node-deps），不是一次性产物。
+    """
     if not root.is_dir():
         return 0
     count = 0
     for child in root.iterdir():
-        if not child.is_dir():
+        if not child.is_dir() or child.name in (keep or set()):
             continue
         if _mtime(child) < cutoff:
             if dry_run:
@@ -215,7 +220,7 @@ def run_cleanup(
     # 文件域（demo / production 通用；Qoder 拆为「工作区目录」与「run.json 留痕」两段）
     file_domains = [
         ("audit_files", f"审计文件（{audit_dir}）", lambda c: _cleanup_audit_files(audit_dir, c, dry_run)),
-        ("sandbox_workspaces", f"沙箱工作区（{sandbox_root}）", lambda c: _cleanup_workspaces(sandbox_root, c, dry_run)),
+        ("sandbox_workspaces", f"沙箱工作区（{sandbox_root}）", lambda c: _cleanup_workspaces(sandbox_root, c, dry_run, keep={"node-deps"})),
         ("notify_files", f"通知留痕（{notify_dir}）", lambda c: _cleanup_files(notify_dir, c, dry_run)),
         ("qoder_workspaces", f"Qoder 工作区（{qoder_root}）", lambda c: _cleanup_workspaces(qoder_root, c, dry_run)),
         (
