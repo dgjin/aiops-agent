@@ -1444,6 +1444,13 @@ mysql -e "SHOW COLUMNS FROM workflow_runs LIKE 'kind'; SHOW INDEX FROM workflow_
 `0004` 只加列与索引，不回填业务数据：存量行 `kind=alert`、`risk=''`，面板按「未标注」归桶。
 若历史数据需要真实 `kind`，走单独的一次性核对脚本，不要用 `UPDATE ... = 'alert'` 掩盖未知。
 
+> **控制台报「服务未就绪」或 `readyz` 503 时先查 schema**：`GET /api/subsystems`（需登录）里
+> `checks.schema.detail=schema_upgrade_required` 即表示库结构落后于代码。老库 `alembic current`
+> 为空说明从未版本化：先 `mysqldump --single-transaction --no-tablespaces` 备份，再执行上面的
+> `alembic upgrade head`（`0001` 是幂等的 `ensure_schema`，只建缺失表/补列，不删数据），
+> 完成后 `alembic current` 应为 `20261101_0004 (head)`。控制台横幅只在 503 响应体含
+> `fail-closed` / 令牌注册表提示时才代表鉴权未配置，readiness 降级不再混报。
+
 ### 13.2 接口契约与降级
 
 ```bash

@@ -82,6 +82,8 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    /** 503 是否为「令牌注册表不可用」的 fail-closed；readiness 降级也会返回 503。 */
+    public readonly authFailClosed = false,
   ) {
     super(message)
     this.name = 'ApiError'
@@ -130,15 +132,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   syncServerTime((data as { server_time?: unknown } | null)?.server_time)
   if (!res.ok) {
     const serverMsg = (data as { error?: string } | null)?.error
+    // 503 有两种语义：鉴权 fail-closed（令牌注册表不可用）与 readiness 降级。
+    // 只有前者才允许提示「鉴权未配置」，后者必须让用户去看具体降级项。
+    const authFailClosed =
+      res.status === 503 &&
+      /fail-closed|令牌注册表|AIOPS_CONSOLE_AUTH_TOKENS/.test(serverMsg ?? '')
     const hint =
       res.status === 401
         ? '（凭证缺失或已失效：请登录，或在用户菜单中更新访问令牌）'
         : res.status === 403
           ? '（当前角色权限不足）'
-          : res.status === 503
+          : authFailClosed
             ? '（鉴权未配置：服务端处于 fail-closed）'
             : ''
-    throw new ApiError(res.status, (serverMsg || `请求失败（HTTP ${res.status}）`) + hint)
+    throw new ApiError(res.status, (serverMsg || `请求失败（HTTP ${res.status}）`) + hint, authFailClosed)
   }
   return data as T
 }
@@ -153,7 +160,11 @@ export function describeError(err: unknown): string {
   if (err instanceof ApiError) {
     if (err.status === 401) return '未授权：请登录，或在用户菜单中更新访问令牌后重试'
     if (err.status === 403) return '权限不足：当前角色无权访问该功能'
-    if (err.status === 503) return '鉴权未配置：服务端处于 fail-closed，请先配置令牌注册表'
+    if (err.status === 503) {
+      return err.authFailClosed
+        ? '鉴权未配置：服务端处于 fail-closed，请先配置令牌注册表'
+        : '服务未就绪：后端子系统未通过健康检查，请到「系统状态」查看降级项'
+    }
     return err.message
   }
   if (err instanceof NetworkError) return err.message

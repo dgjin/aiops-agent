@@ -200,7 +200,7 @@ function humanSeconds(seconds: number): string {
   return `${seconds} 秒`
 }
 
-/** 登录失效 / 鉴权未配置横幅：与「BFF 不可达」区分开，直接给出该做的事。 */
+/** 登录失效 / 鉴权未配置 / readiness 降级横幅：三者处置动作不同，不能混为一谈。 */
 function AuthBanner() {
   const { error } = useQuery({
     queryKey: ['health'],
@@ -209,13 +209,18 @@ function AuthBanner() {
     retry: false,
   })
   const status = error instanceof ApiError ? error.status : null
+  const authFailClosed = error instanceof ApiError && error.authFailClosed
   if (status !== 401 && status !== 503) return null
   return (
     <div className="flex items-start gap-2 border-b border-danger/40 bg-danger/10 px-8 py-2 text-xs text-danger">
       <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
       <div>
         <span className="font-medium">
-          {status === 401 ? '登录已过期或凭证失效' : '鉴权未配置：服务端处于 fail-closed'}
+          {status === 401
+            ? '登录已过期或凭证失效'
+            : authFailClosed
+              ? '鉴权未配置：服务端处于 fail-closed'
+              : '服务未就绪：部分子系统未通过健康检查'}
         </span>
         <div className="mt-0.5 text-muted">
           {status === 401 ? (
@@ -226,8 +231,17 @@ function AuthBanner() {
               </Link>
               ；自动化场景可在右上角用户菜单的「访问令牌」中更新静态令牌。
             </>
-          ) : (
+          ) : authFailClosed ? (
             '服务端未配置令牌注册表（AIOPS_CONSOLE_AUTH_TOKENS 或 data/console_tokens.json），所有 /api 请求被拒绝（503）。'
+          ) : (
+            <>
+              BFF 可达且鉴权正常，但 readiness 未通过（如数据库 schema 待升级、Redis 或 Temporal
+              降级）。请到
+              <Link to="/system" className="mx-0.5 text-danger underline">
+                系统状态
+              </Link>
+              查看具体降级项，不要按「令牌未配置」处理。
+            </>
           )}
         </div>
       </div>

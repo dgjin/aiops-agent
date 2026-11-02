@@ -142,7 +142,7 @@
 - [x] 前端：系统总览的运营度量改成值班看板——值班告警置顶（等级徽标 / 观测值 / 阈值 / 明细 / Runbook 抽屉）、6 张 KPI 卡、分来源与分风险、证据与采集、沙箱与补丁质量、待办与知识、分服务前 10、拦截分档；比率为 `null` 时显示「暂无数据」，标题标注数据源与镜像同步时间。
 - [x] 文档：新增 `docs/AIOps 值班 Runbook.md`（通用读法 + 六节处置 + 阈值一览）；测试锁定「聚合产出的每个 `duty_alerts[].code` 必须有对应 Runbook 小节」，防止告警改码后文档失联。
 - [x] 单测覆盖：`test_ops_metrics_m5`（23）、`test_ops_warehouse`（11，含 SQL 数据面与手算一致性）、`test_runbooks`（8）、`test_migrations` 新增 kind/risk 升级与降级 1 例；全量 `Ran 1736 tests … OK (skipped=6)`（M4 结束 1693，本里程碑新增 43）。
-- [ ] 生产 MySQL 8 实机执行 `alembic upgrade head`（`0004`）并抽样核对存量行列值与索引命中计划；当前只在 SQLite 空库/历史库/回退路径验证。
+- [x] 生产 MySQL 8 实机迁移（2026-11-02）：`alembic current` 为空（从未版本化）→ 备份 `backups/aiops-before-migrations-20261102-091516.sql`（185 KB，`Dump completed`，13 条 INSERT）→ `alembic upgrade head` 一次补齐 `0001`–`0004`。核对结果：`workflow_runs` 90 行全部 `kind=alert`；`escalations` 42 行、`log_evidence` 14 行保留；`idx_runs_close_kind(close_time, kind)` 存在，且窗口内按 `close_time` + `kind` 的聚合/倒序查询均命中该索引（`range` + `Using index` / `Backward index scan`）；readiness `schema_current`、`/readyz` 200。补齐的列：`log_evidence.quality`、`escalations.category/plan/resolution`、`workflow_runs.kind/risk`。
 - [ ] 真实 7 天窗口的 `/api/metrics/ops` 与手工 SQL 聚合抽样比对（每个维度至少 1 组分子分母），确认 `source=warehouse` 且 `degraded` 为空。
 - [ ] 模型成本计量与知识采用情况回填（`cost.model_cost_usd`、`escalations.knowledge.adopted`）待计量数据源与索引重建记录接入后补齐。
 
