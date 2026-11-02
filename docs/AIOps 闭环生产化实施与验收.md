@@ -145,4 +145,21 @@
 - [ ] 真实 7 天窗口的 `/api/metrics/ops` 与手工 SQL 聚合抽样比对（每个维度至少 1 组分子分母），确认 `source=warehouse` 且 `degraded` 为空。
 - [ ] 模型成本计量与知识采用情况回填（`cost.model_cost_usd`、`escalations.knowledge.adopted`）待计量数据源与索引重建记录接入后补齐。
 
+### M6 容量治理与生产灰度
+
+- [x] 配额策略：`ReleaseGatePolicy.capacity`（`CapacityConfig`）显式声明 `worker_activities=10`、`worker_local_activities=4`、`local_llm=1`、`qoder=1`、`sandbox=2`、`release=1`、`queue_timeout=0s`、`distributed_limits=false`；`release` 校验器锁定为 1（发布全局串行，不能靠 `max_active_deployments` 兜底）。旧策略文件缺 `capacity` 段时回落默认值，不破坏既有部署。
+- [x] 资源信号量：`aiops_agent/capacity.py` 提供 `ResourceLimiter`（`asyncio.Semaphore` + 排队/执行时长采样 + 拒绝计数）、`limited(resource)` 装饰器与 `configure_from_policy`。`queue_timeout=0` 表示无限等待（与「排队不设上限」的锁定策略一致），超时抛 `CapacityError` 并计入 `rejected{reason=queue_timeout}`；采样窗口固定 512，长期运行不会无界增长。为避开 Temporal 沙箱的模块校验路径，`metrics` 采用延迟导入。
+- [x] 活动接入：`analyze_root_cause` → `local_llm`；`generate_patch` 保持原签名（`@activity.defn` 外层不变），内部按 `fix_agent.resolve_provider()` 选择 `qoder` 或 `local_llm`；`run_tests_in_sandbox` → `sandbox`；`deploy_canary` / `finalize_release` → `release`。装饰器使用 `functools.wraps`，`__name__` 与函数签名对 Temporal 注册保持不变。
+- [x] Worker 并发：`worker.py` 显式传入 `max_concurrent_activities` / `max_concurrent_local_activities`，并在启动时调用 `configure_from_policy` 打印配额日志；`distributed_limits=false` 明确表示当前为**单进程配额**，多 Worker 场景必须先落地集中限流，不得把进程内信号量当全局配额（部署手册第 14.1 节列明该边界）。
+- [x] 容量指标：新增 `aiops_capacity_in_use{resource,mode}`、`aiops_capacity_queue_depth`、`aiops_capacity_wait_seconds`、`aiops_capacity_run_seconds`、`aiops_capacity_rejected_total{resource,reason,mode}`；`metrics.py` noop 分支同步实现，未装 SDK 时不报错也不伪造数据。
+- [x] 对外暴露：启动快照（`startup_snapshot` / `snapshot_for_workflow`）与 `GET /api/system` 的 `policy.capacity` 均包含 `capacity`；`_POLICY_LOCKS` 登记 `capacity.release=1`，管理面可读到实际生效的阻塞项；前端系统状态页新增「并发配额」区块。
+- [x] 压测工具：`scripts/capacity_drill.py` 支持 `fake` 与 `temporal` 两模式，20/50/100 三档批次覆盖 `normal` / `duplicate` / `no_logs` / `model_timeout` 画像；幂等键与 `alert_webhook.workflow_id_for` 对齐为 `aiops-fix-{service}-{alert_id}`；报告给出 `quota_respected` / `no_leak` / `dedup_ok` 三项硬断言与失败分类；temporal 模式未完成启动核对时 `evaluate` 必须报问题，不得默认通过。
+- [x] 灰度工具：`scripts/rollout_gate.py` 覆盖 `staging-shadow → production-shadow → single-service → limited-release → expand` 五阶段，检查项含样本量（≥50 条 / ≥7 天）、证据质量、高置信误放行、真实沙箱与静态验收分列、单服务自动完成率（≥50%）、模型质量门槛文件存在、回滚率/人工改判率不高于基线、三项人工演练显式确认。缺失字段记 `unknown`，退出码 0=allow / 1=block / 2=pending。
+- [x] 单测覆盖：`test_capacity`（16）、`test_capacity_drill`（9）、`test_rollout_gate`（19）；全量 `Ran 1780 tests … OK (skipped=6)`（M5 结束 1736，本里程碑新增 44）。
+- [ ] staging 真实 20/50/100 三档压测（含重复告警、无日志、模型超时、沙箱排队）与 `temporal` 模式启动核对：需核对无重复工作流、无未解释 OOM、队列可恢复、失败分类与报告一致。
+- [ ] Worker 重启状态一致性：重启期间排队与执行中活动的最终归属、幂等键复用、指标计数连续性（当前仅单测覆盖进程内行为）。
+- [ ] Kill Switch 生效时延实测（压测进行中触发，记录从发令到活动停止与队列清空的秒数）。
+- [ ] 故障演练：MySQL 备份恢复、Temporal retention 到期、Loki 不可用、ArgoCD 不可用、沙箱资源耗尽五项，按部署手册第 14.5 节处置表回填实测结论。
+- [ ] staging 影子 7 天且有效告警 ≥50 条后跑 `rollout_gate --stage staging-shadow`，再依次推进 `production-shadow`、`single-service`、`limited-release`、`expand`；每阶段需附 `--metrics` 快照与人工确认记录，未执行前不得标记完成。
+
 后续里程碑在此文件追加实测结果；未执行的真实环境项目不得标记完成。

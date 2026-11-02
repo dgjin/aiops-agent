@@ -1526,3 +1526,111 @@ cd web && npm run build
 
 容量与并发压测（背压、排队、灰度工具）属 M6 范围；第 12、13 章均不承诺并发上限，
 当前配额即上限。运营指标只描述已落库的终态流程，不用于实时容量判定。
+
+## 14 容量治理与生产灰度（M6）
+
+本章给出并发基线、背压接入点、容量演练与灰度放行检查。代码侧能力由单测覆盖，
+**真实 20/50/100 压测与 7 天影子验收必须在 staging 执行后回填**，不得用本地 fake
+结果代替。
+
+### 14.1 并发基线与资源配额
+
+策略 `release_gate.capacity`（启动快照，运行期不可热改）：
+
+| 键 | 默认 | 作用 | 边界 |
+|---|---:|---|---|
+| `worker_activities` | 10 | Temporal Worker 普通活动并发 | 直接传给 SDK，替换默认值 |
+| `worker_local_activities` | 4 | 本地活动并发 | 同上 |
+| `local_llm` | 1 | Ollama 根因/修复同时执行数 | 进程内信号量 |
+| `qoder` | 1 | Qoder CLI 同时执行数 | 按 `fix_agent.resolve_provider()` 选择 |
+| `sandbox` | 2 | Docker/K8s 沙箱同时执行数 | 与集群配额独立 |
+| `release` | 1 | 发布执行期互斥（**锁定**） | 不替代 `max_active_deployments` 闸门 |
+| `queue_timeout` | `0s` | 0 = 无限等待；>0 时超时拒绝 | 拒绝记 `aiops_capacity_rejected_total` |
+| `distributed_limits` | `false` | 是否已接入集中限流 | 多副本不得依赖进程内信号量 |
+
+接入点：`analyze_root_cause` → `local_llm`；`generate_patch` → 按提供者选
+`qoder`/`local_llm`；`run_tests_in_sandbox` → `sandbox`；`deploy_canary` /
+`finalize_release` → `release`。重复告警仍由接入层幂等键
+（`aiops-fix-{service}-{alert_id}`）防重，扩大并发不会制造修复风暴。
+
+### 14.2 指标与告警
+
+```bash
+curl -s http://127.0.0.1:9091/metrics | grep aiops_capacity
+```
+
+| 指标 | 含义 | 建议 |
+|---|---|---|
+| `aiops_capacity_in_use{resource,mode}` | 当前占用 | 长期等于配额说明饱和 |
+| `aiops_capacity_queue_depth{resource,mode}` | 等待任务数 | 连续 10 分钟 >0 视为背压 |
+| `aiops_capacity_wait_seconds` | 等待时长直方图 | P95 超过单次执行时长需扩容或降批 |
+| `aiops_capacity_run_seconds` | 执行时长直方图 | 与模型/沙箱自身指标对照 |
+| `aiops_capacity_rejected_total{resource,reason}` | 超时/取消拒绝 | >0 必须处置，不能静默丢单 |
+
+这些是**进程内**视图。多副本时必须以集中限流（Redis 令牌桶/网关配额）为准，
+Prometheus 聚合前先按副本数确认口径；`distributed_limits=true` 只表示前提已满足，
+工具不会替你校验集中配额是否存在。
+
+### 14.3 容量演练
+
+```bash
+# 1) 本地 fake：验证配额、幂等、无泄漏（不连接 Temporal/模型/沙箱）
+.venv/bin/python scripts/capacity_drill.py --batch 20,50,100
+
+# 2) staging 真实启动：核对重复告警只启动一次（不执行真实修复）
+TEMPORAL_ADDRESS=<staging>:7233 .venv/bin/python scripts/capacity_drill.py \
+  --mode temporal --batch 20,50,100
+
+# 3) 队列/拒绝演练：显式设置短超时，确认拒绝计数与转人工口径
+AIOPS_POLICY_PATH=/etc/aiops/policy.staging.yaml \
+  .venv/bin/python scripts/capacity_drill.py --batch 100
+```
+
+fake 模式的通过条件：`quota_respected`（峰值 ≤ 配额）、`no_leak`（结束后
+`in_use=0` 且 `waiting=0`）、`dedup_ok`（重复告警不产生第二次执行）。
+temporal 模式在环境不可达时退出码 2，**不得当作通过**。
+
+staging 还需人工完成并留痕：Worker 重启后流程状态一致、Kill Switch 生效时延、
+MySQL 备份恢复、Temporal retention、Loki 不可用、ArgoCD 不可用、沙箱资源耗尽。
+
+### 14.4 灰度阶段与放行检查
+
+```bash
+# 先取运营指标快照（7 天窗口）
+curl -s -H "Authorization: Bearer $TOKEN" \
+  'http://127.0.0.1:8600/api/metrics/ops?days=7' > /tmp/ops.json
+
+# 影子阶段
+.venv/bin/python scripts/rollout_gate.py --stage staging-shadow \
+  --metrics /tmp/ops.json --confirm backup-restore,kill-switch,runbook
+
+# 单服务白名单（要求该服务自动完成率 ≥50% 且质量门槛存在）
+.venv/bin/python scripts/rollout_gate.py --stage single-service --service demo-app \
+  --metrics /tmp/ops.json --quality-bar data/model_quality_bar.json \
+  --confirm backup-restore,kill-switch,runbook
+
+# 有限自动发布（回滚率/改判率不得高于基线）
+.venv/bin/python scripts/rollout_gate.py --stage limited-release --service demo-app \
+  --metrics /tmp/ops.json --baseline /tmp/ops-baseline.json \
+  --quality-bar data/model_quality_bar.json --confirm backup-restore,kill-switch,runbook
+```
+
+阶段顺序：`staging-shadow → production-shadow → single-service → limited-release → expand`。
+退出码：0 = allow，1 = block，2 = pending（未知项/输入不具备）。工具**只读**，
+不修改策略、不自动推进阶段；`unknown` 不等于通过，未确认的人工演练不得跳过。
+
+生产放行硬条件（缺一不可）：安全回归高置信误放行 0；自动流程证据质量 `OK`；
+选定模型满足 M3 门槛；静态验收未计入真实测试通过率；白名单服务自动完成率 ≥50%
+且不以人工改判/回滚/SLA 超时为代价；备份恢复与 Kill Switch 演练通过；值班具备
+Runbook。任一不满足保持 Shadow。
+
+### 14.5 失败处置
+
+| 现象 | 处置 |
+|---|---|
+| `queue_depth` 长期 >0 且 `wait_seconds` 上升 | 先降批次/错峰；扩容前确认是模型、沙箱还是发布成为瓶颈 |
+| `aiops_capacity_rejected_total` 增长 | 检查 `queue_timeout` 是否过短；拒绝任务必须转人工或重试并留痕 |
+| 峰值 `in_use` 超过配额 | 说明有绕过信号量的执行路径，先定位调用点，不要先调大配额 |
+| 演练 `dedup_ok=false` | 检查接入层幂等键与聚合窗口，禁止用降低并发掩盖重复启动 |
+| 多副本下总量超配额 | 进程内信号量不是全局配额，接入集中限流后再扩副本 |
+| `rollout_gate` 一直 `pending` | 按输出逐项补：指标分量、基线快照、人工演练确认；不得改成 allow |

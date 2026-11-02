@@ -25,6 +25,8 @@ from pathlib import Path
 
 from temporalio import activity
 
+from . import capacity
+
 # 注：logs / triage 依赖网络与 pydantic，在各 activity 函数内延迟导入，
 # 避免 workflow 沙箱验证 activity 模块时触发 RestrictedWorkflowAccessError。
 from .models import (
@@ -305,6 +307,7 @@ async def archive_evidence(evidence: dict, clustered: dict, wf_id: str = "") -> 
 
 
 @activity.defn
+@capacity.limited("local_llm")
 async def analyze_root_cause(
     alert: Alert, clustered: dict, trace_ids: list[str]
 ) -> RootCause:
@@ -488,6 +491,24 @@ async def generate_patch(
     references: list[dict],
     attempt: int,
 ) -> Patch:
+    """修复生成入口（M6）：按实际提供者选择 Qoder 或本地 LLM 配额后执行。
+
+    配额只做背压，不改变模型路由：``fix_agent.resolve_provider()`` 仍是唯一
+    提供者判定（含环境变量与默认值），信号量仅限制同时在跑的生成数。
+    """
+    from . import fix_agent
+
+    resource = "qoder" if fix_agent.resolve_provider() == "qoder" else "local_llm"
+    async with capacity.get_limiter().limit(resource):
+        return await _generate_patch(alert, root_cause, references, attempt)
+
+
+async def _generate_patch(
+    alert: Alert,
+    root_cause: RootCause,
+    references: list[dict],
+    attempt: int,
+) -> Patch:
     """真实实现（WP4）：修复 Agent 生成最小化 diff（应用 + 编译双重校验）。
 
     失败/演示分支走确定性兜底补丁（degraded 留痕），保证流程不中断。
@@ -523,6 +544,7 @@ async def generate_patch(
 # --------------------------------------------------------------------------
 
 @activity.defn
+@capacity.limited("sandbox")
 async def run_tests_in_sandbox(alert: Alert, patch: Patch, attempt: int) -> TestReport:
     """真实实现（WP6）：工作区准备 + 应用补丁 → 隔离运行时内执行单测（禁网/限额/只读）。
 
@@ -809,6 +831,7 @@ async def _release_thread(fn, *args, **kwargs):
 
 
 @activity.defn
+@capacity.limited("release")
 async def deploy_canary(
     alert: Alert, patch: Patch, traffic_percent: int, observe_seconds: int = 10
 ) -> CanaryResult:
@@ -864,6 +887,7 @@ async def deploy_canary(
 
 
 @activity.defn
+@capacity.limited("release")
 async def finalize_release(canary: CanaryResult, auto_rollback: bool) -> ReleaseResult:
     """真实实现（WP7）：达标真实滚动到稳定版；劣化回收金丝雀并保留稳定版本。
 

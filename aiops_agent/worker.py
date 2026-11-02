@@ -21,7 +21,7 @@ from pathlib import Path
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from . import activities, metrics, tracing
+from . import activities, capacity, metrics, tracing
 from .config import load_policy, startup_snapshot
 from .mode import ModeConfigError, is_production, temporal_namespace, temporal_task_queue
 from .workflows import AIOpsFixWorkflow, AIOpsRequirementWorkflow
@@ -96,8 +96,19 @@ async def main() -> None:
         workflows=_WORKFLOW_LIST,
         activities=_ACTIVITY_LIST,
         interceptors=interceptors,
+        # M6：显式并发（策略快照），不再依赖 SDK 默认值；资源级信号量在 activity 内生效
+        max_concurrent_activities=policy.release_gate.capacity.worker_activities,
+        max_concurrent_local_activities=policy.release_gate.capacity.worker_local_activities,
     )
-    logger.info("Worker 已启动：task_queue=%s, namespace=%s", task_queue, temporal_namespace())
+    limiter = capacity.configure_from_policy(policy)
+    logger.info(
+        "Worker 已启动：task_queue=%s, namespace=%s, activities=%d(local=%d), 资源配额=%s",
+        task_queue,
+        temporal_namespace(),
+        policy.release_gate.capacity.worker_activities,
+        policy.release_gate.capacity.worker_local_activities,
+        limiter.limits,
+    )
     await worker.run()
 
 

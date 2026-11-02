@@ -41,3 +41,13 @@ release_gate:
     observe_duration: 5m
     health_metrics: [error_rate, p99_latency]
     auto_rollback: true
+  # M6 并发与背压：预生产初始值（压测后按压测报告调整，release 不可改）
+  capacity:
+    worker_activities: 10
+    worker_local_activities: 4
+    local_llm: 1
+    qoder: 1
+    sandbox: 2
+    release: 1
+    queue_timeout: 0s
+    distributed_limits: false        # 单副本预生产；扩副本前必须接集中限流

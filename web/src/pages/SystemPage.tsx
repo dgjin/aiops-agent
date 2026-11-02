@@ -376,7 +376,7 @@ export function SystemPage() {
         }
       >
         {!policyOpen ? (
-          <div className="text-xs text-idle">已收起：展开查看闸门阈值 / 通知窗口 / 金丝雀参数与策略锁定项</div>
+          <div className="text-xs text-idle">已收起：展开查看闸门阈值 / 通知窗口 / 金丝雀参数 / 并发配额与策略锁定项</div>
         ) : policy ? (
           <>
             <div className="text-xs text-muted">来源：{policy.source}</div>
@@ -397,6 +397,10 @@ export function SystemPage() {
               <div>
                 <div className="mb-1.5 text-xs text-muted">canary</div>
                 <JsonBlock data={policy.canary} />
+              </div>
+              <div>
+                <div className="mb-1.5 text-xs text-muted">capacity（并发与背压）</div>
+                <JsonBlock data={policy.capacity} />
               </div>
             </div>
             <div className="mt-4 border-t border-line pt-4">

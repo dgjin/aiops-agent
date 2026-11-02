@@ -26,6 +26,7 @@ _POLICY_LOCKS = [
     {"key": "new_patch_during_window.queue_limit", "value": 0, "reason": "队列不设上限（锁定）"},
     {"key": "feedback_circuit_breaker.enabled", "value": False, "reason": "反馈不触发自动熔断（锁定）"},
     {"key": "concurrency.max_active_deployments", "value": 1, "reason": "全局仅允许一个发布（锁定）"},
+    {"key": "capacity.release", "value": 1, "reason": "发布执行期同样只允许一个（锁定）"},
     {"key": "notify_window.deploy_on_expiry", "value": True, "reason": "到期自动进入金丝雀（锁定）"},
 ]
 
@@ -46,6 +47,7 @@ async def api_system() -> dict:
             "approval": snapshot["approval"],
             "notify_window": snapshot["notify_window"],
             "canary": snapshot["canary"],
+            "capacity": snapshot["capacity"],
             "locks": _POLICY_LOCKS,
         }
     except Exception as exc:  # noqa: BLE001 - 策略缺失/非法时降级展示

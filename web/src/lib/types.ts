@@ -351,6 +351,7 @@ export interface PolicyPayload {
   approval: Record<string, unknown>
   notify_window: Record<string, unknown>
   canary: Record<string, unknown>
+  capacity: Record<string, unknown>
   locks: PolicyLock[]
 }
 

@@ -182,6 +182,42 @@ class ConcurrencyConfig(BaseModel):
         return value
 
 
+class CapacityConfig(BaseModel):
+    """并发与背压（M6）：Worker 并发上限 + 资源信号量。
+
+    - ``worker_activities`` / ``worker_local_activities`` 直接传给 Temporal Worker；
+    - ``local_llm`` / ``qoder`` / ``sandbox`` 分别限制本地模型、Qoder CLI 与沙箱的
+      同时在执行数；``release`` 锁定为 1（沿用「同一时刻仅一个发布」的底线）；
+    - ``queue_timeout`` 默认 0 = 无限等待（排队不设上限），正整数表示等待超时后
+      拒绝并留痕，由调用方转人工或重试；
+    - ``distributed_limits`` 仅表示是否已接入集中限流：进程内信号量不是跨副本
+      全局配额，多 Worker 部署不得依赖本项冒充集中配额。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    worker_activities: int = Field(10, ge=1, le=200)
+    worker_local_activities: int = Field(4, ge=1, le=200)
+    local_llm: int = Field(1, ge=1, le=64)
+    qoder: int = Field(1, ge=1, le=64)
+    sandbox: int = Field(2, ge=1, le=64)
+    release: int = 1
+    queue_timeout: timedelta = Field(default_factory=lambda: timedelta(0))
+    distributed_limits: bool = False
+
+    @field_validator("release")
+    @classmethod
+    def _lock_release(cls, value: int) -> int:
+        if value != 1:
+            raise ValueError("并发底线：同一时刻全局仅允许一个发布执行（capacity.release 必须为 1）")
+        return value
+
+    @field_validator("queue_timeout", mode="before")
+    @classmethod
+    def _duration(cls, value: object) -> timedelta:
+        return _parse_duration(value)
+
+
 class NotifyWindowConfig(BaseModel):
     """闸门 3：用户公告 + 延迟发布窗口。"""
 
@@ -241,6 +277,8 @@ class ReleaseGatePolicy(BaseModel):
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     notify_window: NotifyWindowConfig = Field(default_factory=NotifyWindowConfig)
     canary: CanaryConfig = Field(default_factory=CanaryConfig)
+    # M6：Worker 并发与资源信号量（旧策略缺省时用默认值，行为按串行执行）
+    capacity: CapacityConfig = Field(default_factory=CapacityConfig)
 
 
 class GitConfig(BaseModel):
@@ -278,7 +316,9 @@ class Policy(BaseModel):
             f"approval_timeout={gate.approval.timeout}, "
             f"countdown={gate.notify_window.countdown}, "
             f"canary={gate.canary.traffic_percent}%/observe={gate.canary.observe_duration}, "
-            f"auto_rollback={gate.canary.auto_rollback}"
+            f"auto_rollback={gate.canary.auto_rollback}, "
+            f"capacity=llm{gate.capacity.local_llm}/qoder{gate.capacity.qoder}"
+            f"/sandbox{gate.capacity.sandbox}/release{gate.capacity.release}"
         )
 
 
@@ -376,7 +416,8 @@ def startup_snapshot(root: Path | None = None) -> dict:
             "database": "mysql (configured)" if db else "file (demo)",
             "temporal_address": endpoint.netloc,
             "namespace": runtime_mode.temporal_namespace(), "task_queue": runtime_mode.temporal_task_queue(),
-            "listeners": listeners}
+            "listeners": listeners,
+            "capacity": snapshot_for_workflow(policy)["capacity"]}
 
 
 def snapshot_for_workflow(policy: Policy) -> dict:
@@ -432,5 +473,16 @@ def snapshot_for_workflow(policy: Policy) -> dict:
             "traffic_percent": gate.canary.traffic_percent,
             "observe_seconds": int(gate.canary.observe_duration.total_seconds()),
             "auto_rollback": gate.canary.auto_rollback,
+        },
+        # M6：并发与背压（工作流不消费该段，仅随快照留痕，供排障对照启动配置）
+        "capacity": {
+            "worker_activities": gate.capacity.worker_activities,
+            "worker_local_activities": gate.capacity.worker_local_activities,
+            "local_llm": gate.capacity.local_llm,
+            "qoder": gate.capacity.qoder,
+            "sandbox": gate.capacity.sandbox,
+            "release": gate.capacity.release,
+            "queue_timeout_seconds": int(gate.capacity.queue_timeout.total_seconds()),
+            "distributed_limits": gate.capacity.distributed_limits,
         },
     }

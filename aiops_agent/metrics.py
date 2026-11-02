@@ -92,6 +92,27 @@ if _AVAILABLE:
     AGGREGATED_ALERTS = Counter(
         "aiops_alert_aggregated_total", "同故障域聚合归并的告警数（P2-1）", ["service", "mode"]
     )
+    CAPACITY_IN_USE = Gauge("aiops_capacity_in_use", "资源并发占用数（M6）", ["resource", "mode"])
+    CAPACITY_QUEUE = Gauge(
+        "aiops_capacity_queue_depth", "资源等待队列长度（M6）", ["resource", "mode"]
+    )
+    CAPACITY_WAIT = Histogram(
+        "aiops_capacity_wait_seconds",
+        "资源等待时长（M6）",
+        ["resource", "mode"],
+        buckets=[0.01, 0.1, 0.5, 1, 5, 30, 60, 300],
+    )
+    CAPACITY_RUN = Histogram(
+        "aiops_capacity_run_seconds",
+        "资源执行时长（M6）",
+        ["resource", "mode"],
+        buckets=[0.1, 1, 5, 15, 30, 60, 300, 900],
+    )
+    CAPACITY_REJECTED = Counter(
+        "aiops_capacity_rejected_total",
+        "资源等待超时/取消次数（M6）",
+        ["resource", "reason", "mode"],
+    )
 else:  # pragma: no cover - 降级分支
     WORKFLOW_STARTED = _NoopMetric()
     WORKFLOW_COMPLETED = _NoopMetric()
@@ -107,6 +128,11 @@ else:  # pragma: no cover - 降级分支
     BFF_REQUEST_DURATION = _NoopMetric()
     GATE_EVENTS = _NoopMetric()
     AGGREGATED_ALERTS = _NoopMetric()
+    CAPACITY_IN_USE = _NoopMetric()
+    CAPACITY_QUEUE = _NoopMetric()
+    CAPACITY_WAIT = _NoopMetric()
+    CAPACITY_RUN = _NoopMetric()
+    CAPACITY_REJECTED = _NoopMetric()
 
 
 # 批次 I 只提供旁路接口；未接入的生产者不能声称已采集。
@@ -251,6 +277,41 @@ def observe_gate_event(gate: str, decision: str) -> None:
 def observe_alert_aggregated(service: str) -> None:
     """同故障域聚合归并一条告警（webhook 接入层，P2-1 修复风暴防护）。"""
     AGGREGATED_ALERTS.labels(service=_label(service), mode=current_mode()).inc()
+
+
+def set_capacity_state(resource: str, in_use: int, waiting: int) -> None:
+    """容量占用与队列深度（M6）：进程内信号量的即时视图。
+
+    ``waiting`` 是等待该资源的任务数，不等于跨副本总队列；多 Worker 部署必须
+    接入集中限流后再据此告警。
+    """
+    resource_label = _label(resource, fallback="unknown")
+    mode = current_mode()
+    CAPACITY_IN_USE.labels(resource=resource_label, mode=mode).set(max(0, int(in_use)))
+    CAPACITY_QUEUE.labels(resource=resource_label, mode=mode).set(max(0, int(waiting)))
+
+
+def observe_capacity_wait(resource: str, seconds: float) -> None:
+    if seconds >= 0:
+        CAPACITY_WAIT.labels(
+            resource=_label(resource, fallback="unknown"), mode=current_mode()
+        ).observe(seconds)
+
+
+def observe_capacity_run(resource: str, seconds: float) -> None:
+    if seconds >= 0:
+        CAPACITY_RUN.labels(
+            resource=_label(resource, fallback="unknown"), mode=current_mode()
+        ).observe(seconds)
+
+
+def observe_capacity_rejected(resource: str, reason: str) -> None:
+    """等待超时/取消计数：拒绝必须可观测，不能静默丢单。"""
+    CAPACITY_REJECTED.labels(
+        resource=_label(resource, fallback="unknown"),
+        reason=_label(reason, fallback="unknown"),
+        mode=current_mode(),
+    ).inc()
 
 
 def observe_bff_request(method: str, path: str, status: int, duration: float) -> None:

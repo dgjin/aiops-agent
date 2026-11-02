@@ -39,3 +39,13 @@ release_gate:
     observe_duration: 10s         # 演示缩短：10 秒（生产为 5m）
     health_metrics: [error_rate, p99_latency]
     auto_rollback: true
+  # M6 并发与背压（演示同样串行化模型与发布，避免本机资源被打满）
+  capacity:
+    worker_activities: 10
+    worker_local_activities: 4
+    local_llm: 1
+    qoder: 1
+    sandbox: 2
+    release: 1
+    queue_timeout: 0s
+    distributed_limits: false
