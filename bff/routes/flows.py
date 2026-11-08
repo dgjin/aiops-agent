@@ -10,16 +10,26 @@ Temporal 暂不可达时命令保留为 PENDING 并退避重试，不再丢失�
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel, Field
 from temporalio.service import RPCError, RPCStatusCode
 
 from aiops_agent import change_evidence, command_contract, evidence_store, metrics
 
-from .. import aggregator, audit, commands, escalations, runs_store
+from .. import (
+    aggregator,
+    audit,
+    commands,
+    escalations,
+    evidence_package,
+    history_projector,
+    runs_store,
+    timeline,
+)
 from ..deps import ApiError, close_dt, gw, log, ok
 from ..temporal_gateway import check_stage_allowed
 
@@ -143,7 +153,99 @@ async def api_flow_detail(wf_id: str) -> dict:
     detail["evidence"] = (detail.get("result") or {}).get("evidence") or await asyncio.to_thread(
         evidence_store.summary, wf_id
     )
+    # 投影完整性：详情页据此展示「已同步事件数 / 断档 / 延迟」，不阻塞主流程详情
+    try:
+        detail["history"] = await asyncio.to_thread(
+            history_projector.sync_status, wf_id, detail.get("run_id")
+        )
+    except Exception as exc:  # noqa: BLE001 - 投影状态不可读时降级为未知
+        log.warning("[history] %s 同步状态读取失败：%s", wf_id, exc)
+        detail["history"] = {"run_id": detail.get("run_id"), "error": f"{type(exc).__name__}: {exc}"}
     return ok(detail)
+
+
+@router.get("/api/flows/{wf_id}/timeline")
+async def api_flow_timeline(
+    wf_id: str,
+    detail: bool = False,
+    all: bool = False,
+    history_limit: int = Query(5000, ge=1, le=20000),
+    limit: int = Query(0, ge=0, le=5000),
+) -> dict:
+    """统一时间线：History + 闸门/审批 + 操作审计 + 命令投递 + 通知 + 人工待办。
+
+    ``detail=true`` 返回每个节点的原始 detail；``all=true`` 不裁剪 History 内部事件；
+    ``limit>0`` 只取最近 N 条（时间线首屏），返回 ``has_more`` 提示可继续拉取。
+    """
+    flow = await _detail_or_error(wf_id)
+    payload = await asyncio.to_thread(
+        timeline.build,
+        flow,
+        include_history_detail=detail,
+        include_all_history=all,
+        history_limit=history_limit,
+        limit=limit,
+    )
+    return ok(payload)
+
+
+@router.get("/api/flows/{wf_id}/history")
+async def api_flow_history(
+    wf_id: str,
+    run_id: str = "",
+    after_id: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=2000),
+    event_type: str = "",
+    include_detail: bool = True,
+) -> dict:
+    """已投影的 Temporal History 事件（游标分页，不受 UI 200 条上限约束）。"""
+    payload = await asyncio.to_thread(
+        history_projector.read_events,
+        wf_id,
+        run_id or None,
+        after_id=after_id,
+        limit=limit,
+        event_type=event_type,
+        include_detail=include_detail,
+    )
+    payload["sync"] = await asyncio.to_thread(
+        history_projector.sync_status, wf_id, run_id or payload.get("run_id")
+    )
+    return ok(payload)
+
+
+@router.get("/api/flows/{wf_id}/evidence-package")
+async def api_flow_evidence_package(
+    request: Request,
+    wf_id: str,
+    run_id: str = "",
+) -> Response:
+    """导出审计证据包（自包含 JSON + manifest/SHA-256），导出动作写审计链。
+
+    权限：operator（见 middleware.WRITE_ROLE_RULES）；审计写入失败则导出失败（fail-closed）。
+    """
+    flow = await _detail_or_error(wf_id)
+    actor = getattr(request.state.identity, "user", "") or ""
+    try:
+        package, entry = await evidence_package.build_and_audit(
+            wf_id, actor=actor, detail=flow, run_id=run_id or None
+        )
+    except ApiError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 证据包构造失败统一 503，避免半成品下载
+        log.exception("[evidence] %s 证据包导出失败", wf_id)
+        raise ApiError(503, f"证据包导出失败：{type(exc).__name__}: {exc}") from exc
+    filename = f"evidence-{wf_id}.json"
+    return Response(
+        content=json.dumps(package, ensure_ascii=False, default=str),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Audit-Event-Id": str(entry.get("event_id") or ""),
+            "X-Evidence-Root": str(package["manifest"]["root_sha256"]),
+            "X-History-Complete": "1" if package["history"].get("complete") else "0",
+        },
+    )
 
 
 @router.get("/api/flows/{wf_id}/evidence")

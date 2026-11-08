@@ -38,6 +38,13 @@ _WRITE_ROLE_RULES: list[tuple[str, str]] = [
 _READ_ROLE_OVERRIDES: list[tuple[str, str]] = [
     ("/api/auth/tokens", "admin"),
     ("/api/users", "admin"),
+    ("/api/audit/integrity", "admin"),  # 审计链完整性校验：暴露全链状态，限管理员
+]
+
+# 读接口中按「前缀 + 后缀」判定的敏感端点（路径中途带 wf_id，无法用纯前缀匹配）：
+# 证据包包含全量历史/审计/凭据绑定信息，且导出动作本身写审计，要求 operator。
+_READ_ROLE_SUFFIXES: list[tuple[str, str, str]] = [
+    ("/api/flows/", "/evidence-package", "operator"),
 ]
 
 # 认证前的唯一合法入口（登录换取会话令牌；失败限速在路由内，防口令爆破）
@@ -192,6 +199,9 @@ def _rate_limited(retry_after: float) -> JSONResponse:
 def required_role(method: str, path: str) -> str:
     """返回访问该接口所需的最低角色（纯函数，便于单测覆盖）。"""
     if method.upper() == "GET":
+        for prefix, suffix, role in _READ_ROLE_SUFFIXES:
+            if path.startswith(prefix) and path.endswith(suffix):
+                return role
         for prefix, role in _READ_ROLE_OVERRIDES:
             if path.startswith(prefix):
                 return role

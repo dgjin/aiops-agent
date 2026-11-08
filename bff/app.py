@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import time
 import urllib.request
 from contextlib import asynccontextmanager
 
@@ -31,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 
 from aiops_agent import tracing
 
-from . import audit, auth, commands, escalations
+from . import audit, auth, commands, escalations, history_projector
 from .deps import ApiError, WEB_DIST, gw, log, ok
 from .middleware import register_middlewares
 from .middleware import required_role as required_role  # noqa: F401 - 兼容测试引用（bff.app.required_role）
@@ -206,6 +207,41 @@ async def _command_dispatch_loop() -> None:
         await asyncio.sleep(commands.sweep_seconds())
 
 
+async def _history_projection_loop() -> None:
+    """Temporal History 后台投影（M4）。
+
+    - 每 ``AIOPS_HISTORY_SYNC_SECONDS`` 同步一次可见流程：运行中增量、
+      终态补一次最终同步；
+    - 每 ``AIOPS_HISTORY_RECONCILE_SECONDS`` 做一轮对账（含本地未完成清单），
+      刷新未完成数 / 断档数 / 最大滞后指标；
+    - 单轮失败只告警，不退出后台任务（Temporal 暂不可达时下一轮重试）。
+    """
+    next_reconcile = 0.0
+    while True:
+        try:
+            if time.monotonic() >= next_reconcile:
+                summary = await history_projector.reconcile()
+                next_reconcile = time.monotonic() + history_projector.reconcile_seconds()
+            else:
+                summary = await history_projector.sync_all()
+                await asyncio.to_thread(history_projector.refresh_metrics)
+            if summary.get("stored"):
+                log.info(
+                    "[history] 本轮投影 %d 条事件（目标 %d，成功 %d，失败 %d）",
+                    summary.get("stored") or 0,
+                    summary.get("targets") or 0,
+                    summary.get("synced") or 0,
+                    len(summary.get("errors") or []),
+                )
+            for error in (summary.get("errors") or [])[:3]:
+                log.warning("[history] 同步失败：%s", error)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 投影失败不影响服务
+            log.warning("[history] 后台投影失败：%s", exc)
+        await asyncio.sleep(history_projector.sync_seconds())
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     try:
@@ -216,6 +252,7 @@ async def lifespan(_: FastAPI):
     escalation_task = asyncio.create_task(_escalation_loop())
     retry_task = asyncio.create_task(_retry_tracking_loop())
     command_task = asyncio.create_task(_command_dispatch_loop())
+    history_task = asyncio.create_task(_history_projection_loop())
     try:
         yield
     finally:
@@ -223,6 +260,7 @@ async def lifespan(_: FastAPI):
         escalation_task.cancel()
         retry_task.cancel()
         command_task.cancel()
+        history_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await rotation_task
         with contextlib.suppress(asyncio.CancelledError):
@@ -231,6 +269,8 @@ async def lifespan(_: FastAPI):
             await retry_task
         with contextlib.suppress(asyncio.CancelledError):
             await command_task
+        with contextlib.suppress(asyncio.CancelledError):
+            await history_task
 
 
 app = FastAPI(title="AIOps Console BFF", version="1.0.0", lifespan=lifespan)
