@@ -254,6 +254,29 @@ notify_updated_at / version`）。升级与回退：
 
 **M4 本机验收记录（2026-11-08）**：全量回归 `Ran 1923 tests … OK (skipped=6)`；本里程碑新增 28 例（`test_history_projection` 7：250+ 事件全量投影 / 游标分页 / 幂等 / run 切换 / 断档 / 对账 / SQLite 同步位；`test_timeline_evidence` 5：多源合并排序 / 限制保留最新 / 运行中快照 / manifest 复算 / 导出审计；`test_audit_chain` 15：demo 与 SQLite 篡改删除检测 / purge 后全链校验 / 二次归档 / 拒绝坏链归档 / 游标分页与权限；`test_migrations` 1：0008 新表新列索引、复合主键幂等、降级与重放升级）。前端 `npm run build` 通过（tsc + vite，615.62 kB，仅 chunk 体积提示）。真实 WORM、多主机、OTel、飞书/ArgoCD 实机验收未在本机模拟，均按**未实测**计。
 
+**确定性风险、启动快照门禁与上线硬门禁（M5，2026-11-08 起）**：本里程碑**无数据库迁移**（复用 0008 的审计链与命令表），升级只需替换代码并按需配置环境变量：
+
+```bash
+# 可选：启用 OTel（未配置则 no-op）
+export AIOPS_OTEL_ENDPOINT=http://127.0.0.1:4318        # OTLP HTTP 端点
+export AIOPS_OTEL_REQUIRED=true                          # production 门禁：未配置端点则启动失败
+```
+
+- **确定性风险**（`aiops_agent/risk_policy.py`）：风险等级只由受保护目录、敏感路径（认证 / 支付 / 权限 / 密钥 / 数据迁移）、降级补丁、配置变更、影响面与验证方式决定；`Patch.risk` 文本仅展示。HIGH 必须 `UNIT_TEST` 真实测试且双人审批，否则转人工。工作流以 `patched("deterministic-risk-v1")` 接入，旧在途流程重放保持原判定。
+- **启动快照门禁**：`allow_deploy_now / allow_cancel` 以流程启动时的 `policy_snapshot` 为准；运行期改 YAML 不放开已启动流程。BFF 写守卫返回 409 并给出原因，工作流对绕过 BFF 的信号同样拒收（`command_rejections[].code=policy-disabled`），需重新发起流程。
+- **OTel 门禁**：production + `AIOPS_OTEL_REQUIRED=true` 且未配置 `AIOPS_OTEL_ENDPOINT` → `startup_snapshot` 抛 `ModeConfigError`；readiness 新增 `tracing` 检查（原因码 `otlp_not_configured / otlp_configured_not_initialized / otlp_init_failed / otlp_initialized`），`/api/subsystems` 与 `aiops_otel_enabled` 指标同步暴露。真实 Collector 联通仍需在目标环境验证（本机**未实测**）。
+- **上线硬门禁**（`scripts/rollout_gate.py`）：所有阶段新增 `audit-integrity`（哈希链校验通过）、`command-backlog`（0 积压 / 0 失败 / 最老等待 <300s）、`notify-delivery`（0 条未送达）；数据不可读一律 `unknown`（pending），不得当作通过。运营度量 `/api/metrics/ops` 新增 `commands` 与 `audit_integrity` 分量，`escalation_detail.notify_pending` 直出。
+- **故障演练**（`scripts/governance_drill.py`，本机临时目录，不连接 Temporal / MySQL / 外部通知）：
+
+```bash
+.venv/bin/python scripts/governance_drill.py                 # 六类场景全跑
+.venv/bin/python scripts/governance_drill.py --scenario audit-tamper --keep
+```
+
+覆盖审计篡改、归档 purge 后链续接、命令重放/冲突、通知未送达计数、History 断档与 250 条事件游标分页；退出码 0 = 全通过、1 = 有失败。输出固定声明「外部 WORM / 通知通道 / Collector / 多主机未实测」。
+
+**M5 本机验收记录（2026-11-08）**：全量回归 `Ran 1987 tests … OK (skipped=6)`；本里程碑新增 64 例（`test_risk_policy` 19：等级 / 硬触发 / 权重累计 / 路径归一化 / 摘要 / 发布准入文案；`test_policy_snapshot` 17：BFF 与工作流快照门禁 / 职责分离 / 旧流程兼容 / 风险 patched 门控与 LLM 文本失效；`test_ops_metrics_governance` 13：命令积压 / 审计完整性 / 通知未送达分量与路由降级；`test_rollout_gate` +5：三项治理硬门禁与 unknown 语义；`test_metrics` +5：追踪状态机与 `aiops_otel_enabled`；`test_readiness` +2：tracing 检查与配置失败分支；`test_startup_mode` +3：OTEL_REQUIRED 生产门禁与脱敏）。`governance_drill.py` 六场景全部通过。真实 WORM、多主机并发、真实 OTel Collector、飞书 / ArgoCD / staging 故障演练均**未实测**。
+
 ### 2.8 稳定容器初始化（发布链路前置）
 
 金丝雀达标后会滚动到稳定容器 `aiops-stable-order`（`:18080`）。首次部署需初始化一个基线版本：

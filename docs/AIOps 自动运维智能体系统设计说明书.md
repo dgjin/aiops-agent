@@ -446,6 +446,17 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 - **归档与清理**：只有整条链校验通过才允许归档；`purge` 只删除「归档清单已记录、归档副本 SHA-256 复核通过」的过期文件 / 表行，未归档记录不会被 TTL 静默删除。清理后的校验会把归档副本作为链前缀一起验证，链尾读取在活动文件为空时回退到归档副本，避免 purge 后误报断链或从创世重启新链。边界明确为 **tamper-evident（本机可发现修改 / 插入 / 删除）**，不等同外部 WORM；拥有本机写权限者可整体重算链。
 - **控制台**：流程详情新增统一时间线页签（运行中 5s 刷新、History 完整性徽标、失败回退闸门事件）与证据包下载；审计页流程 / 操作两张表均改为游标分页，展开行展示时间线、命令 / 通知计数与证据包入口。
 
+#### 4.6.6 确定性风险、启动快照门禁与上线硬门禁（M5，2026-11-08 落地）
+
+目标是消除「风险等级靠 LLM 自述」「窗口指令只看当前磁盘配置」「上线门禁只看业务指标」三类不可复核判定：
+
+- **确定性风险**（`aiops_agent/risk_policy.py`，纯函数、零 IO）：输入为补丁文件清单、影响服务、受保护目录、验证方式与降级标记。规则顺序固定、权重固定——受保护目录 / 敏感路径（认证、支付、权限、密钥、数据迁移）/ 降级补丁为 HIGH 硬触发（4 分）；配置与发布基础设施、多服务、影响文件 ≥5、非真实测试（含 `UNKNOWN`）各 2 分；总分 ≥4 为 HIGH、≥2 为 MEDIUM，其余 LOW。输出 `level/label/score/reasons/inputs/requires_real_tests/requires_second_approval`，同一输入永远得到同一等级与同一原因顺序；`extra` 只留痕不参与打分。`Patch.risk` 文本退回展示字段，不再驱动闸门。
+- **工作流接入**（`deterministic-risk-v1` patched 门控）：`_fix_to_release` 在沙箱通过后计算风险并写入 `gate_events`（`risk:assessed:<LEVEL>:<codes>`）。仅 HIGH 要求 `UNIT_TEST` 真实测试（`verification_block`），否则转人工；HIGH 与受保护目录取「或」触发双人审批。旧在途流程无 marker → 继续既有「文本高风险 + 静态验收」判定，历史重放不产生额外命令。`status()` / `_final()` / 运营镜像（`runs_store`）同步保存 `risk_assessment`，列表风险列优先取结构化等级，缺失时回退旧文本。
+- **启动快照门禁**（BFF + 工作流双侧）：流程启动时 `_capture_policy_snapshot()` 把 `policy_sha256 / shadow_mode / allow_deploy_now / allow_cancel` 固化为 `policy_snapshot`，`status()` 暴露。BFF `snapshot_command_error()` 在写守卫中按快照拒绝被禁指令（409 明确原因）；工作流在信封分支二次校验，绕过 BFF 直接发信号同样被拒，登记 `command_rejections[].code=policy-disabled` 且**不占用 command_id**（策略放开后可重投）。空快照 = 旧流程兼容放行；运行期修改磁盘 YAML 不会放开已启动流程，必须重新发起流程取得新快照。
+- **OTel 生产门禁**：`AIOPS_OTEL_REQUIRED=true` 时 production 必须配置 `AIOPS_OTEL_ENDPOINT`，否则启动即 `ModeConfigError`（不伪造就绪）；readiness 新增 `tracing` 检查并输出稳定原因码（`otlp_not_configured / otlp_configured_not_initialized / otlp_init_failed / otlp_initialized`），`aiops_otel_enabled` 指标与 `/api/subsystems` 明示。门禁只校验「已配置且初始化」，真实 Collector 联通仍属外部验收。
+- **上线硬门禁**（`scripts/rollout_gate.py`）：在既有样本 / 证据 / 沙箱 / 回滚 / 人工项之外，新增三项对**所有阶段**生效的检查——`audit-integrity`（哈希链校验通过）、`command-backlog`（0 积压 / 0 失败 / 最老等待 <300s）、`notify-delivery`（0 条未送达）。数据不可读一律 `unknown`（pending），不得当作通过。运营度量接口 `/api/metrics/ops` 新增 `commands` 与 `audit_integrity` 分量，`escalation_detail.notify_pending` 直出。
+- **故障演练**（`scripts/governance_drill.py`）：本机临时目录复现六类异常并断言系统必须发现——审计篡改、归档 purge 后链续接、命令重放/冲突、通知未送达计数、History 断档、250 条事件游标分页。退出码 0 全通过 / 1 有失败；输出注明外部 WORM / 通知通道 / Collector / 多主机**未实测**。
+
 ### 4.7 执行层（`release.py`）
 
 - **发布编排 `run_canary`**：

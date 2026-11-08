@@ -564,6 +564,15 @@ curl -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8600/api/commands/<comm
 - `GET /api/subsystems` 的 `commands` 子系统展示积压时长与 24h 失败数；积压超过 `AIOPS_COMMAND_BACKLOG_ALERT_SECONDS`（默认 300s）即降级提示。
 - 审计中每次写操作都有两行：意图行 `result=pending` 与结果行 `signaled / rejected / failed`，两行均带同一个 `command_id`。
 
+**确定性风险、发布窗口快照与上线硬门禁（M5，2026-11-08 起）**
+
+- **风险等级不再看 LLM 措辞**：系统按补丁文件清单、影响服务、受保护目录、验证方式与降级标记做确定性判定（同一输入恒定同一等级与同一原因顺序）。受保护目录 / 敏感路径（认证、支付、权限、密钥、数据迁移）/ 降级补丁直接 HIGH；配置与发布基础设施、多服务、改动文件 ≥5、非真实测试累计 2 分一档。补丁卡片上的模型风险描述仅作背景参考，不参与闸门。
+- **HIGH 的双重代价**：必须提供 `UNIT_TEST`（真实执行）验证结果，`STATIC_ONLY` / `CONTRACT_TEST` / `UNKNOWN` 一律转人工；同时触发双人审批（与受保护目录取「或」，不重复计数）。审批中心会显示命中的原因码（如 `protected-path` / `sensitive-path:auth` / `degraded-bypass`），审批人据此核对，不再依赖文字描述。
+- **发布窗口指令看启动快照**：流程启动时固化当时的策略（含 `allow_deploy_now` / `allow_cancel`）。运行中修改 YAML **不会**放开已启动流程：控制台点「立即发布 / 取消」会返回 409 并说明被禁原因；即使绕过控制台直接发信号，工作流同样拒收并记入 `command_rejections`（`policy-disabled`），该次拒收不占用命令 ID。需要新策略时**重新发起流程**取得新快照，或先联系 admin 确认策略文件。
+- **系统状态页多一项 tracing**：`/api/subsystems` 与 `readyz` 会给出追踪状态（`otlp_not_configured / otlp_configured_not_initialized / otlp_init_failed / otlp_initialized`）。production 若开启 `AIOPS_OTEL_REQUIRED=true` 却未配置 `AIOPS_OTEL_ENDPOINT`，服务启动即失败（不伪造就绪）；这一项只校验「已配置并初始化」，Collector 是否真正收到数据仍需在观测平台核对。
+- **上线硬门禁新增三项**（`scripts/rollout_gate.py`，对所有阶段生效）：`audit-integrity` 审计哈希链校验通过、`command-backlog` 命令 0 积压 / 0 失败 / 最老等待 <300s、`notify-delivery` 升级通知 0 条未送达。任何一项数据读不到都记为 `unknown`（pending），**不要当作通过**；发布前先在审计页与系统状态页确认这三项为绿。
+- **值班演练**：`scripts/governance_drill.py` 在本机复现审计篡改、归档后链续接、命令重放 / 冲突、通知送达失败、History 断档、250 条事件分页六类异常并断言系统能发现，退出码 0 为全通过；该脚本只在临时目录操作，不影响现有数据。
+
 ### 9.3 紧急停止（kill switch）
 
 用途：一键冻结自动修复——**BFF 拒绝一切写操作、webhook 拒绝启动新流程**；已在跑的流程不受影响，可继续完成或人工处理。
