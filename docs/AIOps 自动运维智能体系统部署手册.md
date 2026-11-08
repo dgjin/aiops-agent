@@ -236,6 +236,24 @@ notify_updated_at / version`）。升级与回退：
 - 重试流程会被 `sync_from_flows` 跳过（已被未关闭待办 `retry_wf_id` 引用），不会因新流程再次升级而登记重复待办；
 - 本项与真实 WORM、多主机协调、真实飞书实机验收无关；多副本共享限速/通知去重仍依赖单实例或共享存储（多主机并发验收**未实测**）。
 
+**完整历史、统一时间线与审计证据包（M4，2026-11-08 起）**：迁移 `20261101_0008` 新增
+`workflow_events`（History 投影）、`audit_chain_heads`（单链链头）、`audit_archives`（归档清单），并为
+`workflow_runs` 增加 `last_history_event_id / history_synced_at / history_complete`、为
+`audit_events` 增加 `event_id / command_id / prev_hash / entry_hash`。升级与回退：
+
+```bash
+.venv/bin/alembic upgrade head              # 含 0008
+.venv/bin/alembic downgrade 20261101_0007   # 仅隔离演练；先导出归档，否则既有审计无法再校验
+```
+
+- **降级顺序**：SQLite 的 batch 重表会反射并重建索引，必须先 `drop_index idx_audit_event / idx_audit_command` 再删列；否则报 `no such column: event_id`（迁移已按此顺序实现，`tests/test_migrations.py` 锁定）。
+- **History 投影**：BFF 后台每 `AIOPS_HISTORY_SYNC_SECONDS`（默认 `30`，最小 `5`）同步可见流程，`AIOPS_HISTORY_PAGE_SIZE`（默认 `100`）控制单页事件数；每 `AIOPS_HISTORY_RECONCILE_SECONDS`（默认 `600`，最小 `30`）对账未完成流程与断档。production 写 `workflow_events` / 同步位，demo 写 `data/workflow-history/<wf_id>/<run_id>.jsonl`。
+- **新增端点**：`GET /api/flows/{wf_id}/timeline`、`GET /api/flows/{wf_id}/history`、`GET /api/flows/{wf_id}/evidence-package`（operator）、`GET /api/audit/ops`、`GET /api/audit/integrity`（admin）、`POST /api/audit/archive`（admin）。证据包响应带 `X-Audit-Event-Id / X-Evidence-Root / X-History-Complete`。
+- **归档位置与保留期**：归档副本在 `data/web-audit/archive/`（demo）或 `AIOPS_DATA_ROOT/web-audit/archive/`（production，表行清单在 `audit_archives`）；审计保留 365 天（demo 30 天）。清理只删除已归档且 SHA-256 复核通过的记录，未归档记录不会被 TTL 静默删除。
+- **边界**：哈希链为 tamper-evident（本机可发现修改 / 插入 / 删除），不等同外部 WORM；归档仍在本地磁盘，拥有主机写权限者可整体重算。外部不可变存储 / 多主机并发 / 真实 OTel Collector / 飞书 / ArgoCD / staging 故障演练均**未实测**。
+
+**M4 本机验收记录（2026-11-08）**：全量回归 `Ran 1923 tests … OK (skipped=6)`；本里程碑新增 28 例（`test_history_projection` 7：250+ 事件全量投影 / 游标分页 / 幂等 / run 切换 / 断档 / 对账 / SQLite 同步位；`test_timeline_evidence` 5：多源合并排序 / 限制保留最新 / 运行中快照 / manifest 复算 / 导出审计；`test_audit_chain` 15：demo 与 SQLite 篡改删除检测 / purge 后全链校验 / 二次归档 / 拒绝坏链归档 / 游标分页与权限；`test_migrations` 1：0008 新表新列索引、复合主键幂等、降级与重放升级）。前端 `npm run build` 通过（tsc + vite，615.62 kB，仅 chunk 体积提示）。真实 WORM、多主机、OTel、飞书/ArgoCD 实机验收未在本机模拟，均按**未实测**计。
+
 ### 2.8 稳定容器初始化（发布链路前置）
 
 金丝雀达标后会滚动到稳定容器 `aiops-stable-order`（`:18080`）。首次部署需初始化一个基线版本：
@@ -558,6 +576,7 @@ export AIOPS_MCP_TOKEN=<控制台令牌>                 # 透传 BFF 鉴权；�
 | `AIOPS_METRICS_PORT` | `9091`（production）/ `9090`（demo） | worker | worker 独立指标服务端口（默认仅 loopback，0 关闭）；BFF 指标固定 `127.0.0.1:8600/metrics`（仅回环） |
 | `AIOPS_COMMAND_SWEEP_SECONDS` / `AIOPS_COMMAND_BACKLOG_ALERT_SECONDS` | `5` / `300` | BFF | 写命令 outbox 后台扫尾周期（秒）/ PENDING 积压降级阈值（秒，最小 30） |
 | `AIOPS_ESCALATION_SLA_MINUTES` / `AIOPS_RETRY_CHECK_SECONDS` | `30` / `30` | BFF | 待办超 SLA 阈值（分钟）/ 重试流程终态跟踪周期（秒，最小 5） |
+| `AIOPS_HISTORY_PAGE_SIZE` / `AIOPS_HISTORY_SYNC_SECONDS` / `AIOPS_HISTORY_RECONCILE_SECONDS` | `100` / `30` / `600` | BFF | Temporal History 单页事件数 / 可见流程同步周期（秒，最小 5）/ 对账周期（秒，最小 30） |
 | `AIOPS_OTEL_ENDPOINT` | 空（no-op） | worker / BFF | OpenTelemetry OTLP HTTP 端点（如 `http://localhost:4318`） |
 | `AIOPS_GIT_TOKEN` | 空（MR 返回 recorded 桩） | worker | Git 平台令牌（配合策略 `git:` 段；未配置/失败自动降级不中断流程） |
 | `AIOPS_CONSOLE_TOKEN_FILE` | `data/console_tokens.json`（demo） | BFF | 运行期令牌注册表（权限 600，含明文令牌，勿提交） |

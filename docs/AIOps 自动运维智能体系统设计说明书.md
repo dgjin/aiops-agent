@@ -433,6 +433,19 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 - **并发控制**：`escalations.version` + CAS——demo 在 fcntl sidecar 文件锁内读-改-写并校验版本，production 用 `UPDATE ... WHERE id AND version`（rowcount≠1 → 409）。客户端写操作回传读取版本；后台终态回写冲突时跳过，不用旧快照覆盖人工操作。
 - **关闭语义**：仅备注关闭已停用，`close` 必须提交结构化记录（400 迁移错误引导升级客户端）；历史仅备注记录保持只读，不批量改写。
 
+#### 4.6.5 完整历史、统一时间线与审计证据包（M4，2026-11-08 落地）
+
+目标是让「过程可追溯」不再依赖控制台列表的最近 200 条，并让任意终态流程都能导出可离线复核的自包含证据：
+
+- **History 完整投影**（`bff/history_projector.py` + `workflow_events`，迁移 `20261101_0008`）：BFF 后台按 `AIOPS_HISTORY_SYNC_SECONDS`（默认 30s）同步可见流程，直接使用 Temporal SDK 的 `fetch_history_events(page_size=...)` 分页，不受 UI 上限影响；以 `(workflow_id, run_id, event_id)` 幂等写入，只追加事件号大于同步位的新事件。`workflow_runs` 增加 `last_history_event_id / history_synced_at / history_complete`：运行中增量同步，出现终止类事件或执行状态非 RUNNING 时做最终同步并置完整。demo 写 `data/workflow-history/<wf_id>/<run_id>.jsonl` + meta，production 写 `workflow_events`。
+- **重跑与对账**：同一 `wf_id` 换 run 时同步位按 run_id 重置，旧 run 事件保留（主键含 run_id），不会把两次运行的 History 混在一起。每 `AIOPS_HISTORY_RECONCILE_SECONDS`（默认 600s）对账本地未完成清单与 Temporal 列表，按事件数与最大事件号检测断档，并以 `aiops_history_*` 指标暴露未完成数 / 断档数 / 最大滞后；对账只补数，不删除既有事件。
+- **统一时间线**（`GET /api/flows/{wf_id}/timeline`、`bff/timeline.py`）：合并 History、status/result 快照、审批与闸门、操作审计、写命令 outbox、通知留痕、人工待办与发布节点，按时间升序排列。运行中直接补最新 status，不等待投影周期；旧流程缺少真实时间的闸门节点使用快照时间并标记 `time_estimated=true`，前端以 `~` 区分，不伪造精确时刻。`GET /api/flows/{wf_id}/history` 提供投影事件的游标分页；流程详情同时返回 `history` 同步完整性。
+- **审计查询重构**（`bff/routes/audit.py`）：production `/api/audit` 直接查 `workflow_runs` SQL 数据面，按 `close_time + wf_id` 游标分页，支持 `q / stage / kind / exec_status / days`；表为空或 demo 模式回退 Temporal 列表，响应标明 `source=db|temporal`。新增 `/api/audit/ops` 操作审计独立游标分页（操作者 / 动作 / 结果 / 流程 / 时间过滤），不再固定最近 100 条。`/api/audit/integrity` 仅 admin，返回链校验结果与归档清单。
+- **证据包**（`GET /api/flows/{wf_id}/evidence-package`、`bff/evidence_package.py`）：导出 JSON 含 `workflow`（身份 / 执行 / 证据绑定）、`gates`（审批与拒绝）、`history`（导出前做一次最终同步并标记 `complete`）、`audit`、`commands`、`notifications`、`escalations`、`manual_actions`、`log_evidence`、`test_report`、`release`、`retry_chain`。每个 section 计算 canonical JSON 的 SHA-256，再对 `name:hash` 列表计算 `root_sha256`；响应头带 `X-Audit-Event-Id / X-Evidence-Root / X-History-Complete`。导出要求 operator，且 `build_and_audit` 先写 `evidence:export` 审计（fail-closed：审计写失败则不返回证据包）。
+- **审计哈希链**（`aiops_agent/audit_chain.py`）：`audit_events` 与 demo JSONL 的每条新记录携带 `event_id / prev_hash / entry_hash`，`entry_hash = sha256(prev_hash + "\\n" + canonical(record))`，canonical 只含固定字段，避免展示字段变化导致历史校验漂移。demo 用 `.audit-chain.lock` 文件锁「读链尾 → 追加 → 原子写链头」，production 在同一事务内 `SELECT ... FOR UPDATE` 锁 `audit_chain_heads` 单行。
+- **归档与清理**：只有整条链校验通过才允许归档；`purge` 只删除「归档清单已记录、归档副本 SHA-256 复核通过」的过期文件 / 表行，未归档记录不会被 TTL 静默删除。清理后的校验会把归档副本作为链前缀一起验证，链尾读取在活动文件为空时回退到归档副本，避免 purge 后误报断链或从创世重启新链。边界明确为 **tamper-evident（本机可发现修改 / 插入 / 删除）**，不等同外部 WORM；拥有本机写权限者可整体重算链。
+- **控制台**：流程详情新增统一时间线页签（运行中 5s 刷新、History 完整性徽标、失败回退闸门事件）与证据包下载；审计页流程 / 操作两张表均改为游标分页，展开行展示时间线、命令 / 通知计数与证据包入口。
+
 ### 4.7 执行层（`release.py`）
 
 - **发布编排 `run_canary`**：
