@@ -540,6 +540,7 @@ export AIOPS_MCP_TOKEN=<控制台令牌>                 # 透传 BFF 鉴权；�
 | `AIOPS_RATE_LIMIT_ENABLED` | 按模式（production=1 / demo=0） | BFF | 限速总开关（1/0 显式覆盖） |
 | `AIOPS_RATE_LIMIT_READ_PER_MIN` / `_WRITE_PER_MIN` / `_AUTH_FAIL_PER_MIN` | `240` / `20` / `10` | BFF | 已认证读 / 已认证写 / 认证失败（按 IP）配额 |
 | `AIOPS_METRICS_PORT` | `9091`（production）/ `9090`（demo） | worker | worker 独立指标服务端口（默认仅 loopback，0 关闭）；BFF 指标固定 `127.0.0.1:8600/metrics`（仅回环） |
+| `AIOPS_COMMAND_SWEEP_SECONDS` / `AIOPS_COMMAND_BACKLOG_ALERT_SECONDS` | `5` / `300` | BFF | 写命令 outbox 后台扫尾周期（秒）/ PENDING 积压降级阈值（秒，最小 30） |
 | `AIOPS_OTEL_ENDPOINT` | 空（no-op） | worker / BFF | OpenTelemetry OTLP HTTP 端点（如 `http://localhost:4318`） |
 | `AIOPS_GIT_TOKEN` | 空（MR 返回 recorded 桩） | worker | Git 平台令牌（配合策略 `git:` 段；未配置/失败自动降级不中断流程） |
 | `AIOPS_CONSOLE_TOKEN_FILE` | `data/console_tokens.json`（demo） | BFF | 运行期令牌注册表（权限 600，含明文令牌，勿提交） |

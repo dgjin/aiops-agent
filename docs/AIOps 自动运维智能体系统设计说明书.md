@@ -410,6 +410,18 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 - **审计透出**：运行中 `status()` 与终态 `_final()` 同步返回 `case_id/requested_by/parent_run_id/parent_wf_id/retry_wf_id/approval_contract/evidence_binding/approvals/approval_error/approval_rejections/gate_events`；控制台审批记录页展示审批人、通道、意见、命令 ID 与被拒命令。
 - **重试溯源**：转人工重试以新 `wf_id` 重启，`escalations.run_id` 记录原 run，新流程策略快照注入 `evidence_context{case_id, requested_by, parent_run_id, parent_wf_id, retry_wf_id}`，使重试流程仍能拒绝发起人自审。
 
+#### 4.6.3 写命令 outbox 与可靠投递（`workflow-command-v1`，2026-11-08 落地）
+
+目标是消除「先 signal 再写审计」的三个缺口：Temporal 不可达时用户意图丢失、signal 成功但审计写失败、signal 后进程崩溃无法判断是否已送达。
+
+- **持久化**（`bff/commands.py` + `workflow_commands` 表，迁移 `20261101_0006`）：一次写入「意图审计（`result=pending`）+ 待投递命令」；production 在 `audit_events` 与 `workflow_commands` 的同一事务提交，demo 用 `data/workflow_commands.json`（fcntl 文件锁 + fsync + 原子替换）与 JSONL 审计。审计或存储不可用时拒绝新操作（fail-closed），不出现「无审计推进」。
+- **状态机**：`PENDING → SUBMITTED → ACCEPTED / FAILED`。`SUBMITTED` 只表示命令已送达 Temporal，不代表审批通过；业务结果另由工作流 `approvals[].command_id` / `command_rejections[].command_id` 记录，命令表保留 `audit_params`（decision/comment 等）供结果行审计复用。
+- **投递与重试**：路由先持久化意图，再同步尝试投递；Temporal 暂不可达时返回可查询的 `command_id + delivery=PENDING`，后台 dispatcher 按 `(2, 5, 15, 45, 120)` 秒有界退避重试（默认 5 次）。每次重试前重新读取最新安全状态（kill switch、流程 `RUNNING`、阶段白名单），不绕过最新校验；关闭进程时 lifespan 取消并等待 dispatcher。
+- **重放窗口**：signal 成功后进程崩溃 → 下次投递先查业务回执（审批用 `approvals[]` / `approval_rejections[]`；发布/排队用 `status.command_ids`，兼容 `deploy_command` / `queued_patches`），已受理或已拒收的命令不再重发。
+- **幂等**：deploy/queue 信号载荷为信封 `workflow-command-v1`（`contract/command_id/type/actor/channel/submitted_at/payload`）；工作流按 `command_id` 去重——相同内容忽略并留痕 `command:duplicate:*`，同 ID 不同内容 / 非法信封 / 阶段不符登记 `command_rejections` 并保持阶段不变；旧字符串/两参数信号仍兼容。
+- **审计语义**：意图行 `result=pending`；结果行 `signaled`（ACCEPTED/SUBMITTED）或 `rejected` / `failed`（`params.delivery` 区分业务拒收与投递失败），并携带 command_id、channel、操作者与请求摘要。
+- **查询与降级**：`GET /api/commands?status=&wf_id=&limit=`（列表 + 积压统计）与 `GET /api/commands/{command_id}`（详情；`SUBMITTED` 时补查一次业务回执，不重发信号）；`GET /api/subsystems` 新增 `commands` 子系统（PENDING 积压、最老等待超过 `AIOPS_COMMAND_BACKLOG_ALERT_SECONDS`（默认 300s）、24h FAILED 数），并刷新 Prometheus 指标（pending / oldest_wait / failed_24h）。
+
 ### 4.7 执行层（`release.py`）
 
 - **发布编排 `run_canary`**：
@@ -474,9 +486,9 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 | --- | --- | --- | --- |
 | `submit_approval` | signal | v2：`envelope`（`approval-evidence-v1`，含 command_id/actor/channel/comment/证据哈希）；旧流程：`decision: approve/reject` | 一级审批；超时 30m 自动驳回；驳回必填意见 |
 | `submit_second_approval` | signal | 同上（`gate=second_approval`） | 受保护目录二级审批；审批人不得与一级/发起人相同 |
-| `submit_deploy_command` | signal | `command: deploy_now/cancel` | 窗口内加速 / 取消 |
-| `submit_patch` | signal | `workflow_id, alert: Alert` | 窗口内新补丁仅 FIFO 入队（不重置计时、不合并、无上限） |
-| `status` | query | — | 返回阶段/审批进度/补丁与测试证据 + 审批治理字段（`case_id/requested_by/approval_contract/evidence_binding/approvals/approval_error/approval_rejections/gate_events/parent_*`） |
+| `submit_deploy_command` | signal | v2：`envelope`（`workflow-command-v1`，`type=deploy-command`，`payload.command=deploy_now/cancel`）；旧流程：`command: deploy_now/cancel` | 窗口内加速 / 取消；按 `command_id` 幂等，阶段不符登记 `command_rejections` |
+| `submit_patch` | signal | v2：`envelope`（`workflow-command-v1`，`type=queue-patch`，`payload={new_wf_id, service, alert_id, description}`）；旧流程：`workflow_id, alert: Alert` | 窗口内新补丁仅 FIFO 入队（不重置计时、不合并、无上限） |
+| `status` | query | — | 返回阶段/审批进度/补丁与测试证据 + 审批治理字段（`case_id/requested_by/approval_contract/evidence_binding/approvals/approval_error/approval_rejections/gate_events/parent_*`）+ 命令回执依据（`command_ids/command_rejections/command_error`） |
 
 ### 5.3 外部系统接口契约
 

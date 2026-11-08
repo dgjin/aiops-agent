@@ -179,7 +179,7 @@ python demo_cli.py approve --wf-id aiops-fix-order-a-1001 --decision reject --co
 - **审批证据绑定（approval-evidence-v1）**：每次审批都必须能回答「哪一次变更」。控制台、ChatOps、飞书卡片与 CLI 均从当前流程 `status.evidence_binding` 派生案件 ID / 补丁 ID / diff 哈希 / 测试报告哈希 / 策略哈希 / run ID；页面回传的 `expected_*` 仅用于拒绝过期页面（旧 diff / 旧 run 的审批会得到 409「审批未生效」并提示刷新）。
 - **意见必填**：驳回必须给出非空意见（≤2000 字）；飞书卡片按钮无法输入文本，点击「驳回」会提示改用控制台或群内「驳回 <ID前缀> -- 意见」。批准意见可选但全程留痕。
 - **职责分离**：流程发起人不得审批自己的变更；二级审批人不得与一级审批人相同。控制台、ChatOps、飞书回调与直接 Temporal 信号都会拦截。
-- **送达语义**：返回 `delivery=accepted` 表示工作流已受理并记录；`submitted` 仅表示命令已提交，业务结果以流程状态为准；`rejected` 不回执生效，卡片保留按钮便于修正后重试。
+- **送达语义**：返回 `delivery=accepted` 表示工作流已受理并记录；`submitted` 仅表示命令已提交，业务结果以流程状态为准；`rejected` 不回执生效，卡片保留按钮便于修正后重试；`pending` 表示命令已登记但 Temporal 暂不可达，系统会按 2/5/15/45/120 秒退避自动重试（最多 5 次），**不要重复提交**，用 `/api/commands/<command_id>` 查询进度（见 9.2）。
 - 收到**飞书**审批卡片后，直接点击卡片上的「批准 / 驳回」按钮即可完成审批（2026-10-14 起真实链路打通：应用机器人发卡 + 长连接接收回调，配置与自检见 7.1）：操作者需在 `AIOPS_IM_USERS` 中映射为 operator，成功后卡片就地替换为处置结果（toast + 绿/红回执卡，防重复点击）；权限不足 / 阶段不符 / 重复点击均会在 toast 中提示原因；钉钉按钮需外置网关转发（见第 7 章）；
 - **超时策略（锁定）**：规定时间（演示 300s / 生产 30m）内无响应 → **自动驳回**并升级值班负责人（`gate2:timeout->reject`）；驳回即关闭流程并留痕。
 
@@ -474,6 +474,7 @@ python demo_cli.py status --wf-id aiops-fix-nl2sql-logsurge-<HHMMSS>
 | 通知只有日志没有真实 IM 消息 | 未配置 webhook（留痕模式，`delivery=recorded`）；真实投递需配置环境变量（见《部署手册》4.3） |
 | 金丝雀劣化误报（P99 偏大） | 观测取窗口内近似 P99；本机首次构建/冷启动可能偏高；生产由 SLO 阈值与窗口时长控制 |
 | 重复演示同一 alert-id 没有产生新流程 | 幂等设计；使用新 alert-id（如 `demo-001b`） |
+| 审批/发布指令返回 `delivery=pending` | 命令已登记，Temporal 暂不可达；后台自动退避重试，用 `/api/commands/<command_id>` 查看进度，不要重复提交 |
 
 ---
 
@@ -530,6 +531,21 @@ python demo_cli.py status --wf-id aiops-fix-nl2sql-logsurge-<HHMMSS>
   观测面异常（Loki 不可达 / 无日志 / 标签未映射）不计入模型低置信；模型成本与知识采用情况
   在计量接入前显示「暂无数据」。
 - 时间窗默认 7 天（接口上限 30 天），切换窗口后所有维度同步重算。
+
+**写命令查询（`/api/commands`，2026-11-08 起）**
+
+审批、发布窗口与排队补丁现在都是先登记「意图审计 + 待投递命令」，再尝试投递；Temporal 暂不可达不再直接报错丢失操作：
+
+```bash
+# 查看积压命令（可按状态 / 工作流过滤）
+curl -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8600/api/commands?status=PENDING'
+# 查看单条命令（SUBMITTED 会补查一次业务回执，不重发信号）
+curl -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8600/api/commands/<command_id>'
+```
+
+- `PENDING`=已登记待重试；`SUBMITTED`=已送达 Temporal（业务结果以流程状态为准）；`ACCEPTED`=工作流已记录该命令；`FAILED`=重试耗尽或业务拒收（`last_error` 给出原因）。
+- `GET /api/subsystems` 的 `commands` 子系统展示积压时长与 24h 失败数；积压超过 `AIOPS_COMMAND_BACKLOG_ALERT_SECONDS`（默认 300s）即降级提示。
+- 审计中每次写操作都有两行：意图行 `result=pending` 与结果行 `signaled / rejected / failed`，两行均带同一个 `command_id`。
 
 ### 9.3 紧急停止（kill switch）
 
