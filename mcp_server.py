@@ -182,13 +182,17 @@ def tool_check_system_health(client: BffClient) -> dict:
     return {**health, **subsystems}
 
 
-def tool_approve_flow(client: BffClient, wf_id: str, decision: str) -> dict:
-    return client.post(f"/api/flows/{urllib.parse.quote(wf_id, safe='')}/approval", {"decision": decision})
-
-
-def tool_second_approve_flow(client: BffClient, wf_id: str, decision: str) -> dict:
+def tool_approve_flow(client: BffClient, wf_id: str, decision: str, comment: str = "") -> dict:
     return client.post(
-        f"/api/flows/{urllib.parse.quote(wf_id, safe='')}/second-approval", {"decision": decision}
+        f"/api/flows/{urllib.parse.quote(wf_id, safe='')}/approval",
+        {"decision": decision, "comment": comment},
+    )
+
+
+def tool_second_approve_flow(client: BffClient, wf_id: str, decision: str, comment: str = "") -> dict:
+    return client.post(
+        f"/api/flows/{urllib.parse.quote(wf_id, safe='')}/second-approval",
+        {"decision": decision, "comment": comment},
     )
 
 
@@ -327,24 +331,34 @@ def build_server(client: BffClient | None = None) -> Any:
         title="一级审批",
         description=(
             "写操作（需 operator 及以上令牌）。对 WAIT_APPROVAL 阶段流程提交一级审批："
-            "decision=approve 批准进入公告倒计时，decision=reject 驳回终止。"
-            "经 BFF 写守卫（运行中 + 阶段允许 + 防重复提交）与操作审计，失败原因见错误信息。"
+            "decision=approve 批准进入公告倒计时，decision=reject 驳回终止（reject 必填 comment）。"
+            "请先调用 list_pending_approvals / get_flow 核对证据绑定；"
+            "返回 delivery=accepted 表示工作流已受理并记录，submitted 表示命令已提交、"
+            "业务结果以流程状态为准。经 BFF 写守卫与操作审计，失败原因见错误信息。"
         ),
     )
-    def approve_flow(wf_id: str, decision: Literal["approve", "reject"] = "approve") -> dict:
-        return tool_approve_flow(bff, wf_id=wf_id, decision=decision)
+    def approve_flow(
+        wf_id: str,
+        decision: Literal["approve", "reject"] = "approve",
+        comment: str = "",
+    ) -> dict:
+        return tool_approve_flow(bff, wf_id=wf_id, decision=decision, comment=comment)
 
     @server.tool(
         name="second_approve_flow",
         title="二级审批",
         description=(
             "写操作（需 operator 及以上令牌）。受保护目录（auth/payment/crypto）流程的二级审批。"
-            "前提：一级审批已 approve 且二级尚未提交；decision=approve|reject。"
-            "经 BFF 写守卫与操作审计。"
+            "前提：一级审批已 approve 且二级尚未提交；decision=approve|reject（reject 必填 comment）。"
+            "审批人与一级审批人/流程发起人不得相同（职责分离）。经 BFF 写守卫与操作审计。"
         ),
     )
-    def second_approve_flow(wf_id: str, decision: Literal["approve", "reject"] = "approve") -> dict:
-        return tool_second_approve_flow(bff, wf_id=wf_id, decision=decision)
+    def second_approve_flow(
+        wf_id: str,
+        decision: Literal["approve", "reject"] = "approve",
+        comment: str = "",
+    ) -> dict:
+        return tool_second_approve_flow(bff, wf_id=wf_id, decision=decision, comment=comment)
 
     return server
 

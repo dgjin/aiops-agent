@@ -11,6 +11,7 @@
     python demo_cli.py start --service order --alert-id a-1001
     python demo_cli.py status --wf-id aiops-fix-order-a-1001
     python demo_cli.py approve --wf-id aiops-fix-order-a-1001
+    python demo_cli.py approve --wf-id aiops-fix-order-a-1001 --decision reject --comment "影响面过大"
     python demo_cli.py second-approve --wf-id aiops-fix-order-a-1001
     python demo_cli.py queue-patch --wf-id aiops-fix-order-a-1001 \
         --new-wf-id aiops-fix-order-a-1002 --service order --alert-id a-1002
@@ -98,18 +99,58 @@ async def cmd_start(args: argparse.Namespace) -> None:
     print(f"查询状态: python demo_cli.py status --wf-id {handle.id}")
 
 
-async def cmd_approve(args: argparse.Namespace) -> None:
+async def _submit_approval(args: argparse.Namespace, *, gate: str) -> None:
+    """提交审批：v2 流程携带证据信封（绑定取自 status），旧流程发字符串决策。
+
+    命令行直连 Temporal 时无法获得 BFF 的身份认证与写守卫，因此与 BFF 同口径：
+    从 status 派生可信绑定（不信任命令行参数），并为每次提交生成命令 ID。
+    """
+    from aiops_agent import change_evidence
+
+    decision = args.decision
+    comment = args.comment or ""
+    problem = change_evidence.decision_problem(decision, comment)
+    if problem:
+        raise ValueError(problem)
+    actor = args.actor or os.environ.get("AIOPS_CLI_ACTOR") or os.environ.get("USER") or "cli"
+    label = "一级" if gate == "approval" else "二级"
+    signal = (
+        AIOpsFixWorkflow.submit_approval
+        if gate == "approval"
+        else AIOpsFixWorkflow.submit_second_approval
+    )
     client = await _client()
     handle = client.get_workflow_handle(args.wf_id)
-    await handle.signal(AIOpsFixWorkflow.submit_approval, args.decision)
-    print(f"已发送一级审批信号: {args.decision}")
+    status = await handle.query(AIOpsFixWorkflow.status)
+    if change_evidence.contract_of(status) != change_evidence.CONTRACT:
+        # 旧在途流程：保持字符串协议（与 BFF 的兼容分支一致）
+        await handle.signal(signal, decision)
+        print(f"已发送{label}审批信号（旧流程）: {decision}")
+        return
+    binding = change_evidence.binding_from_status(status)
+    if binding is None:
+        raise ValueError("审批证据不可用：流程 status 缺少有效 evidence_binding，请刷新后重试")
+    command_id = change_evidence.new_command_id()
+    envelope = change_evidence.build_envelope(
+        binding=binding,
+        gate=gate,
+        decision=decision,
+        actor=actor,
+        channel="cli",
+        comment=comment,
+        command_id=command_id,
+        submitted_at=change_evidence.utc_now_iso(),
+    )
+    await handle.signal(signal, envelope)
+    print(f"已发送{label}审批信封: {decision}（actor={actor} command={command_id}）")
+
+
+async def cmd_approve(args: argparse.Namespace) -> None:
+    await _submit_approval(args, gate="approval")
 
 
 async def cmd_second_approve(args: argparse.Namespace) -> None:
-    client = await _client()
-    handle = client.get_workflow_handle(args.wf_id)
-    await handle.signal(AIOpsFixWorkflow.submit_second_approval, args.decision)
-    print(f"已发送二级审批信号: {args.decision}")
+    await _submit_approval(args, gate="second_approval")
 
 
 async def cmd_deploy_now(args: argparse.Namespace) -> None:
@@ -409,14 +450,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--description", default="", help="告警描述（可带演示关键词）")
     p.set_defaults(func=cmd_start)
 
-    p = sub.add_parser("approve", help="一级审批：approve / reject")
+    p = sub.add_parser("approve", help="一级审批：approve / reject（驳回必填 --comment）")
     p.add_argument("--wf-id", required=True)
     p.add_argument("--decision", default="approve", choices=["approve", "reject"])
+    p.add_argument("--comment", default="", help="审批意见（驳回必填，最多 2000 字）")
+    p.add_argument("--actor", default="", help="审批人身份（默认取 AIOPS_CLI_ACTOR / $USER）")
     p.set_defaults(func=cmd_approve)
 
-    p = sub.add_parser("second-approve", help="二级审批（受保护目录）：approve / reject")
+    p = sub.add_parser("second-approve", help="二级审批（受保护目录）：approve / reject（驳回必填 --comment）")
     p.add_argument("--wf-id", required=True)
     p.add_argument("--decision", default="approve", choices=["approve", "reject"])
+    p.add_argument("--comment", default="", help="审批意见（驳回必填，最多 2000 字）")
+    p.add_argument("--actor", default="", help="审批人身份（默认取 AIOPS_CLI_ACTOR / $USER）")
     p.set_defaults(func=cmd_second_approve)
 
     p = sub.add_parser("deploy-now", help="窗口内加速：跳过剩余等待立即部署")

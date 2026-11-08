@@ -216,17 +216,17 @@ class ToolFunctionsTest(unittest.TestCase):
         self.assertEqual(result["degraded"], [])
 
     def test_approve_flow_post(self) -> None:
-        tool_approve_flow(self.client, "wf-1", "reject")
+        tool_approve_flow(self.client, "wf-1", "reject", "补丁未覆盖回滚路径")
         req = self.fake.requests[0]
         self.assertEqual(req["method"], "POST")
         self.assertEqual(req["path"], "/api/flows/wf-1/approval")
-        self.assertEqual(req["body"], {"decision": "reject"})
+        self.assertEqual(req["body"], {"decision": "reject", "comment": "补丁未覆盖回滚路径"})
 
     def test_second_approve_flow_post(self) -> None:
         tool_second_approve_flow(self.client, "wf-2", "approve")
         req = self.fake.requests[0]
         self.assertEqual(req["path"], "/api/flows/wf-2/second-approval")
-        self.assertEqual(req["body"], {"decision": "approve"})
+        self.assertEqual(req["body"], {"decision": "approve", "comment": ""})
 
 
 @unittest.skipUnless(HAS_MCP, "未安装 mcp 包（requirements-mcp.txt）")
