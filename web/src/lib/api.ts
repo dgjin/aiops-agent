@@ -3,6 +3,7 @@
 import type {
   ApprovalInput,
   ApprovalsResp,
+  AuditOpsResp,
   AuditResp,
   AuditSummaryResp,
   AuthStatusResp,
@@ -13,6 +14,8 @@ import type {
   EvidenceResp,
   FlowsResp,
   FlowDetailResp,
+  FlowHistoryResp,
+  FlowTimelineResp,
   HealthResp,
   KillSwitchResp,
   LoginResp,
@@ -189,6 +192,61 @@ export interface QueuePatchInput {
   description?: string
 }
 
+/** 证据包下载结果：blob + 服务端回传的审计事件 ID 与 manifest 根哈希。 */
+export interface EvidenceDownload {
+  blob: Blob
+  filename: string
+  auditEventId: string
+  rootSha256: string
+  historyComplete: boolean
+}
+
+/**
+ * 导出证据包：证据包需要 operator 且必须携带 Bearer，不能用普通 <a href> 直链。
+ *
+ * 服务端在导出成功后才写审计（fail-closed）；这里把 ``X-Audit-Event-Id`` /
+ * ``X-Evidence-Root`` 透传给页面，便于用户当场核对。
+ */
+async function downloadEvidencePackage(
+  wfId: string,
+  runId?: string,
+): Promise<EvidenceDownload> {
+  const headers: Record<string, string> = {}
+  const token = getToken()
+  if (token) headers.Authorization = `Bearer ${token}`
+  const path = `/api/flows/${encodeURIComponent(wfId)}/evidence-package${qs({ run_id: runId })}`
+  let res: Response
+  try {
+    res = await fetch(path, { headers })
+  } catch {
+    throw new NetworkError('BFF 不可达（请确认已启动 uvicorn bff.app:app --port 8600）')
+  }
+  if (!res.ok) {
+    const data: unknown = await res.json().catch(() => null)
+    const serverMsg = (data as { error?: string } | null)?.error
+    throw new ApiError(res.status, serverMsg || `证据包导出失败（HTTP ${res.status}）`)
+  }
+  const disposition = res.headers.get('content-disposition') || ''
+  const match = /filename="?([^";]+)"?/.exec(disposition)
+  return {
+    blob: await res.blob(),
+    filename: match?.[1] || `evidence-${wfId}.json`,
+    auditEventId: res.headers.get('x-audit-event-id') || '',
+    rootSha256: res.headers.get('x-evidence-root') || '',
+    historyComplete: res.headers.get('x-history-complete') === '1',
+  }
+}
+
+/** 触发浏览器下载（证据包等带鉴权的二进制响应）。 */
+export function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+
 export const api = {
   health: () => request<HealthResp>('/api/health'),
   overview: () => request<OverviewResp>('/api/overview'),
@@ -203,13 +261,32 @@ export const api = {
     request<FlowDetailResp>(`/api/flows/${encodeURIComponent(wfId)}`),
   flowResult: (wfId: string) =>
     request<ResultResp>(`/api/flows/${encodeURIComponent(wfId)}/result`),
+  /** 统一时间线（M4）：History + 闸门/审批 + 审计 + 命令投递 + 通知 + 待办。 */
+  flowTimeline: (wfId: string, params: { detail?: boolean; all?: boolean; limit?: number } = {}) =>
+    request<FlowTimelineResp>(
+      `/api/flows/${encodeURIComponent(wfId)}/timeline${qs({
+        detail: params.detail ? 'true' : undefined,
+        all: params.all ? 'true' : undefined,
+        limit: params.limit,
+      })}`,
+    ),
+  /** 已投影 History 事件（游标分页，不受 UI 200 条上限约束）。 */
+  flowHistory: (wfId: string, params: { run_id?: string; after_id?: number; limit?: number } = {}) =>
+    request<FlowHistoryResp>(`/api/flows/${encodeURIComponent(wfId)}/history${qs(params)}`),
+  /** 导出证据包（自包含 JSON + manifest/SHA-256）；导出动作自身写审计。 */
+  evidencePackage: (wfId: string, runId?: string) => downloadEvidencePackage(wfId, runId),
   /** 日志证据详情（转人工核对）：原始日志行 + 模板聚类（TRIAGING 阶段归档）。 */
   flowEvidence: (wfId: string) =>
     request<EvidenceResp>(`/api/flows/${encodeURIComponent(wfId)}/evidence`),
   approvals: () => request<ApprovalsResp>('/api/approvals'),
   window: () => request<WindowResp>('/api/window'),
-  audit: (params: { q?: string; stage?: string; days?: number } = {}) =>
+  audit: (params: { q?: string; stage?: string; kind?: string; exec_status?: string; days?: number; limit?: number; cursor?: string } = {}) =>
     request<AuditResp>(`/api/audit${qs(params)}`),
+  /** 操作审计游标分页（操作者 / 动作 / 结果 / 流程过滤）。 */
+  auditOps: (params: { limit?: number; cursor?: string; actor?: string; action?: string; result?: string; wf_id?: string } = {}) =>
+    request<AuditOpsResp>(`/api/audit/ops${qs(params)}`),
+  /** 审计链完整性校验（admin）。 */
+  auditIntegrity: () => request<Record<string, unknown>>('/api/audit/integrity'),
   /** 操作审计报表聚合（按操作者 / 动作 / 日期 / 结果）。 */
   auditSummary: (params: { days?: number; top?: number } = {}) =>
     request<AuditSummaryResp>(`/api/audit/summary${qs(params)}`),

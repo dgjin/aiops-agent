@@ -4,7 +4,7 @@ import type { ReactNode } from 'react'
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { api, describeError } from '../lib/api'
+import { api, describeError, saveBlob } from '../lib/api'
 import { cn, downloadJson, fmtDateTime, fmtDuration, shortHash } from '../lib/format'
 import { useWriteAction } from '../lib/actions'
 import { ActionButton } from '../components/ActionButton'
@@ -24,7 +24,7 @@ import { PermissionGate } from '../components/PermissionGate'
 import { QueuePatchDialog } from '../components/QueuePatchDialog'
 import { StageBadge } from '../components/StageBadge'
 import { Toast } from '../components/Toast'
-import type { ResultPayload, StatusPayload } from '../lib/types'
+import type { ResultPayload, StatusPayload, TimelineItem } from '../lib/types'
 
 const TABS = [
   { key: 'overview', label: '概览' },
@@ -542,10 +542,119 @@ function ResultSummary({ result }: { result: ResultPayload }) {
   )
 }
 
+const SOURCE_LABEL: Record<string, string> = {
+  history: 'Temporal',
+  status: '状态快照',
+  result: '结果',
+  audit: '操作审计',
+  command: '命令投递',
+  notification: '通知',
+  escalation: '人工待办',
+  release: '发布',
+}
+
+const SOURCE_CLS: Record<string, string> = {
+  history: 'bg-info/10 text-info',
+  command: 'bg-warn/10 text-warn',
+  notification: 'bg-accent/10 text-accent',
+  escalation: 'bg-danger/10 text-danger',
+  audit: 'bg-elevated text-muted',
+  status: 'bg-ok/10 text-ok',
+}
+
+/** 统一时间线单节点：时间 + 来源徽标 + 标题/摘要（估算时间用 ~ 标记）。 */
+function TimelineRow({ item }: { item: TimelineItem }) {
+  return (
+    <li className="flex gap-3 rounded-lg border border-line bg-canvas px-3 py-2">
+      <span
+        className="w-32 shrink-0 font-mono text-[11px] text-muted"
+        title={item.time_estimated ? '无真实事件时间：由状态快照推导' : undefined}
+      >
+        {fmtDateTime(item.time)}
+        {item.time_estimated ? ' ~' : ''}
+      </span>
+      <span
+        className={cn(
+          'h-fit shrink-0 rounded px-1.5 py-0.5 text-[10px]',
+          SOURCE_CLS[item.source] ?? 'bg-elevated text-muted',
+        )}
+      >
+        {SOURCE_LABEL[item.source] ?? item.source}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="text-sm">{item.title}</div>
+        {item.summary && (
+          <div className="mt-0.5 break-words font-mono text-[11px] text-muted">{item.summary}</div>
+        )}
+      </div>
+    </li>
+  )
+}
+
+/**
+ * 统一时间线（M4）：Temporal History + 闸门/审批 + 操作审计 + 命令投递 + 通知 + 人工待办。
+ *
+ * 运行中每 5s 刷新（History 投影有周期，status 快照直接补充最新阶段）；
+ * 接口失败时回退到终态 gate_events，避免整页不可用。
+ */
+function TimelineTab({ wfId, result }: { wfId: string; result: ResultPayload | null }) {
+  const { data, isLoading, isError, error } = useQuery({
+    queryKey: ['flow-timeline', wfId],
+    queryFn: () => api.flowTimeline(wfId),
+    refetchInterval: (query) => (query.state.data?.exec_status === 'RUNNING' ? 5000 : false),
+  })
+
+  if (isLoading) return <div className="text-sm text-muted">加载统一时间线…</div>
+  if (isError || !data) {
+    return result ? (
+      <Panel title={`事件流（${result.gate_events.length} 条，History 不可用时回退）`}>
+        <EventTimeline events={result.gate_events} />
+      </Panel>
+    ) : (
+      <EmptyState title="时间线不可用" hint={describeError(error)} />
+    )
+  }
+
+  const history = data.history ?? {}
+  return (
+    <div className="space-y-4">
+      <Panel title={`统一时间线（${data.items.length} 条）`}>
+        <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
+          <span>
+            History 已同步 <span className="font-mono text-ink">{history.event_count ?? 0}</span> 条
+          </span>
+          <span>
+            完整性：
+            <span className={history.complete ? 'text-ok' : 'text-warn'}>
+              {history.complete ? '已完整' : history.gap ? '断档待对账' : '投影中'}
+            </span>
+          </span>
+          {history.lag_seconds != null && <span>延迟 {history.lag_seconds}s</span>}
+          {data.has_more && <span className="text-warn">仅展示最近事件（可在 API 拉取全量）</span>}
+        </div>
+        {data.items.length ? (
+          <ol className="space-y-2">
+            {data.items.map((item) => (
+              <TimelineRow key={item.id} item={item} />
+            ))}
+          </ol>
+        ) : (
+          <EmptyState title="暂无事件" hint="流程刚启动，History 投影可能尚未完成" />
+        )}
+      </Panel>
+      <p className="text-[11px] text-idle">
+        时间线按事件时间升序；标记 ~ 的节点无真实时间，由状态快照推导（不伪造时序）。
+      </p>
+    </div>
+  )
+}
+
 export function FlowDetail() {
   const { wfId = '' } = useParams()
   const [tab, setTab] = useState<TabKey>('overview')
   const [queueOpen, setQueueOpen] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [exportToast, setExportToast] = useState<string | null>(null)
   const write = useWriteAction()
   const approval = useApprovalDialog()
 
@@ -564,6 +673,23 @@ export function FlowDetail() {
   const stage = status?.stage ?? result?.stage ?? null
   const service = status?.alert?.service ?? result?.service ?? '未知服务'
   const alertId = status?.alert?.alert_id ?? result?.alert_id ?? null
+
+  const exportPackage = async () => {
+    setExporting(true)
+    try {
+      const file = await api.evidencePackage(wfId, data.run_id)
+      saveBlob(file.blob, file.filename)
+      setExportToast(
+        `证据包已导出（审计 ${file.auditEventId || '—'}，root ${shortHash(file.rootSha256, 16)}）` +
+          (file.historyComplete ? '' : '；History 未完整，不得视为最终历史'),
+      )
+    } catch (err) {
+      setExportToast(`证据包导出失败：${describeError(err)}`)
+    } finally {
+      setExporting(false)
+      window.setTimeout(() => setExportToast(null), 8000)
+    }
+  }
 
   return (
     <div>
@@ -600,15 +726,36 @@ export function FlowDetail() {
                   {data.evidence.loki_available ? '' : '（Loki 不可用）'}
                 </span>
               )}
+              {data.history && !data.history.error && (
+                <span title="Temporal History 投影（完整事件流，不受 UI 200 条上限约束）">
+                  History <span className="text-ink">{data.history.event_count ?? 0}</span> 条
+                  <span className={data.history.complete ? 'text-ok' : 'text-warn'}>
+                    {data.history.complete ? ' · 已完整' : data.history.gap ? ' · 断档待对账' : ' · 投影中'}
+                  </span>
+                </span>
+              )}
             </div>
           </div>
-          <button
-            type="button"
-            onClick={() => downloadJson(`${wfId}.json`, data)}
-            className="rounded-lg border border-line px-3 py-1.5 text-xs text-muted transition-colors hover:bg-elevated hover:text-ink"
-          >
-            导出 JSON
-          </button>
+          <div className="flex items-center gap-2">
+            <PermissionGate require="operator">
+              <button
+                type="button"
+                disabled={exporting}
+                onClick={exportPackage}
+                className="rounded-lg border border-accent/40 px-3 py-1.5 text-xs text-accent transition-colors hover:bg-accent/10 disabled:opacity-50"
+                title="自包含证据包（含 History 全量、审计、命令、通知与 manifest/SHA-256）"
+              >
+                {exporting ? '导出中…' : '证据包'}
+              </button>
+            </PermissionGate>
+            <button
+              type="button"
+              onClick={() => downloadJson(`${wfId}.json`, data)}
+              className="rounded-lg border border-line px-3 py-1.5 text-xs text-muted transition-colors hover:bg-elevated hover:text-ink"
+            >
+              导出 JSON
+            </button>
+          </div>
         </div>
         {data.errors.length > 0 && (
           <div className="mt-3 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">
@@ -668,14 +815,7 @@ export function FlowDetail() {
           </Panel>
         )}
 
-        {tab === 'timeline' &&
-          (result ? (
-            <Panel title={`事件流（${result.gate_events.length} 条）`}>
-              <EventTimeline events={result.gate_events} />
-            </Panel>
-          ) : (
-            <EmptyState title="运行中暂无完整事件流" hint="流程到达终态后可查看完整时间线" />
-          ))}
+        {tab === 'timeline' && <TimelineTab wfId={wfId} result={result} />}
 
         {tab === 'approvals' && <ApprovalsTab result={result} status={status} />}
 
@@ -740,7 +880,7 @@ export function FlowDetail() {
         onClose={approval.close}
         onDone={approval.done}
       />
-      <Toast message={write.toast ?? approval.toast} />
+      <Toast message={write.toast ?? approval.toast ?? exportToast} />
     </div>
   )
 }

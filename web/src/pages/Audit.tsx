@@ -4,16 +4,15 @@
  */
 
 import { Fragment, useEffect, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { api, describeError } from '../lib/api'
+import { api, describeError, saveBlob } from '../lib/api'
 import { cn, downloadJson, fmtDateTime } from '../lib/format'
 import { compareValues, nextSort, type SortState } from '../lib/sort'
 import { useWriteAction } from '../lib/actions'
 import { ActionButton } from '../components/ActionButton'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { EmptyState } from '../components/EmptyState'
-import { EventTimeline } from '../components/EventTimeline'
 import { Pagination, usePagination } from '../components/Pagination'
 import { SortableTh } from '../components/SortableTh'
 import { StageBadge, stageRank } from '../components/StageBadge'
@@ -133,46 +132,80 @@ function OpsSummary({ days }: { days: number }) {
   )
 }
 
-/** 展开行：按需拉取该流程的审计记录，用**交互式 SVG** 展示闸门事件流。 */
-function FlowEventRow({ wfId }: { wfId: string }) {
+/** 展开行：统一时间线（M4）——History + 闸门 + 命令投递 + 通知 + 人工待办，并可导出证据包。 */
+function FlowEventRow({ wfId, onToast }: { wfId: string; onToast: (message: string) => void }) {
+  const [exporting, setExporting] = useState(false)
   const { data, isLoading, isError, error } = useQuery({
-    queryKey: ['flow-result', wfId],
-    queryFn: () => api.flowResult(wfId),
+    queryKey: ['flow-timeline', wfId],
+    queryFn: () => api.flowTimeline(wfId),
     staleTime: 60000,
   })
 
-  if (isLoading) return <div className="px-4 py-3 text-xs text-muted">加载事件流…</div>
+  if (isLoading) return <div className="px-4 py-3 text-xs text-muted">加载统一时间线…</div>
   if (isError) return <div className="px-4 py-3 text-xs text-danger">读取失败：{describeError(error)}</div>
 
-  const result = data?.result
-  const events = result?.gate_events ?? []
+  const history = data?.history ?? {}
+  const exportPackage = async () => {
+    setExporting(true)
+    try {
+      const file = await api.evidencePackage(wfId, data?.run_id)
+      saveBlob(file.blob, file.filename)
+      onToast(
+        `证据包已导出（审计 ${file.auditEventId || '—'}，root ${file.rootSha256.slice(0, 16)}）` +
+          (file.historyComplete ? '' : '；History 未完整'),
+      )
+    } catch (err) {
+      onToast(`导出失败：${describeError(err)}`)
+    } finally {
+      setExporting(false)
+    }
+  }
+
   return (
     <div className="bg-canvas px-4 py-3">
       <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
         <span>
-          阶段 <span className="font-mono text-ink">{result?.stage ?? '—'}</span>
+          阶段 <span className="font-mono text-ink">{data?.stage ?? '—'}</span>
         </span>
         <span>
-          置信度{' '}
-          <span className="font-mono text-ink">
-            {result?.confidence != null ? result.confidence.toFixed(2) : '—'}
+          History <span className="font-mono text-ink">{history.event_count ?? 0}</span> 条{' '}
+          <span className={history.complete ? 'text-ok' : 'text-warn'}>
+            {history.complete ? '已完整' : history.gap ? '断档待对账' : '投影中'}
           </span>
         </span>
-        <span>
-          补丁 <span className="font-mono text-ink">{result?.patch_id ?? '—'}</span>
-        </span>
-        <span>
-          发布{' '}
-          <span className={result?.deploy_result?.rolled_back ? 'text-danger' : 'text-ok'}>
-            {result?.deploy_result
-              ? result.deploy_result.rolled_back
-                ? '已回滚'
-                : `已全量（${result.deploy_result.version}）`
-              : '—'}
-          </span>
-        </span>
+        <span>命令 {data?.counts.command ?? 0}</span>
+        <span>通知 {data?.counts.notification ?? 0}</span>
+        <button
+          type="button"
+          disabled={exporting}
+          onClick={exportPackage}
+          className="rounded border border-accent/40 px-2 py-0.5 text-accent hover:bg-accent/10 disabled:opacity-50"
+        >
+          {exporting ? '导出中…' : '证据包'}
+        </button>
+        <Link to={`/flows/${encodeURIComponent(wfId)}`} className="ml-auto text-accent hover:underline">
+          在详情页查看
+        </Link>
       </div>
-      <EventTimeline events={events} />
+      {data?.items?.length ? (
+        <ol className="max-h-72 space-y-1 overflow-auto">
+          {data.items.map((item) => (
+            <li key={item.id} className="flex gap-2 rounded border border-line/60 bg-panel px-2 py-1 text-xs">
+              <span className="w-28 shrink-0 font-mono text-[10px] text-muted">
+                {fmtDateTime(item.time)}
+                {item.time_estimated ? ' ~' : ''}
+              </span>
+              <span className="w-16 shrink-0 text-[10px] text-idle">{item.source}</span>
+              <span className="min-w-0 flex-1 truncate" title={item.summary}>
+                {item.title}
+                {item.summary && <span className="ml-2 font-mono text-[10px] text-muted">{item.summary}</span>}
+              </span>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <div className="text-xs text-muted">暂无时间线事件</div>
+      )}
     </div>
   )
 }
@@ -184,13 +217,44 @@ export function Audit() {
   const [expanded, setExpanded] = useState<string | null>(null)
   const [flowSort, setFlowSort] = useState<SortState<FlowColumnKey>>(DEFAULT_FLOW_SORT)
   const [opsSort, setOpsSort] = useState<SortState<OpsColumnKey>>(DEFAULT_OPS_SORT)
+  const [opsActor, setOpsActor] = useState('')
+  const [opsAction, setOpsAction] = useState('')
+  const [toast, setToast] = useState<string | null>(null)
   const write = useWriteAction()
 
-  const { data, isError, error } = useQuery({
+  // 流程审计：游标分页（M4）。只有第一页参与 30s 轮询，避免翻页越多轮询越重。
+  const auditQuery = useInfiniteQuery({
     queryKey: ['audit', q, days],
-    queryFn: () => api.audit({ q: q || undefined, days }),
-    refetchInterval: 15000,
+    queryFn: ({ pageParam }) =>
+      api.audit({ q: q || undefined, days, limit: 100, cursor: pageParam || undefined }),
+    initialPageParam: '',
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
+    refetchInterval: (query) => ((query.state.data?.pages.length ?? 1) > 1 ? false : 30000),
   })
+  const flowItems = auditQuery.data?.pages.flatMap((page) => page.items) ?? []
+  const source = auditQuery.data?.pages[0]?.source
+
+  // 操作审计：独立游标分页接口（不再固定最近 100 条）。
+  const opsQuery = useInfiniteQuery({
+    queryKey: ['audit-ops', opsActor, opsAction],
+    queryFn: ({ pageParam }) =>
+      api.auditOps({
+        limit: 50,
+        cursor: pageParam || undefined,
+        actor: opsActor || undefined,
+        action: opsAction || undefined,
+      }),
+    initialPageParam: '',
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
+    enabled: tab === 'ops',
+    refetchInterval: (query) => ((query.state.data?.pages.length ?? 1) > 1 ? false : 30000),
+  })
+  const opsItems = opsQuery.data?.pages.flatMap((page) => page.items) ?? []
+
+  const showToast = (message: string) => {
+    setToast(message)
+    window.setTimeout(() => setToast(null), 8000)
+  }
 
   /** 点击表头：同列翻转升降；换列按直觉默认方向（时间降序，其余升序）。 */
   const toggleFlowSort = (key: FlowColumnKey) => {
@@ -201,10 +265,10 @@ export function Audit() {
   }
 
   // ---- 排序 + 分页：q / 时间范围 / 页签 / 排序变化回到第 1 页；两张表各自独立 ----
-  const sortedFlows = [...(data?.items ?? [])].sort(
+  const sortedFlows = [...flowItems].sort(
     (a, b) => compareValues(flowSortValue(a, flowSort.key), flowSortValue(b, flowSort.key), flowSort.dir),
   )
-  const sortedOps = [...(data?.ops ?? [])].sort(
+  const sortedOps = [...opsItems].sort(
     (a, b) => compareValues(opsSortValue(a, opsSort.key), opsSortValue(b, opsSort.key), opsSort.dir),
   )
   const flowsPg = usePagination(sortedFlows.length, 20)
@@ -214,7 +278,7 @@ export function Audit() {
   useEffect(() => {
     setFlowsPage(1)
     setOpsPage(1)
-  }, [q, days, tab, flowSort, opsSort, setFlowsPage, setOpsPage])
+  }, [q, days, tab, flowSort, opsSort, opsActor, opsAction, setFlowsPage, setOpsPage])
 
   return (
     <div>
@@ -223,10 +287,10 @@ export function Audit() {
           <h1 className="text-lg font-medium">审计回看</h1>
           <p className="mt-1 text-xs text-muted">终态流程审计记录与控制台操作留痕</p>
         </div>
-        {data && (
+        {(flowItems.length > 0 || opsItems.length > 0) && (
           <button
             type="button"
-            onClick={() => downloadJson('aiops-audit.json', data)}
+            onClick={() => downloadJson('aiops-audit.json', { flows: flowItems, ops: opsItems, source })}
             className="rounded-lg border border-line px-3 py-1.5 text-xs text-muted transition-colors hover:bg-elevated hover:text-ink"
           >
             导出 JSON
@@ -247,6 +311,27 @@ export function Audit() {
           <option value={7}>近 7 天</option>
           <option value={30}>近 30 天</option>
         </select>
+        {tab === 'flows' && source && (
+          <span className="text-xs text-muted">
+            数据源 <span className="text-ink">{source === 'db' ? 'SQL 数据面' : 'Temporal 回退'}</span>
+          </span>
+        )}
+        {tab === 'ops' && (
+          <>
+            <input
+              value={opsActor}
+              onChange={(e) => setOpsActor(e.target.value)}
+              placeholder="操作者过滤"
+              className={cn(INPUT_CLS, 'w-40')}
+            />
+            <input
+              value={opsAction}
+              onChange={(e) => setOpsAction(e.target.value)}
+              placeholder="动作过滤（如 approval:）"
+              className={cn(INPUT_CLS, 'w-48')}
+            />
+          </>
+        )}
         <div className="ml-auto flex gap-1 rounded-lg border border-line bg-panel p-0.5">
           {(
             [
@@ -269,14 +354,14 @@ export function Audit() {
         </div>
       </div>
 
-      {isError && (
+      {tab === 'flows' && auditQuery.isError && (
         <div className="mt-4">
-          <EmptyState title="无法加载审计数据" hint={describeError(error)} />
+          <EmptyState title="无法加载审计数据" hint={describeError(auditQuery.error)} />
         </div>
       )}
 
-      {data && tab === 'flows' && (
-        data.items.length ? (
+      {tab === 'flows' && auditQuery.data && (
+        flowItems.length ? (
           <>
           <div className="mt-4 overflow-x-auto rounded-xl border border-line bg-panel">
             <table className="w-full text-sm">
@@ -338,7 +423,7 @@ export function Audit() {
                   {expanded === item.wf_id && (
                     <tr className="border-b border-line/60">
                       <td colSpan={7} className="p-0">
-                        <FlowEventRow wfId={item.wf_id} />
+                        <FlowEventRow wfId={item.wf_id} onToast={showToast} />
                       </td>
                     </tr>
                   )}
@@ -348,6 +433,18 @@ export function Audit() {
             </table>
           </div>
           <Pagination pg={flowsPg} />
+          {auditQuery.hasNextPage && (
+            <div className="mt-3 flex justify-center">
+              <button
+                type="button"
+                onClick={() => auditQuery.fetchNextPage()}
+                disabled={auditQuery.isFetchingNextPage}
+                className="rounded-lg border border-line px-4 py-1.5 text-xs text-muted hover:bg-elevated hover:text-ink disabled:opacity-50"
+              >
+                {auditQuery.isFetchingNextPage ? '加载中…' : '加载更早的审计记录'}
+              </button>
+            </div>
+          )}
           </>
         ) : (
           <div className="mt-4">
@@ -356,10 +453,16 @@ export function Audit() {
         )
       )}
 
-      {data && tab === 'ops' && <OpsSummary days={days} />}
+      {tab === 'ops' && <OpsSummary days={days} />}
 
-      {data && tab === 'ops' && (
-        data.ops.length ? (
+      {tab === 'ops' && opsQuery.isError && (
+        <div className="mt-4">
+          <EmptyState title="无法加载操作审计" hint={describeError(opsQuery.error)} />
+        </div>
+      )}
+
+      {tab === 'ops' && opsQuery.data && (
+        sortedOps.length ? (
           <>
           <div className="mt-4 overflow-x-auto rounded-xl border border-line bg-panel">
             <table className="w-full text-sm">
@@ -446,6 +549,18 @@ export function Audit() {
             </table>
           </div>
           <Pagination pg={opsPg} />
+          {opsQuery.hasNextPage && (
+            <div className="mt-3 flex justify-center">
+              <button
+                type="button"
+                onClick={() => opsQuery.fetchNextPage()}
+                disabled={opsQuery.isFetchingNextPage}
+                className="rounded-lg border border-line px-4 py-1.5 text-xs text-muted hover:bg-elevated hover:text-ink disabled:opacity-50"
+              >
+                {opsQuery.isFetchingNextPage ? '加载中…' : '加载更早的操作记录'}
+              </button>
+            </div>
+          )}
           </>
         ) : (
           <div className="mt-4">
@@ -467,7 +582,7 @@ export function Audit() {
         {write.spec?.detail}
       </ConfirmDialog>
 
-      <Toast message={write.toast} />
+      <Toast message={write.toast ?? toast} />
     </div>
   )
 }

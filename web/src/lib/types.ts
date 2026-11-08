@@ -358,6 +358,67 @@ export interface FlowDetailResp extends Timed {
   artifacts: Artifacts | null
   /** 日志证据摘要（运行中读归档；终态取自 result.evidence） */
   evidence?: EvidenceSummary | null
+  /** Temporal History 投影同步状态（M4） */
+  history?: HistorySyncStatus
+}
+
+/** Temporal History 投影同步状态：complete=false 时不得视为最终历史。 */
+export interface HistorySyncStatus {
+  wf_id?: string
+  run_id?: string
+  projected?: boolean
+  last_event_id?: number
+  event_count?: number
+  complete?: boolean
+  synced_at?: string | null
+  lag_seconds?: number | null
+  /** 事件号与条数不一致（疑似断档，对账任务会补数） */
+  gap?: boolean
+  error?: string
+}
+
+/** 统一时间线节点（History / 闸门 / 审计 / 命令 / 通知 / 待办）。 */
+export interface TimelineItem {
+  id: string
+  source: string
+  kind: string
+  title: string
+  summary?: string
+  time: string | null
+  /** 无真实时间（由状态快照推导）标记为估算 */
+  time_estimated?: boolean
+  ref?: Record<string, unknown>
+  detail?: unknown
+}
+
+export interface FlowTimelineResp extends Timed {
+  wf_id: string
+  run_id: string
+  exec_status: string
+  stage: string | null
+  patch_id: string | null
+  alert: AlertMeta | null
+  history: HistorySyncStatus
+  history_page: { returned: number; has_more: boolean; next_after: number | null }
+  items: TimelineItem[]
+  counts: Record<string, number>
+  has_more: boolean
+  generated_at: string
+}
+
+export interface HistoryEventItem {
+  event_id: number
+  event_type: string
+  event_time: string | null
+  detail?: unknown
+}
+
+export interface FlowHistoryResp extends Timed {
+  run_id: string
+  items: HistoryEventItem[]
+  next_after: number | null
+  has_more: boolean
+  sync: HistorySyncStatus
 }
 
 export interface ResultResp extends Timed {
@@ -389,6 +450,17 @@ export interface OpsAuditRow {
 export interface AuditResp extends Timed {
   items: FlowItem[]
   ops: OpsAuditRow[]
+  /** 游标分页（M4）：production 走 SQL 数据面，空库/demo 回退 Temporal */
+  next_cursor?: string | null
+  has_more?: boolean
+  source?: 'db' | 'temporal' | string
+}
+
+/** 操作审计游标分页响应。 */
+export interface AuditOpsResp extends Timed {
+  items: OpsAuditRow[]
+  next_cursor?: string | null
+  has_more?: boolean
 }
 
 /** 审计报表聚合分组项 */
