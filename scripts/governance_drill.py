@@ -1,13 +1,14 @@
 """治理闭环本机演练（M5）：把「故障注入 → 系统必须发现」固化为可重复执行的脚本。
 
-覆盖六类场景（全部在本机临时目录完成，不连接 Temporal/MySQL/外部通知）：
+覆盖七类场景（全部在本机临时目录完成，不连接 Temporal/MySQL/外部通知）：
 
 1. ``audit-tamper``：修改链中记录 → 完整性校验必须失败并定位到被改行；
 2. ``audit-archive``：归档并 purge 后全链仍可校验，新写入接续归档链尾；
 3. ``command-replay``：同 command_id 同内容幂等、不同内容可检出冲突；
-4. ``notify-sla``：recorded/failed 通知计入「未送达」，live 不计入；
-5. ``history-gap``：事件断档（id 不连续）可被统计发现；
-6. ``history-pagination``：250 条事件全量投影后游标分页不截断。
+4. ``approval-expiry``：审批超时转人工后，迟到审批被阶段守卫拒绝；旧 run 证据绑定被拒；
+5. ``notify-sla``：recorded/failed 通知计入「未送达」，live 不计入；
+6. ``history-gap``：事件断档（id 不连续）可被统计发现；
+7. ``history-pagination``：250 条事件全量投影后游标分页不截断。
 
 边界：本脚本证明「本机实现可发现这些异常」，不代表外部 WORM / 真实通知通道 /
 真实 OTel Collector / 多主机并发已验收；这些仍须在目标环境单独演练。
@@ -40,6 +41,7 @@ SCENARIOS = (
     "audit-tamper",
     "audit-archive",
     "command-replay",
+    "approval-expiry",
     "notify-sla",
     "history-gap",
     "history-pagination",
@@ -185,6 +187,59 @@ def command_replay(root: Path) -> dict:
     }
 
 
+def approval_expiry(root: Path) -> dict:
+    """审批超时/证据过期：迟到审批与旧 run 信封都必须被拒。
+
+    超时由 Temporal 定时器触发（本机无时间跳跃能力，不在演练中伪造运行态）；
+    这里验证超时后的两道真实防线：BFF 阶段守卫拒绝 ESCALATED 上的迟到审批，
+    工作流侧拒绝绑定旧 run 的审批信封。
+    """
+    from aiops_agent import change_evidence
+    from bff import temporal_gateway
+
+    binding = change_evidence.build_binding(
+        case_id="case-drill",
+        patch={"patch_id": "patch-drill", "diff": "--- a\n+++ b\n"},
+        test_report={"status": "passed", "total": 1},
+        policy_sha256="a" * 64,
+        run_id="run-current",
+    )
+
+    def envelope(current_binding: dict) -> dict:
+        return change_evidence.build_envelope(
+            binding=current_binding,
+            gate="approval",
+            decision="approve",
+            actor="drill-approver",
+            channel="console",
+            comment="",
+            command_id=change_evidence.new_command_id(),
+            submitted_at=change_evidence.utc_now_iso(),
+        )
+
+    fresh = change_evidence.validate_envelope(
+        envelope(binding), gate="approval", binding=binding
+    )
+    stale = change_evidence.validate_envelope(
+        envelope(dict(binding, run_id="run-old")), gate="approval", binding=binding
+    )
+    stage_block = temporal_gateway.check_stage_allowed("ESCALATED", {"WAIT_APPROVAL"})
+    return {
+        "ok": bool(
+            fresh is None
+            and stale is not None
+            and stale[0] == "run-mismatch"
+            and stage_block
+        ),
+        "detail": {
+            "fresh_accepted": fresh is None,
+            "stale_code": stale[0] if stale else None,
+            "late_stage_blocked": bool(stage_block),
+            "stage_message": stage_block,
+        },
+    }
+
+
 def notify_sla(root: Path) -> dict:
     """通知送达统计：recorded/failed 计入未送达，live 不计入。"""
     from bff import escalations
@@ -283,6 +338,7 @@ RUNNERS = {
     "audit-tamper": audit_tamper,
     "audit-archive": audit_archive,
     "command-replay": command_replay,
+    "approval-expiry": approval_expiry,
     "notify-sla": notify_sla,
     "history-gap": history_gap,
     "history-pagination": history_pagination,
