@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
+import os
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 from aiops_agent import metrics, readiness
+from .. import commands
 from ..deps import gw, ok
 
 router = APIRouter()
@@ -68,7 +71,41 @@ async def api_subsystems(request: Request) -> JSONResponse:
     _authenticated(request)
     report = await readiness.check(gw)
     subsystems = {**report["checks"], **report["degradations"]}
+    subsystems["commands"] = await _command_subsystem()
     degraded = sorted(name for name, info in subsystems.items() if not info["ok"])
     return JSONResponse(ok({"ok": report["ok"], "subsystems": subsystems, "degraded": degraded,
                             "degraded_mode": bool(degraded), "configuration": report["configuration"]}),
                         status_code=200 if report["ok"] else 503, headers={"Cache-Control": "no-store"})
+
+
+def _command_backlog_seconds() -> int:
+    try:
+        return max(30, int(os.environ.get("AIOPS_COMMAND_BACKLOG_ALERT_SECONDS", "300")))
+    except ValueError:
+        return 300
+
+
+async def _command_subsystem() -> dict:
+    """写命令 outbox 健康：积压过老或近 24h 有失败即降级（不翻转整体 HTTP 状态）。"""
+    try:
+        values = await asyncio.to_thread(commands.stats)
+        metrics.set_command_state(
+            pending=values["pending"],
+            oldest_seconds=values["oldest_pending_seconds"],
+            failed_24h=values["failed_24h"],
+        )
+    except Exception as exc:  # noqa: BLE001 - 存储故障本身就是降级信号
+        return {"ok": False, "detail": f"命令存储不可读：{exc}"}
+    threshold = _command_backlog_seconds()
+    backlog = values["oldest_pending_seconds"] >= threshold
+    detail = (
+        f"积压 {values['pending']} 条（最老 {values['oldest_pending_seconds']:.0f}s），"
+        f"近 24h 失败 {values['failed_24h']} 条"
+    )
+    if backlog:
+        detail += f"；积压超过阈值 {threshold}s"
+    return {
+        "ok": not backlog and values["failed_24h"] == 0,
+        "detail": detail,
+        **values,
+    }

@@ -31,6 +31,7 @@ alert_domains   告警故障域（C 批次）：当前聚合事件指针与窗�
 alert_events    告警聚合事件（C 批次）：代表告警/流程 + pending/started + 租约认领
 alert_members   事件成员（C 批次）：(domain_key, alert_id) 唯一去重，跨实例幂等计数
 log_evidence    日志证据归档（转人工核对）：流程 TRIAGING 采集的原始日志 + 模板聚类
+workflow_commands  写命令 outbox（M2）：意图审计 + 投递状态 + 有界重试
 =============== ============================================================
 """
 
@@ -166,6 +167,39 @@ workflow_runs = Table(
     Index("idx_runs_stage", "stage"),
     Index("idx_runs_started", "start_time"),
     Index("idx_runs_close_kind", "close_time", "kind"),
+)
+
+# ---- 写命令 outbox（M2，语义见 bff/commands.py）----
+# 意图审计与命令行在同一事务写入；投递失败可按 next_retry_at 有界重试，
+# 状态固定为 PENDING/SUBMITTED/ACCEPTED/FAILED（业务审批结果另由工作流记录）。
+workflow_commands = Table(
+    "workflow_commands",
+    metadata,
+    Column("command_id", String(64), primary_key=True),
+    # approval / second-approval / deploy-command / queue-patch
+    Column("command_type", String(32), nullable=False),
+    Column("wf_id", String(255), nullable=False),
+    # 命令针对的流程运行实例（防止同名流程重跑后把回执归到新 run）
+    Column("run_id", String(128), nullable=False, server_default=""),
+    Column("actor", String(128), nullable=False),
+    Column("channel", String(32), nullable=False),
+    # 审计动作名（chatops:/card-callback: 等通道后缀在意图阶段固定，重试/回执沿用）
+    Column("audit_action", String(64), nullable=False, server_default=""),
+    # 原始请求载荷（审批信封或 deploy/queue 参数；工作流按 command_id 去重）
+    Column("payload", JSON, nullable=False),
+    # 审计附加字段（decision/comment/operator 等；意图行与结果行共用同口径）
+    Column("audit_params", JSON),
+    Column("status", String(16), nullable=False, server_default="PENDING"),
+    Column("attempts", Integer, nullable=False, server_default=text("0")),
+    Column("max_attempts", Integer, nullable=False, server_default=text("5")),
+    Column("next_retry_at", DateTime),
+    Column("last_error", Text),
+    Column("created_at", DateTime, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+    Column("submitted_at", DateTime),
+    Column("completed_at", DateTime),
+    Index("idx_commands_status_next", "status", "next_retry_at"),
+    Index("idx_commands_wf", "wf_id"),
 )
 
 escalations = Table(

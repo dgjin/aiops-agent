@@ -128,6 +128,8 @@ def _audit_fields(payload: dict) -> dict:
         "gate_events": payload.get("gate_events") or [],
         "approval_error": payload.get("approval_error"),
         "approval_rejections": payload.get("approval_rejections") or [],
+        "command_rejections": payload.get("command_rejections") or [],
+        "command_error": payload.get("command_error"),
         "requested_by": payload.get("requested_by") or "",
         "parent_run_id": payload.get("parent_run_id") or "",
         "parent_wf_id": payload.get("parent_wf_id") or "",
@@ -358,11 +360,19 @@ class TemporalGateway:
         """下发二级审批：字符串＝旧协议；dict＝approval-evidence-v1 证据信封。"""
         await self.handle(wf_id).signal(AIOpsFixWorkflow.submit_second_approval, decision)
 
-    async def signal_deploy_command(self, wf_id: str, command: str) -> None:
+    async def signal_deploy_command(self, wf_id: str, command: str | dict) -> None:
+        """下发窗口指令：字符串＝旧协议；dict＝workflow-command-v1 信封。"""
         await self.handle(wf_id).signal(AIOpsFixWorkflow.submit_deploy_command, command)
 
-    async def signal_queue_patch(self, wf_id: str, new_wf_id: str, alert) -> None:
-        await self.handle(wf_id).signal(AIOpsFixWorkflow.submit_patch, args=[new_wf_id, alert])
+    async def signal_queue_patch(
+        self, wf_id: str, new_wf_id: str | dict, alert=None
+    ) -> None:
+        """下发排队补丁：dict＝workflow-command-v1 信封（单参数）；否则旧两参数协议。"""
+        handle = self.handle(wf_id)
+        if isinstance(new_wf_id, dict):
+            await handle.signal(AIOpsFixWorkflow.submit_patch, new_wf_id)
+            return
+        await handle.signal(AIOpsFixWorkflow.submit_patch, args=[new_wf_id, alert])
 
     async def approval_receipt(
         self, wf_id: str, command_id: str, attempts: int = 4, delay: float = 0.1

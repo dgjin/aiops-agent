@@ -148,9 +148,14 @@ if _AVAILABLE:
     BACKUP_OVERDUE = Gauge("aiops_backup_overdue", "超过26小时无成功备份或状态未知")
     CERT_EXPIRES = Gauge("aiops_certificate_expiry_timestamp_seconds", "当前服务证书到期时间，0 未知")
     CERT_RENEWAL_DUE = Gauge("aiops_certificate_renewal_due", "证书距到期不超过30天或状态未知")
+    # 写命令 outbox（M2）：积压/最老等待/近 24h 失败——只反映投递排队，不代表业务审批结果
+    COMMAND_BACKLOG = Gauge("aiops_workflow_commands_pending", "待投递写命令数")
+    COMMAND_OLDEST_WAIT = Gauge("aiops_workflow_commands_oldest_wait_seconds", "最老待投递命令等待秒数")
+    COMMAND_FAILED_24H = Gauge("aiops_workflow_commands_failed_24h", "近 24 小时投递失败的写命令数")
 else:  # pragma: no cover
     ALERT_PENDING = COMPENSATION_FAILURES = RELEASE_CONFLICTS = ROLLBACK_FAILURES = _NoopMetric()
     COMPONENT_RESTARTS = BACKUP_LAST_SUCCESS = BACKUP_OVERDUE = CERT_EXPIRES = CERT_RENEWAL_DUE = _NoopMetric()
+    COMMAND_BACKLOG = COMMAND_OLDEST_WAIT = COMMAND_FAILED_24H = _NoopMetric()
 
 _backup_success = 0.0
 _certificate_expiry = 0.0
@@ -163,6 +168,13 @@ if _AVAILABLE:
 def set_alert_pending(count: int | None) -> None:
     """None/非法值恢复未采集状态，不能保留上次的零积压冒充正常。"""
     ALERT_PENDING.set(count if type(count) is int and count >= 0 else -1)
+
+
+def set_command_state(*, pending: int, oldest_seconds: float, failed_24h: int) -> None:
+    """写命令 outbox 状态（由 bff.commands 在变更/调度后刷新）。"""
+    COMMAND_BACKLOG.set(max(0, int(pending)))
+    COMMAND_OLDEST_WAIT.set(max(0.0, float(oldest_seconds)))
+    COMMAND_FAILED_24H.set(max(0, int(failed_24h)))
 
 
 def observe_compensation_failure() -> None:

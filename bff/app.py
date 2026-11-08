@@ -31,7 +31,7 @@ from fastapi.staticfiles import StaticFiles
 
 from aiops_agent import tracing
 
-from . import auth, escalations
+from . import auth, commands, escalations
 from .deps import ApiError, WEB_DIST, gw, log, ok
 from .middleware import register_middlewares
 from .middleware import required_role as required_role  # noqa: F401 - 兼容测试引用（bff.app.required_role）
@@ -106,6 +106,23 @@ async def _escalation_loop() -> None:
         await asyncio.sleep(_escalation_sweep_seconds())
 
 
+async def _command_dispatch_loop() -> None:
+    """写命令 outbox 后台投递（M2）：启动即扫描，之后按周期重试到期的 PENDING。
+
+    只处理 ``next_retry_at`` 已到的命令；单条失败不影响其他命令。
+    """
+    while True:
+        try:
+            delivered = await commands.dispatch_due()
+            if delivered:
+                log.info("[commands] 本轮投递 %d 条写命令", len(delivered))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 投递失败不得影响服务
+            log.warning("[commands] 后台投递失败：%s", exc)
+        await asyncio.sleep(commands.sweep_seconds())
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     try:
@@ -114,15 +131,19 @@ async def lifespan(_: FastAPI):
         pass
     rotation_task = asyncio.create_task(_rotation_loop())
     escalation_task = asyncio.create_task(_escalation_loop())
+    command_task = asyncio.create_task(_command_dispatch_loop())
     try:
         yield
     finally:
         rotation_task.cancel()
         escalation_task.cancel()
+        command_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await rotation_task
         with contextlib.suppress(asyncio.CancelledError):
             await escalation_task
+        with contextlib.suppress(asyncio.CancelledError):
+            await command_task
 
 
 app = FastAPI(title="AIOps Console BFF", version="1.0.0", lifespan=lifespan)
