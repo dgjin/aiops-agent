@@ -65,6 +65,12 @@ def _resolution_payload(**overrides) -> dict:
     return payload
 
 
+def _close(entry: dict, actor: str = "alice", **overrides) -> dict:
+    """按 M3 规则结构化关闭（仅备注关闭已停用）。"""
+    resolution = esc.build_resolution(_resolution_payload(**overrides), actor)
+    return esc.apply_close(entry, actor, "", resolution)
+
+
 class PureFunctionTest(unittest.TestCase):
     """纯函数：升级原因翻译 / 记录构造 / 状态迁移。"""
 
@@ -108,12 +114,15 @@ class PureFunctionTest(unittest.TestCase):
         self.assertEqual(entry["history"][0]["action"], "open")
         self.assertFalse(entry["re_escalated"])
         self.assertIsNone(entry["closed_at"])
+        self.assertEqual(entry["retry_wf_id"], "")
+        self.assertEqual(entry["notify_attempts"], 0)
+        self.assertEqual(entry["version"], 1)
 
     def test_assign_rejects_blank_and_closed(self) -> None:
         entry = esc.new_entry(_flow())
         with self.assertRaises(esc.EscalationStoreError):
             esc.apply_assign(entry, "   ", "alice")
-        esc.apply_close(entry, "alice", "手动处置")
+        _close(entry)
         with self.assertRaises(esc.EscalationStoreError):
             esc.apply_assign(entry, "bob", "alice")
 
@@ -128,19 +137,82 @@ class PureFunctionTest(unittest.TestCase):
 
     def test_close_records_note_and_rejects_repeat(self) -> None:
         entry = esc.new_entry(_flow())
-        esc.apply_close(entry, "alice", "已回滚发布")
+        resolution = esc.build_resolution(_resolution_payload(note="已回滚发布"), "alice")
+        esc.apply_close(entry, "alice", "已回滚发布", resolution)
         self.assertEqual(entry["status"], "closed")
         self.assertEqual(entry["note"], "已回滚发布")
         self.assertIsNotNone(entry["closed_at"])
         with self.assertRaises(esc.EscalationStoreError):
-            esc.apply_close(entry, "alice", "")
+            esc.apply_close(entry, "alice", "", resolution)
 
-    def test_retried_closes_with_new_wf_id(self) -> None:
+    def test_close_requires_structured_resolution(self) -> None:
+        """M3：仅备注关闭已停用（不再产生 resolution=NULL 的弱关闭）。"""
+        entry = esc.new_entry(_flow())
+        with self.assertRaises(esc.EscalationStoreError) as ctx:
+            esc.apply_close(entry, "alice", "手动处置")
+        self.assertIn("结构化", str(ctx.exception))
+        self.assertEqual(entry["status"], "open")
+
+    def test_retried_enters_retrying_with_parent_chain(self) -> None:
         entry = esc.new_entry(_flow())
         esc.apply_retried(entry, "aiops-fix-order-a1-retry1", "alice")
-        self.assertEqual(entry["status"], "closed")
+        self.assertEqual(entry["status"], "retrying")
+        self.assertEqual(entry["retry_wf_id"], "aiops-fix-order-a1-retry1")
+        self.assertEqual(entry["parent_run_id"], "run-a1")
+        self.assertIsNotNone(entry["retry_started_at"])
         self.assertIn("retry1", entry["note"])
         self.assertEqual(entry["history"][-1]["action"], "retry")
+        # 已在重试中不得重复启动
+        with self.assertRaises(esc.EscalationStoreError):
+            esc.apply_retried(entry, "aiops-fix-order-a1-retry2", "alice")
+
+    def test_retry_outcome_done_auto_closes_with_resolution(self) -> None:
+        entry = esc.new_entry(_flow())
+        esc.apply_retried(entry, "aiops-fix-order-a1-retry1", "alice")
+        detail = {
+            "exec_status": "COMPLETED",
+            "result": {
+                "stage": "DONE",
+                "root_cause": {"summary": "数据库连接池耗尽"},
+                "patch": {"description": "调大连接池并重启"},
+            },
+        }
+        esc.apply_retry_outcome(entry, "DONE", "system:retry-tracking", detail=detail)
+        self.assertEqual(entry["status"], "closed")
+        self.assertEqual(entry["retry_outcome"], "DONE")
+        self.assertEqual(entry["resolution"]["close_reason"], "RESOLVED")
+        self.assertEqual(entry["resolution"]["closed_by"], "system:retry-tracking")
+        self.assertIn("连接池", entry["resolution"]["actual_root_cause"])
+        self.assertEqual(entry["resolution"]["source"], "retry-tracking")
+        self.assertEqual(entry["history"][-1]["action"], "retry:done")
+
+    def test_retry_outcome_failure_reopens_and_resets_notify_cycle(self) -> None:
+        entry = esc.new_entry(_flow())
+        esc.apply_assign(entry, "alice", "bob")
+        esc.apply_retried(entry, "aiops-fix-order-a1-retry1", "bob")
+        entry["re_escalated"] = True
+        entry["notify_mode"] = "live"
+        esc.apply_retry_outcome(
+            entry, "ESCALATED", "system:retry-tracking", reason="闸门2：审批超时"
+        )
+        self.assertEqual(entry["status"], "assigned")  # 已指派：重开后保持责任人
+        self.assertEqual(entry["retry_outcome"], "ESCALATED")
+        self.assertFalse(entry["re_escalated"])  # 新一轮升级可重新通知
+        self.assertEqual(entry["notify_mode"], "")
+        self.assertEqual(entry["notify_attempts"], 0)
+        self.assertIn("审批超时", entry["note"])
+        self.assertEqual(
+            entry["retry_wf_id"], "aiops-fix-order-a1-retry1"
+        )  # 父子链保留
+        self.assertEqual(entry["history"][-1]["action"], "retry:reopen")
+
+    def test_retry_outcome_running_keeps_tracking(self) -> None:
+        entry = esc.new_entry(_flow())
+        esc.apply_retried(entry, "aiops-fix-order-a1-retry1", "alice")
+        before = len(entry["history"])
+        esc.apply_retry_outcome(entry, "RUNNING", "system:retry-tracking")
+        self.assertEqual(entry["status"], "retrying")
+        self.assertEqual(len(entry["history"]), before)
 
     def test_re_escalate_marks_once(self) -> None:
         entry = esc.new_entry(_flow())
@@ -171,10 +243,20 @@ class DemoStoreTest(unittest.TestCase):
     def test_closed_entry_not_reopened_by_sync(self) -> None:
         esc.sync_from_flows([_flow()])
         entry = esc.get("esc-aiops-fix-order-a1")
-        esc.apply_close(entry, "alice", "")
+        _close(entry)
         esc.persist_entry(entry)
         self.assertEqual(esc.sync_from_flows([_flow()]), 0)
         self.assertEqual(esc.get("esc-aiops-fix-order-a1")["status"], "closed")
+
+    def test_retry_flow_not_registered_as_duplicate_todo(self) -> None:
+        """重试流程再次 ESCALATED 时由原待办重开，不再另开重复待办。"""
+        esc.sync_from_flows([_flow()])
+        entry = esc.get("esc-aiops-fix-order-a1")
+        esc.apply_retried(entry, "aiops-fix-order-a1-retry1", "alice")
+        esc.persist_entry(entry)
+        flows = [_flow(wf_id="aiops-fix-order-a1-retry1")]
+        self.assertEqual(esc.sync_from_flows(flows), 0)
+        self.assertEqual(len(esc.list_all()), 1)
 
     def test_list_filters_and_orders_desc(self) -> None:
         first = esc.new_entry(_flow(wf_id="wf-1"))
@@ -186,7 +268,7 @@ class DemoStoreTest(unittest.TestCase):
         self.assertEqual(
             [e["id"] for e in esc.list_all()], ["esc-wf-2", "esc-wf-1"]
         )
-        esc.apply_close(second, "alice", "")
+        _close(second)
         esc.persist_entry(second)
         self.assertEqual([e["id"] for e in esc.list_all("open")], ["esc-wf-1"])
 
@@ -199,12 +281,39 @@ class DemoStoreTest(unittest.TestCase):
         self.assertEqual(s["total"], 2)
         self.assertEqual(s["open"], 1)
         self.assertEqual(s["assigned"], 1)
+        self.assertEqual(s["retrying"], 0)
         self.assertEqual(s["closed"], 0)
         self.assertEqual(s["sla_minutes"], esc.DEFAULT_SLA_MINUTES)
 
     def test_write_is_atomic_no_tmp_left(self) -> None:
         esc.sync_from_flows([_flow()])
         self.assertEqual(list(self.path.parent.glob("*.tmp")), [])
+
+    def test_demo_cas_rejects_stale_version(self) -> None:
+        """并发旧版本写入返回冲突，不覆盖新状态（M3）。"""
+        esc.sync_from_flows([_flow()])
+        stale = esc.get("esc-aiops-fix-order-a1")
+        fresh = esc.get("esc-aiops-fix-order-a1")
+        esc.apply_assign(fresh, "alice", "bob")
+        esc.persist_entry(fresh)  # version 1 → 2
+
+        esc.apply_assign(stale, "mallory", "bob")
+        with self.assertRaises(esc.EscalationConflictError):
+            esc.persist_entry(stale, expected_version=1)
+        self.assertEqual(esc.get("esc-aiops-fix-order-a1")["assignee"], "alice")
+        self.assertEqual(esc.get("esc-aiops-fix-order-a1")["version"], 2)
+
+    def test_version_increments_on_each_write(self) -> None:
+        esc.sync_from_flows([_flow()])
+        entry = esc.get("esc-aiops-fix-order-a1")
+        self.assertEqual(entry["version"], 1)
+        esc.apply_assign(entry, "alice", "bob")
+        esc.persist_entry(entry)
+        self.assertEqual(entry["version"], 2)
+        reloaded = esc.get("esc-aiops-fix-order-a1")
+        esc.apply_plan(reloaded, "观察 30 分钟", "bob")
+        esc.persist_entry(reloaded)
+        self.assertEqual(reloaded["version"], 3)
 
 
 class SlaSweepTest(unittest.TestCase):
@@ -240,21 +349,86 @@ class SlaSweepTest(unittest.TestCase):
         self.assertEqual(esc.due_for_re_escalation(), [])
 
         entry["re_escalated"] = False
-        esc.apply_close(entry, "alice", "")
+        _close(entry)
         esc.persist_entry(entry)
         self.assertEqual(esc.due_for_re_escalation(), [])  # 已关闭：不再巡检
 
-    def test_sweep_sends_once_per_entry(self) -> None:
+    def test_retrying_pauses_sla(self) -> None:
+        """重试运行中：原待办不再重复升级（等新流程终态）。"""
+        entry = self._seed_overdue()
+        esc.apply_retried(entry, "wf-old-retry1", "alice")
+        esc.persist_entry(entry)
+        self.assertEqual(esc.due_for_re_escalation(), [])
+
+    def test_sweep_sends_once_after_live_delivery(self) -> None:
         self._seed_overdue()
         with mock.patch.object(
-            esc, "_send_re_escalation", return_value={"mode": "demo"}
+            esc, "_send_re_escalation", return_value={"mode": "live"}
         ) as sender:
             first = esc.sweep_due()
             second = esc.sweep_due()
         self.assertEqual(len(first), 1)
         self.assertEqual(second, [])
         sender.assert_called_once()
-        self.assertTrue(esc.get("esc-wf-old")["re_escalated"])
+        entry = esc.get("esc-wf-old")
+        self.assertTrue(entry["re_escalated"])
+        self.assertEqual(entry["notify_mode"], "live")
+        self.assertEqual(entry["notify_attempts"], 1)
+        self.assertIsNone(entry["notify_next_retry_at"])
+
+    def test_recorded_is_not_marked_notified_and_retries_after_backoff(self) -> None:
+        """仅留档不算送达：保持 overdue，按退避重试，后续 live 才完成升级。"""
+        self._seed_overdue()
+        now = datetime.now(timezone.utc)
+        with mock.patch.object(
+            esc, "_send_re_escalation", return_value={"mode": "recorded"}
+        ):
+            first = esc.sweep_due(now)
+            in_backoff = esc.sweep_due(now + timedelta(seconds=30))
+        self.assertEqual(len(first), 1)
+        self.assertEqual(in_backoff, [])  # 退避窗口内不轰炸
+        entry = esc.get("esc-wf-old")
+        self.assertFalse(entry["re_escalated"])
+        self.assertEqual(entry["notify_mode"], "recorded")
+        self.assertEqual(entry["notify_attempts"], 1)
+        self.assertIsNotNone(entry["notify_next_retry_at"])
+        self.assertEqual(esc.stats()["notify_pending"], 1)
+
+        with mock.patch.object(
+            esc, "_send_re_escalation", return_value={"mode": "live"}
+        ) as sender:
+            third = esc.sweep_due(now + timedelta(seconds=61))
+        self.assertEqual(len(third), 1)
+        sender.assert_called_once()
+        entry = esc.get("esc-wf-old")
+        self.assertTrue(entry["re_escalated"])
+        self.assertEqual(entry["notify_mode"], "live")
+        self.assertEqual(entry["notify_attempts"], 2)
+        self.assertEqual(esc.stats()["notify_pending"], 0)
+
+    def test_failed_delivery_records_error_and_keeps_overdue(self) -> None:
+        self._seed_overdue()
+        with mock.patch.object(
+            esc,
+            "_send_re_escalation",
+            return_value={"mode": "failed", "error": "机器人应答非零 code=19001"},
+        ):
+            processed = esc.sweep_due()
+        self.assertEqual(len(processed), 1)
+        entry = esc.get("esc-wf-old")
+        self.assertFalse(entry["re_escalated"])
+        self.assertEqual(entry["notify_mode"], "failed")
+        self.assertIn("19001", entry["notify_error"])
+        self.assertIsNotNone(entry["notify_next_retry_at"])
+        self.assertTrue(esc_routes._decorate(entry)["overdue"])  # 未送达仍保持超时
+
+    def test_notify_backoff_caps_at_one_hour(self) -> None:
+        self.assertEqual(esc.notify_backoff_seconds(1), 60)
+        self.assertEqual(esc.notify_backoff_seconds(2), 300)
+        self.assertEqual(esc.notify_backoff_seconds(3), 900)
+        self.assertEqual(esc.notify_backoff_seconds(4), 1800)
+        self.assertEqual(esc.notify_backoff_seconds(5), 3600)
+        self.assertEqual(esc.notify_backoff_seconds(99), 3600)
 
     def test_sla_minutes_env_override_and_fallback(self) -> None:
         with mock.patch.dict(os.environ, {"AIOPS_ESCALATION_SLA_MINUTES": "5"}):
@@ -317,6 +491,43 @@ class ProductionDbBackendTest(unittest.TestCase):
         self.assertEqual(loaded["resolution"]["verdict"], "CORRECT")
         self.assertEqual(loaded["resolution"]["knowledge_status"], "DRAFT")
         self.assertEqual(esc.knowledge_status(loaded), "DRAFT")
+
+    def test_retry_notify_and_version_roundtrip(self) -> None:
+        """M3：重试跟踪/通知送达/版本号在 production 后端完整往返。"""
+        entry = esc.new_entry(_flow())
+        esc.persist_entry(entry)
+        esc.apply_retried(entry, "aiops-fix-order-a1-retry1", "alice")
+        now = datetime.now(timezone.utc)
+        esc.apply_notify_result(
+            entry, {"mode": "failed", "error": "connect timeout"}, 30, now
+        )
+        esc.persist_entry(entry)
+
+        loaded = esc.get("esc-aiops-fix-order-a1")
+        self.assertEqual(loaded["status"], "retrying")
+        self.assertEqual(loaded["retry_wf_id"], "aiops-fix-order-a1-retry1")
+        self.assertEqual(loaded["parent_run_id"], "run-a1")
+        self.assertTrue(loaded["retry_started_at"])
+        self.assertEqual(loaded["notify_mode"], "failed")
+        self.assertEqual(loaded["notify_attempts"], 1)
+        self.assertEqual(loaded["notify_error"], "connect timeout")
+        self.assertTrue(loaded["notify_next_retry_at"])
+        self.assertEqual(loaded["version"], 2)
+
+    def test_cas_rejects_stale_version(self) -> None:
+        entry = esc.new_entry(_flow())
+        esc.persist_entry(entry)
+        stale = esc.get("esc-aiops-fix-order-a1")
+        fresh = esc.get("esc-aiops-fix-order-a1")
+        esc.apply_assign(fresh, "alice", "bob")
+        esc.persist_entry(fresh)
+
+        esc.apply_assign(stale, "mallory", "bob")
+        with self.assertRaises(esc.EscalationConflictError):
+            esc.persist_entry(stale, expected_version=1)
+        loaded = esc.get("esc-aiops-fix-order-a1")
+        self.assertEqual(loaded["assignee"], "alice")
+        self.assertEqual(loaded["version"], 2)
 
 
 _REQUIREMENT_SESSION = {
@@ -393,8 +604,8 @@ class RetryRouteTest(unittest.TestCase):
         request.state.identity.user = user
         return request
 
-    def _retry(self, esc_id: str) -> dict:
-        return asyncio.run(esc_routes.api_escalation_retry(self._request(), esc_id))
+    def _retry(self, esc_id: str, body=None) -> dict:
+        return asyncio.run(esc_routes.api_escalation_retry(self._request(), esc_id, body))
 
     def test_requirement_flow_entry_restarts_requirement_workflow(self) -> None:
         """① 流程本身即需求流（aiops-req-*）→ 按 approved.wf_id 精确反查后重启需求流。"""
@@ -413,8 +624,13 @@ class RetryRouteTest(unittest.TestCase):
         self.assertIn("首页增加用户信息入口", task.plan)
         self.assertEqual(task.acceptance, ["首页可见入口"])
         entry = esc.get("esc-aiops-req-ra-app-19-v1")
-        self.assertEqual(entry["status"], "closed")
+        # M3：启动重试不立即关闭，进入 retrying 等待新流程终态
+        self.assertEqual(entry["status"], "retrying")
+        self.assertEqual(entry["retry_wf_id"], "aiops-req-ra-app-19-v1-req-19-retry1")
+        self.assertEqual(entry["parent_run_id"], "run-req-19")
+        self.assertTrue(entry["retry_started_at"])
         self.assertIn("aiops-req-ra-app-19-v1-req-19-retry1", entry["note"])
+        self.assertEqual(data["retry_wf_id"], "aiops-req-ra-app-19-v1-req-19-retry1")
         self.assertEqual(self.audit.call_args.kwargs["params"]["mode"], "requirement")
         context = self.start_req.call_args.kwargs["evidence_context"]
         self.assertEqual(context["case_id"], "ra-app-19")
@@ -455,6 +671,36 @@ class RetryRouteTest(unittest.TestCase):
         self.assertEqual(context["parent_run_id"], "run-a1")
         self.assertEqual(context["parent_wf_id"], "aiops-fix-order-a1")
         self.assertEqual(context["retry_wf_id"], "aiops-fix-order-a1-retry1")
+
+    def test_retry_while_retrying_conflicts(self) -> None:
+        """M3：重试跟踪中再次重试返回 409，不重复启动新流程。"""
+        self.sessions.return_value = [dict(_REQUIREMENT_SESSION)]
+        self.start_req.return_value = "aiops-req-ra-app-19-v1-req-19-retry1"
+        esc.persist_entry(esc.new_entry(_req_flow("aiops-req-ra-app-19-v1", "req-19")))
+        self._retry("esc-aiops-req-ra-app-19-v1")
+
+        with self.assertRaises(ApiError) as ctx:
+            self._retry("esc-aiops-req-ra-app-19-v1")
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("重试跟踪", ctx.exception.message)
+        self.assertEqual(self.start_req.call_count, 1)
+
+    def test_retry_stale_version_409(self) -> None:
+        """M3 CAS：携带旧版本重试返回 409，且新流程不会被错误绑定。"""
+        self.sessions.return_value = []
+        self.start_alert.return_value = "aiops-fix-order-a1-retry1"
+        esc.persist_entry(esc.new_entry(_flow(wf_id="aiops-fix-order-a1")))
+        # 并发写入把版本推进到 2
+        fresh = esc.get("esc-aiops-fix-order-a1")
+        esc.apply_assign(fresh, "bob", "alice")
+        esc.persist_entry(fresh)
+
+        with self.assertRaises(ApiError) as ctx:
+            self._retry("esc-aiops-fix-order-a1", esc_routes.RetryBody(version=1))
+        self.assertEqual(ctx.exception.status_code, 409)
+        loaded = esc.get("esc-aiops-fix-order-a1")
+        self.assertEqual(loaded["status"], "assigned")
+        self.assertEqual(loaded["retry_wf_id"], "")
 
     def test_requirement_like_without_session_guides_human(self) -> None:
         """疑似需求来源但会话缺失：409 引导（不再按告警流空转）。"""
@@ -509,6 +755,114 @@ class RetryRouteTest(unittest.TestCase):
             {"wf_id": "aiops-fix-nl2sql-req-19", "alert_id": "req-19", "service": "nl2sql"}
         )
         self.assertEqual(resolved["id"], "ra-app-19")
+
+
+class RetryTrackingTest(unittest.TestCase):
+    """M3 后台重试终态跟踪：DONE 自动关闭 / 失败重开 / RUNNING 保持 / 并发冲突跳过。"""
+
+    def setUp(self) -> None:
+        from bff import app as bff_app
+
+        self.bff_app = bff_app
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        path_patcher = mock.patch.object(
+            esc, "DATA_PATH", Path(self._tmp.name) / "escalations.json"
+        )
+        path_patcher.start()
+        self.addCleanup(path_patcher.stop)
+        audit_patcher = mock.patch.object(bff_app.audit, "write_audit")
+        self.audit = audit_patcher.start()
+        self.addCleanup(audit_patcher.stop)
+
+    def _seed_retrying(self, assignee: str = "alice") -> dict:
+        entry = esc.new_entry(_flow(wf_id="aiops-fix-order-a1"))
+        if assignee:
+            esc.apply_assign(entry, assignee, "bob")
+        esc.persist_entry(entry)
+        esc.apply_retried(entry, "aiops-fix-order-a1-retry1", "bob")
+        esc.persist_entry(entry)
+        return entry
+
+    def _refresh(self, detail: dict, fetch=None) -> list[dict]:
+        async def default_fetch(wf_id: str) -> dict:
+            self.assertEqual(wf_id, "aiops-fix-order-a1-retry1")
+            return detail
+
+        return asyncio.run(self.bff_app.refresh_retry_outcomes(fetch or default_fetch))
+
+    def test_done_auto_closes_with_structured_resolution(self) -> None:
+        self._seed_retrying()
+        detail = {
+            "exec_status": "COMPLETED",
+            "result": {
+                "stage": "DONE",
+                "root_cause": {"summary": "连接池耗尽"},
+                "patch": {"description": "扩大连接池上限"},
+            },
+        }
+        changed = self._refresh(detail)
+
+        self.assertEqual(len(changed), 1)
+        loaded = esc.get("esc-aiops-fix-order-a1")
+        self.assertEqual(loaded["status"], "closed")
+        self.assertEqual(loaded["retry_outcome"], "DONE")
+        resolution = loaded["resolution"]
+        self.assertEqual(resolution["close_reason"], "RESOLVED")
+        self.assertEqual(resolution["source"], "retry-tracking")
+        self.assertEqual(resolution["closed_by"], "system:retry-tracking")
+        self.assertEqual(resolution["actual_root_cause"], "连接池耗尽")
+        self.assertIn("扩大连接池上限", resolution["actual_action"])
+        self.assertFalse(resolution["knowledge_candidate"])
+        self.assertEqual(loaded["history"][-1]["action"], "retry:done")
+        self.assertEqual(self.audit.call_args.kwargs["action"], "escalation:retry-outcome")
+
+    def test_failed_outcome_reopens_and_resets_notify_cycle(self) -> None:
+        entry = self._seed_retrying()
+        esc.apply_notify_result(entry, {"mode": "failed", "error": "timeout"}, 30)
+        esc.persist_entry(entry)
+
+        changed = self._refresh(
+            {"exec_status": "COMPLETED", "result": {"stage": "ESCALATED", "gate_events": ["gate1:blocked:low"]}}
+        )
+
+        self.assertEqual(len(changed), 1)
+        loaded = esc.get("esc-aiops-fix-order-a1")
+        self.assertEqual(loaded["status"], "assigned")  # 有责任人则回到 assigned
+        self.assertEqual(loaded["retry_outcome"], "ESCALATED")
+        self.assertIn("重试流程", loaded["note"])
+        self.assertFalse(loaded["re_escalated"])
+        self.assertEqual(loaded["notify_mode"], "")
+        self.assertEqual(loaded["notify_attempts"], 0)
+        self.assertIsNone(loaded["notify_next_retry_at"])
+        self.assertEqual(loaded["history"][-1]["action"], "retry:reopen")
+
+    def test_running_keeps_tracking_without_write(self) -> None:
+        self._seed_retrying()
+        changed = self._refresh({"exec_status": "RUNNING", "result": {"stage": "FIXING"}})
+
+        self.assertEqual(changed, [])
+        loaded = esc.get("esc-aiops-fix-order-a1")
+        self.assertEqual(loaded["status"], "retrying")
+        self.assertEqual(loaded["retry_wf_id"], "aiops-fix-order-a1-retry1")
+        self.assertFalse(self.audit.called)
+
+    def test_concurrent_update_is_not_overwritten(self) -> None:
+        self._seed_retrying()
+
+        async def racing_fetch(wf_id: str) -> dict:
+            fresh = esc.get("esc-aiops-fix-order-a1")
+            esc.apply_plan(fresh, "并发人工修改", "carol")
+            esc.persist_entry(fresh)
+            return {"exec_status": "COMPLETED", "result": {"stage": "DONE"}}
+
+        changed = self._refresh({}, fetch=racing_fetch)
+
+        self.assertEqual(changed, [])
+        loaded = esc.get("esc-aiops-fix-order-a1")
+        self.assertEqual(loaded["status"], "retrying")  # 不被旧快照回写覆盖
+        self.assertEqual(loaded["plan"], "并发人工修改")
+        self.assertFalse(self.audit.called)
 
 
 class CategoryTest(unittest.TestCase):
@@ -679,12 +1033,13 @@ class ResolutionTest(unittest.TestCase):
         self.assertIn("已修复", entry["history"][-1]["detail"])
         self.assertEqual(entry["history"][-1]["action"], "close")
 
-    def test_legacy_close_keeps_note_only(self) -> None:
-        """旧客户端（仅备注）不产生结构化记录，也不进入知识候选。"""
+    def test_legacy_closed_record_without_resolution_stays_readable(self) -> None:
+        """M3：历史已关闭记录（仅备注）保持原样可读，但不参与知识审核。"""
         entry = esc.new_entry(_flow())
-        esc.apply_close(entry, "alice", "手动处理完毕")
+        entry["status"] = "closed"
+        entry["note"] = "历史手动处理完毕"
+        entry["closed_at"] = entry["escalated_at"]
         self.assertIsNone(entry["resolution"])
-        self.assertEqual(entry["note"], "手动处理完毕")
         self.assertEqual(esc.knowledge_status(entry), "")
         with self.assertRaises(esc.EscalationStoreError):
             esc.apply_knowledge_review(entry, "approve", "admin")
@@ -695,7 +1050,14 @@ class ResolutionTest(unittest.TestCase):
         self.assertEqual(entry["plan"], "值班核对日志后再重试")
         self.assertEqual(entry["status"], "open")
         self.assertEqual(entry["history"][-1]["action"], "plan")
-        esc.apply_close(entry, "alice", "误报")
+        esc.apply_close(
+            entry,
+            "alice",
+            "",
+            esc.build_resolution(
+                _resolution_payload(close_reason="FALSE_POSITIVE", note="误报"), "alice"
+            ),
+        )
         with self.assertRaises(esc.EscalationStoreError):
             esc.apply_plan(entry, "x", "alice")
 
@@ -824,13 +1186,31 @@ class CloseReviewRouteTest(unittest.TestCase):
         self.assertEqual(revoked["knowledge_export"]["exported"], 0)
         self.assertEqual(json.loads(self.knowledge_path.read_text(encoding="utf-8")), [])
 
-    def test_legacy_close_without_body_keeps_note_only(self) -> None:
-        response = asyncio.run(
-            esc_routes.api_escalation_close(self._request(), "esc-aiops-fix-order-a1", None)
-        )
-        self.assertTrue(response["ok"])
-        self.assertIsNone(response["escalation"]["resolution"])
-        self.assertNotIn("knowledge_export", response)
+    def test_close_without_body_rejected_with_migration_error(self) -> None:
+        """M3：仅备注弱关闭已停用，旧客户端收到明确迁移错误（400）。"""
+        with self.assertRaises(ApiError) as ctx:
+            asyncio.run(
+                esc_routes.api_escalation_close(
+                    self._request(), "esc-aiops-fix-order-a1", None
+                )
+            )
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("结构化", ctx.exception.message)
+        self.assertIn("仅备注", ctx.exception.message)
+        self.assertEqual(esc.get("esc-aiops-fix-order-a1")["status"], "open")
+
+    def test_close_stale_version_conflicts_without_overwrite(self) -> None:
+        """M3 CAS：旧版本关闭返回 409，不覆盖并发写入的新状态。"""
+        fresh = esc.get("esc-aiops-fix-order-a1")
+        esc.apply_assign(fresh, "bob", "alice")
+        esc.persist_entry(fresh)
+        with self.assertRaises(ApiError) as ctx:
+            self._close({**_resolution_payload(), "version": 1})
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("版本", ctx.exception.message)
+        loaded = esc.get("esc-aiops-fix-order-a1")
+        self.assertEqual(loaded["status"], "assigned")
+        self.assertIsNone(loaded["resolution"])
 
     def test_plan_route_updates_open_entry(self) -> None:
         response = asyncio.run(

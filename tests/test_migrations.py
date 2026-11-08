@@ -107,6 +107,55 @@ class MigrationBaselineTest(unittest.TestCase):
         self.assertIn("kind", columns)
         self.assertIn("risk", columns)
 
+    def test_escalation_retry_notify_added_and_downgraded(self) -> None:
+        """M3：escalations 重试跟踪/通知送达/版本列；降级 0006 移除，重放升级可重建。"""
+        command.upgrade(self._config(), "head")
+        engine = db.get_engine()
+        columns = {item["name"] for item in inspect(engine).get_columns("escalations")}
+        for name in (
+            "retry_wf_id",
+            "parent_run_id",
+            "retry_started_at",
+            "retry_outcome",
+            "retry_outcome_at",
+            "notify_mode",
+            "notify_attempts",
+            "notify_next_retry_at",
+            "notify_error",
+            "notify_updated_at",
+            "version",
+        ):
+            with self.subTest(column=name):
+                self.assertIn(name, columns)
+        # 新状态 retrying 可直接写入（SQLite 为 VARCHAR；MySQL 由迁移扩枚举）
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO escalations (id, wf_id, alert_id, service, auto_reason,"
+                    " alert, status, assignee, note, escalated_at, updated_at,"
+                    " re_escalated, history, version)"
+                    " VALUES ('esc-t', 'wf-t', 'a-t', 'order', 'r', '{}', 'retrying',"
+                    " '', '', '2026-11-01T00:00:00+00:00', '2026-11-01T00:00:00+00:00',"
+                    " 0, '[]', 1)"
+                )
+            )
+            self.assertEqual(
+                conn.execute(
+                    text("SELECT status FROM escalations WHERE id = 'esc-t'")
+                ).scalar(),
+                "retrying",
+            )
+
+        command.downgrade(self._config(), "20261101_0006")
+        columns = {item["name"] for item in inspect(engine).get_columns("escalations")}
+        self.assertNotIn("retry_wf_id", columns)
+        self.assertNotIn("version", columns)
+
+        command.upgrade(self._config(), "head")
+        columns = {item["name"] for item in inspect(engine).get_columns("escalations")}
+        self.assertIn("retry_wf_id", columns)
+        self.assertIn("version", columns)
+
 
 if __name__ == "__main__":
     unittest.main()

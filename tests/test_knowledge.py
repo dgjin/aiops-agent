@@ -113,8 +113,11 @@ class CollectTest(unittest.TestCase):
         self.assertEqual(skipped, 1)
 
     def test_legacy_close_has_no_record(self) -> None:
+        """历史仅备注关闭（M3 前产生，resolution=NULL）不进入知识库导出。"""
         entry = esc.new_entry(_flow("wf-legacy"))
-        esc.apply_close(entry, "alice", "手动处理")
+        entry["status"] = "closed"
+        entry["note"] = "手动处理"
+        entry["closed_at"] = entry["escalated_at"]
         self.assertEqual(knowledge.collect([entry]), ([], 0))
         self.assertIsNone(knowledge.record_from_entry(entry))
 
