@@ -67,6 +67,26 @@ class MigrationBaselineTest(unittest.TestCase):
         columns = {item["name"] for item in inspect(engine).get_columns("monitored_apps")}
         self.assertIn("depends_on", columns)
 
+    def test_workflow_commands_added_and_downgraded(self) -> None:
+        """M2：命令 outbox 表与 audit_params 列；降级到 0005 移除，重放升级可重建。"""
+        command.upgrade(self._config(), "head")
+        engine = db.get_engine()
+        self.assertIn("workflow_commands", inspect(engine).get_table_names())
+        columns = {item["name"] for item in inspect(engine).get_columns("workflow_commands")}
+        self.assertIn("command_id", columns)
+        self.assertIn("audit_params", columns)
+        indexes = {item["name"] for item in inspect(engine).get_indexes("workflow_commands")}
+        self.assertIn("idx_commands_status_next", indexes)
+        self.assertIn("idx_commands_wf", indexes)
+
+        command.downgrade(self._config(), "20261101_0005")
+        self.assertNotIn("workflow_commands", inspect(engine).get_table_names())
+
+        command.upgrade(self._config(), "head")
+        self.assertIn("workflow_commands", inspect(engine).get_table_names())
+        columns = {item["name"] for item in inspect(engine).get_columns("workflow_commands")}
+        self.assertIn("audit_params", columns)
+
     def test_runs_kind_risk_added_and_downgraded(self) -> None:
         """M5：kind/risk 列与联合索引；降级到 0003 移除，重放升级幂等。"""
         command.upgrade(self._config(), "head")

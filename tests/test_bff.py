@@ -15,7 +15,7 @@ from unittest import mock
 from fastapi.responses import JSONResponse
 
 from bff import aggregator, app, audit, config_items, middleware, temporal_gateway
-from bff.deps import ApiError
+from bff.deps import ApiError, gw as shared_gw
 from bff.routes import chatops as chatops_routes
 from bff.routes import flows as flows_routes
 from bff.routes import im_callback as im_callback_routes
@@ -1441,7 +1441,7 @@ class ImCommandEndpointTest(unittest.IsolatedAsyncioTestCase):
                  mock.patch.object(chatops_routes.gw, "signal_approval", mock.AsyncMock()) as signal, \
                  mock.patch.object(chatops_routes.gw, "invalidate_cache") as invalidate, \
                  mock.patch.object(chatops_routes.kill_switch, "get_state", return_value={"active": False}), \
-                 mock.patch.object(chatops_routes.audit, "DATA_DIR", Path(tmp)):
+                 mock.patch.object(audit, "DATA_DIR", Path(tmp)):
                 payload = await chatops_routes.api_im_command(self._im_request(),
                     {"sender": "alice", "text": f"批准 {self._WF_ID}"}
                 )
@@ -1467,7 +1467,7 @@ class ImCommandEndpointTest(unittest.IsolatedAsyncioTestCase):
                  mock.patch.object(chatops_routes.gw, "approval_receipt", mock.AsyncMock(return_value=("accepted", accepted))) as receipt, \
                  mock.patch.object(chatops_routes.gw, "invalidate_cache"), \
                  mock.patch.object(chatops_routes.kill_switch, "get_state", return_value={"active": False}), \
-                 mock.patch.object(chatops_routes.audit, "DATA_DIR", Path(tmp)):
+                 mock.patch.object(audit, "DATA_DIR", Path(tmp)):
                 payload = await chatops_routes.api_im_command(self._im_request(),
                     {"sender": "alice", "text": f"批准 {self._WF_ID}"}
                 )
@@ -1504,7 +1504,7 @@ class ImCommandEndpointTest(unittest.IsolatedAsyncioTestCase):
              mock.patch.object(chatops_routes.gw, "flow_detail", mock.AsyncMock(return_value=self._detail(status=status))), \
              mock.patch.object(chatops_routes.gw, "signal_approval", mock.AsyncMock()) as signal, \
              mock.patch.object(chatops_routes.kill_switch, "get_state", return_value={"active": False}), \
-             mock.patch.object(chatops_routes.audit, "write_audit") as write_audit:
+             mock.patch.object(audit, "write_audit") as write_audit:
             payload = await chatops_routes.api_im_command(self._im_request(),
                 {"sender": "alice", "text": f"批准 {self._WF_ID}"}
             )
@@ -1523,7 +1523,7 @@ class ImCommandEndpointTest(unittest.IsolatedAsyncioTestCase):
              mock.patch.object(chatops_routes.gw, "approval_receipt", mock.AsyncMock(return_value=("rejected", rejection))), \
              mock.patch.object(chatops_routes.gw, "invalidate_cache"), \
              mock.patch.object(chatops_routes.kill_switch, "get_state", return_value={"active": False}), \
-             mock.patch.object(chatops_routes.audit, "write_audit") as write_audit:
+             mock.patch.object(audit, "write_audit") as write_audit:
             payload = await chatops_routes.api_im_command(self._im_request(),
                 {"sender": "alice", "text": f"批准 {self._WF_ID}"}
             )
@@ -1774,12 +1774,12 @@ class CardCallbackEndpointTest(unittest.IsolatedAsyncioTestCase):
     async def test_approve_happy_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self._channel_env(), \
-                 mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
-                 mock.patch.object(im_callback_routes.gw, "flow_detail", mock.AsyncMock(return_value=self._detail())), \
-                 mock.patch.object(im_callback_routes.gw, "signal_approval", mock.AsyncMock()) as signal, \
-                 mock.patch.object(im_callback_routes.gw, "invalidate_cache") as invalidate, \
+                 mock.patch.object(shared_gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+                 mock.patch.object(shared_gw, "flow_detail", mock.AsyncMock(return_value=self._detail())), \
+                 mock.patch.object(shared_gw, "signal_approval", mock.AsyncMock()) as signal, \
+                 mock.patch.object(shared_gw, "invalidate_cache") as invalidate, \
                  mock.patch.object(im_callback_routes.kill_switch, "get_state", return_value={"active": False}), \
-                 mock.patch.object(im_callback_routes.audit, "DATA_DIR", Path(tmp)):
+                 mock.patch.object(audit, "DATA_DIR", Path(tmp)):
                 reply = await im_callback_routes.api_im_card_callback(self._v2())
                 rows = audit.read_audit()
         self.assertEqual(reply["toast"]["type"], "success")
@@ -1798,12 +1798,12 @@ class CardCallbackEndpointTest(unittest.IsolatedAsyncioTestCase):
     async def test_second_approval_approve(self):
         detail = self._detail(status=self._status(needs_second=True, approval="approve"))
         with self._channel_env(), \
-             mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
-             mock.patch.object(im_callback_routes.gw, "flow_detail", mock.AsyncMock(return_value=detail)), \
-             mock.patch.object(im_callback_routes.gw, "signal_second_approval", mock.AsyncMock()) as signal, \
-             mock.patch.object(im_callback_routes.gw, "invalidate_cache"), \
+             mock.patch.object(shared_gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+             mock.patch.object(shared_gw, "flow_detail", mock.AsyncMock(return_value=detail)), \
+             mock.patch.object(shared_gw, "signal_second_approval", mock.AsyncMock()) as signal, \
+             mock.patch.object(shared_gw, "invalidate_cache"), \
              mock.patch.object(im_callback_routes.kill_switch, "get_state", return_value={"active": False}), \
-             mock.patch.object(im_callback_routes.audit, "write_audit"):
+             mock.patch.object(audit, "write_audit"):
             reply = await im_callback_routes.api_im_card_callback(self._v2(gate="second_approval"))
         self.assertEqual(reply["toast"]["type"], "success")
         self.assertIn("二级审批批准命令已提交", reply["toast"]["content"])
@@ -1811,7 +1811,7 @@ class CardCallbackEndpointTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_unmapped_operator_cannot_approve(self):
         with self._channel_env(users={}), \
-             mock.patch.object(im_callback_routes.gw, "signal_approval", mock.AsyncMock()) as signal:
+             mock.patch.object(shared_gw, "signal_approval", mock.AsyncMock()) as signal:
             reply = await im_callback_routes.api_im_card_callback(self._v2())
         self.assertEqual(reply["toast"]["type"], "error")
         self.assertIn("权限不足", reply["toast"]["content"])
@@ -1831,8 +1831,8 @@ class CardCallbackEndpointTest(unittest.IsolatedAsyncioTestCase):
         ]
         for detail, expected in cases:
             with self._channel_env(), \
-                 mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
-                 mock.patch.object(im_callback_routes.gw, "flow_detail", mock.AsyncMock(return_value=detail)), \
+                 mock.patch.object(shared_gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+                 mock.patch.object(shared_gw, "flow_detail", mock.AsyncMock(return_value=detail)), \
                  mock.patch.object(im_callback_routes.kill_switch, "get_state", return_value={"active": False}):
                 reply = await im_callback_routes.api_im_card_callback(self._v2())
             self.assertEqual(reply["toast"]["type"], "error", expected)
@@ -1841,12 +1841,12 @@ class CardCallbackEndpointTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_flow_not_found_and_ambiguous(self):
         with self._channel_env(), \
-             mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=[])):
+             mock.patch.object(shared_gw, "list_flows", mock.AsyncMock(return_value=[])):
             reply = await im_callback_routes.api_im_card_callback(self._v2())
         self.assertIn("未找到流程", reply["toast"]["content"])
         items = [dict(self._WAIT_ITEM), {**self._WAIT_ITEM, "wf_id": self._WF_ID + "-2"}]
         with self._channel_env(), \
-             mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=items)):
+             mock.patch.object(shared_gw, "list_flows", mock.AsyncMock(return_value=items)):
             reply = await im_callback_routes.api_im_card_callback(self._v2(wf_id="aiops-fix-order"))
         self.assertIn("不唯一", reply["toast"]["content"])
 
@@ -1895,12 +1895,12 @@ class CardCallbackEndpointTest(unittest.IsolatedAsyncioTestCase):
             },
         }
         with self._channel_env(), \
-             mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
-             mock.patch.object(im_callback_routes.gw, "flow_detail", mock.AsyncMock(return_value=self._detail())), \
-             mock.patch.object(im_callback_routes.gw, "signal_approval", mock.AsyncMock()) as signal, \
-             mock.patch.object(im_callback_routes.gw, "invalidate_cache"), \
+             mock.patch.object(shared_gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+             mock.patch.object(shared_gw, "flow_detail", mock.AsyncMock(return_value=self._detail())), \
+             mock.patch.object(shared_gw, "signal_approval", mock.AsyncMock()) as signal, \
+             mock.patch.object(shared_gw, "invalidate_cache"), \
              mock.patch.object(im_callback_routes.kill_switch, "get_state", return_value={"active": False}), \
-             mock.patch.object(im_callback_routes.audit, "write_audit"):
+             mock.patch.object(audit, "write_audit"):
             reply = await im_callback_routes.api_im_card_callback(payload)
         self.assertEqual(reply["toast"]["type"], "success")
         self.assertIn("一级审批驳回命令已提交", reply["toast"]["content"])
@@ -1912,13 +1912,13 @@ class CardCallbackEndpointTest(unittest.IsolatedAsyncioTestCase):
         evidence = {"case_id": "a-301", "diff_hash": "a" * 64, "run_id": "run-301"}
         accepted = {"command_id": "cmd-x", "gate": "approval", "decision": "approve"}
         with self._channel_env(), \
-             mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
-             mock.patch.object(im_callback_routes.gw, "flow_detail", mock.AsyncMock(return_value=self._detail(status=self._v2_status()))), \
-             mock.patch.object(im_callback_routes.gw, "signal_approval", mock.AsyncMock()) as signal, \
-             mock.patch.object(im_callback_routes.gw, "approval_receipt", mock.AsyncMock(return_value=("accepted", accepted))) as receipt, \
-             mock.patch.object(im_callback_routes.gw, "invalidate_cache"), \
+             mock.patch.object(shared_gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+             mock.patch.object(shared_gw, "flow_detail", mock.AsyncMock(return_value=self._detail(status=self._v2_status()))), \
+             mock.patch.object(shared_gw, "signal_approval", mock.AsyncMock()) as signal, \
+             mock.patch.object(shared_gw, "approval_receipt", mock.AsyncMock(return_value=("accepted", accepted))) as receipt, \
+             mock.patch.object(shared_gw, "invalidate_cache"), \
              mock.patch.object(im_callback_routes.kill_switch, "get_state", return_value={"active": False}), \
-             mock.patch.object(im_callback_routes.audit, "write_audit") as write_audit:
+             mock.patch.object(audit, "write_audit") as write_audit:
             reply = await im_callback_routes.api_im_card_callback(self._v2(evidence=evidence))
         self.assertEqual(reply["toast"]["type"], "success")
         self.assertIn("一级审批批准命令已提交", reply["toast"]["content"])
@@ -1938,7 +1938,7 @@ class CardCallbackEndpointTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_v2_reject_without_comment_rejected(self):
         with self._channel_env(), \
-             mock.patch.object(im_callback_routes.gw, "signal_approval", mock.AsyncMock()) as signal:
+             mock.patch.object(shared_gw, "signal_approval", mock.AsyncMock()) as signal:
             reply = await im_callback_routes.api_im_card_callback(self._v2(decision="reject"))
         self.assertEqual(reply["toast"]["type"], "error")
         self.assertIn("驳回必须填写审批意见", reply["toast"]["content"])
@@ -1946,11 +1946,11 @@ class CardCallbackEndpointTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_v2_self_approval_denied(self):
         with self._channel_env(users={self._OPERATOR: "operator", "alice": "operator"}), \
-             mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
-             mock.patch.object(im_callback_routes.gw, "flow_detail", mock.AsyncMock(return_value=self._detail(status=self._v2_status(requested_by=self._OPERATOR)))), \
-             mock.patch.object(im_callback_routes.gw, "signal_approval", mock.AsyncMock()) as signal, \
+             mock.patch.object(shared_gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+             mock.patch.object(shared_gw, "flow_detail", mock.AsyncMock(return_value=self._detail(status=self._v2_status(requested_by=self._OPERATOR)))), \
+             mock.patch.object(shared_gw, "signal_approval", mock.AsyncMock()) as signal, \
              mock.patch.object(im_callback_routes.kill_switch, "get_state", return_value={"active": False}), \
-             mock.patch.object(im_callback_routes.audit, "write_audit") as write_audit:
+             mock.patch.object(audit, "write_audit") as write_audit:
             reply = await im_callback_routes.api_im_card_callback(self._v2())
         self.assertEqual(reply["toast"]["type"], "error")
         self.assertIn("职责分离", reply["toast"]["content"])
@@ -1960,9 +1960,9 @@ class CardCallbackEndpointTest(unittest.IsolatedAsyncioTestCase):
     async def test_v2_stale_card_rejected(self):
         stale = {"case_id": "a-301", "diff_hash": "d" * 64, "run_id": "run-301"}
         with self._channel_env(), \
-             mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
-             mock.patch.object(im_callback_routes.gw, "flow_detail", mock.AsyncMock(return_value=self._detail(status=self._v2_status()))), \
-             mock.patch.object(im_callback_routes.gw, "signal_approval", mock.AsyncMock()) as signal, \
+             mock.patch.object(shared_gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+             mock.patch.object(shared_gw, "flow_detail", mock.AsyncMock(return_value=self._detail(status=self._v2_status()))), \
+             mock.patch.object(shared_gw, "signal_approval", mock.AsyncMock()) as signal, \
              mock.patch.object(im_callback_routes.kill_switch, "get_state", return_value={"active": False}):
             reply = await im_callback_routes.api_im_card_callback(self._v2(evidence=stale))
         self.assertEqual(reply["toast"]["type"], "error")
@@ -1972,13 +1972,13 @@ class CardCallbackEndpointTest(unittest.IsolatedAsyncioTestCase):
     async def test_v2_workflow_rejection_keeps_card(self):
         rejection = {"command_id": "cmd-x", "reason": "证据绑定已变化"}
         with self._channel_env(), \
-             mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
-             mock.patch.object(im_callback_routes.gw, "flow_detail", mock.AsyncMock(return_value=self._detail(status=self._v2_status()))), \
-             mock.patch.object(im_callback_routes.gw, "signal_approval", mock.AsyncMock()), \
-             mock.patch.object(im_callback_routes.gw, "approval_receipt", mock.AsyncMock(return_value=("rejected", rejection))), \
-             mock.patch.object(im_callback_routes.gw, "invalidate_cache"), \
+             mock.patch.object(shared_gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+             mock.patch.object(shared_gw, "flow_detail", mock.AsyncMock(return_value=self._detail(status=self._v2_status()))), \
+             mock.patch.object(shared_gw, "signal_approval", mock.AsyncMock()), \
+             mock.patch.object(shared_gw, "approval_receipt", mock.AsyncMock(return_value=("rejected", rejection))), \
+             mock.patch.object(shared_gw, "invalidate_cache"), \
              mock.patch.object(im_callback_routes.kill_switch, "get_state", return_value={"active": False}), \
-             mock.patch.object(im_callback_routes.audit, "write_audit") as write_audit:
+             mock.patch.object(audit, "write_audit") as write_audit:
             reply = await im_callback_routes.api_im_card_callback(self._v2())
         self.assertEqual(reply["toast"]["type"], "error")
         self.assertIn("未生效：证据绑定已变化", reply["toast"]["content"])
