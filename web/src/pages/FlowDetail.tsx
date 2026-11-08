@@ -5,9 +5,11 @@ import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api, describeError } from '../lib/api'
-import { cn, downloadJson, fmtDateTime, fmtDuration } from '../lib/format'
+import { cn, downloadJson, fmtDateTime, fmtDuration, shortHash } from '../lib/format'
 import { useWriteAction } from '../lib/actions'
 import { ActionButton } from '../components/ActionButton'
+import { ApprovalDialog, useApprovalDialog } from '../components/ApprovalDialog'
+import type { ApprovalHandle } from '../components/ApprovalDialog'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { CopyableId } from '../components/CopyableId'
 import { CountdownText } from '../components/CountdownText'
@@ -80,18 +82,57 @@ function ActionSummary({
   )
 }
 
+/** 审批入口：统一构造请求（证据绑定 + 职责分离提示），意见输入与提交由 ApprovalDialog 负责。 */
+function openApprovalDecision(
+  approval: ApprovalHandle,
+  status: StatusPayload,
+  wfId: string,
+  gate: 'approval' | 'second_approval',
+  decision: 'approve' | 'reject',
+) {
+  const first = gate === 'approval'
+  approval.open({
+    wfId,
+    gate,
+    decision,
+    binding: status.evidence_binding ?? null,
+    caseId: status.case_id || status.alert?.alert_id || '',
+    summary: (
+      <div className="space-y-1.5">
+        <ActionSummary
+          wfId={wfId}
+          service={status.alert?.service}
+          alertId={status.alert?.alert_id}
+          decision={
+            first
+              ? decision === 'approve'
+                ? '批准（进入公告窗口）'
+                : '驳回（转人工处理）'
+              : decision === 'approve'
+                ? '二级批准（受保护目录变更）'
+                : '二级驳回（转人工处理）'
+          }
+        />
+        {status.requested_by && (
+          <div className="text-[11px] text-idle">
+            发起人：{status.requested_by}（职责分离：发起人不得审批自己的变更）
+          </div>
+        )}
+      </div>
+    ),
+  })
+}
+
 /** 待审批操作面板（一级 / 二级）。 */
 function ApprovalPanel({
   wfId,
   status,
-  write,
+  approval,
 }: {
   wfId: string
   status: StatusPayload
-  write: WriteHandle
+  approval: ApprovalHandle
 }) {
-  const service = status.alert?.service
-  const alertId = status.alert?.alert_id
   const first = status.approval
   const second = status.second_approval
 
@@ -111,34 +152,13 @@ function ApprovalPanel({
             <PermissionGate require="operator">
               <ActionButton
                 tone="accent"
-                onClick={() =>
-                  write.open({
-                    title: '确认批准该补丁？',
-                    confirmLabel: '批准',
-                    detail: (
-                      <ActionSummary wfId={wfId} service={service} alertId={alertId} decision="批准（进入公告窗口）" />
-                    ),
-                    run: () => api.approval(wfId, 'approve'),
-                    success: '一级审批已提交：批准',
-                  })
-                }
+                onClick={() => openApprovalDecision(approval, status, wfId, 'approval', 'approve')}
               >
                 批准
               </ActionButton>
               <ActionButton
                 tone="danger"
-                onClick={() =>
-                  write.open({
-                    title: '确认驳回该补丁？',
-                    tone: 'danger',
-                    confirmLabel: '驳回',
-                    detail: (
-                      <ActionSummary wfId={wfId} service={service} alertId={alertId} decision="驳回（转人工处理）" />
-                    ),
-                    run: () => api.approval(wfId, 'reject'),
-                    success: '一级审批已提交：驳回',
-                  })
-                }
+                onClick={() => openApprovalDecision(approval, status, wfId, 'approval', 'reject')}
               >
                 驳回
               </ActionButton>
@@ -148,34 +168,13 @@ function ApprovalPanel({
             <PermissionGate require="operator">
               <ActionButton
                 tone="accent"
-                onClick={() =>
-                  write.open({
-                    title: '确认二级批准？',
-                    confirmLabel: '二级批准',
-                    detail: (
-                      <ActionSummary wfId={wfId} service={service} alertId={alertId} decision="二级批准（受保护目录变更）" />
-                    ),
-                    run: () => api.secondApproval(wfId, 'approve'),
-                    success: '二级审批已提交：批准',
-                  })
-                }
+                onClick={() => openApprovalDecision(approval, status, wfId, 'second_approval', 'approve')}
               >
                 二级批准
               </ActionButton>
               <ActionButton
                 tone="danger"
-                onClick={() =>
-                  write.open({
-                    title: '确认二级驳回？',
-                    tone: 'danger',
-                    confirmLabel: '二级驳回',
-                    detail: (
-                      <ActionSummary wfId={wfId} service={service} alertId={alertId} decision="二级驳回（转人工处理）" />
-                    ),
-                    run: () => api.secondApproval(wfId, 'reject'),
-                    success: '二级审批已提交：驳回',
-                  })
-                }
+                onClick={() => openApprovalDecision(approval, status, wfId, 'second_approval', 'reject')}
               >
                 二级驳回
               </ActionButton>
@@ -286,6 +285,29 @@ function StatusSummary({ status }: { status: StatusPayload }) {
         <Field label="补丁 ID">
           {status.patch_id ? <CopyableId value={status.patch_id} /> : <span className="text-muted">尚未生成</span>}
         </Field>
+        {status.case_id && (
+          <Field label="案件 ID">
+            <span className="font-mono text-xs">{status.case_id}</span>
+          </Field>
+        )}
+        {status.requested_by && <Field label="发起人">{status.requested_by}</Field>}
+        {status.parent_wf_id && (
+          <Field label="重试来源">
+            <span className="font-mono text-xs">
+              {status.parent_wf_id}
+              {status.parent_run_id ? ` · run ${shortHash(status.parent_run_id, 16)}` : ''}
+            </span>
+          </Field>
+        )}
+        {status.evidence_binding && (
+          <Field label="证据绑定">
+            <span className="font-mono text-[11px]">
+              diff {shortHash(status.evidence_binding.diff_hash)} · 测试{' '}
+              {shortHash(status.evidence_binding.test_report_hash)} · run{' '}
+              {shortHash(status.evidence_binding.run_id, 16)}
+            </span>
+          </Field>
+        )}
         <Field label="倒计时">
           {status.deadline ? <CountdownText at={status.deadline.at} /> : <span className="text-muted">无</span>}
         </Field>
@@ -302,6 +324,106 @@ function StatusSummary({ status }: { status: StatusPayload }) {
         <JsonBlock data={status} />
       </div>
     </Panel>
+  )
+}
+
+/** 审批记录（运行中取 status、终态取 result；含证据绑定与被拒命令）。 */
+function ApprovalsTab({
+  result,
+  status,
+}: {
+  result: ResultPayload | null
+  status: StatusPayload | null
+}) {
+  const records = result?.approvals ?? status?.approvals ?? []
+  const rejections = result?.approval_rejections ?? status?.approval_rejections ?? []
+  const error = result?.approval_error ?? status?.approval_error ?? null
+  const binding = result?.evidence_binding ?? status?.evidence_binding ?? null
+
+  if (!records.length && !rejections.length) {
+    return result ? (
+      <EmptyState title="无审批记录" hint="该流程未经过审批环节" />
+    ) : (
+      <EmptyState title="运行中暂无审批记录" hint="审批动作完成后在这里沉淀" />
+    )
+  }
+
+  const rejected = rejections.length ? rejections : error ? [error] : []
+
+  return (
+    <div className="space-y-4">
+      <Panel title={`审批记录（${records.length} 条）`}>
+        <div className="space-y-2">
+          {records.map((record, index) => (
+            <div
+              key={record.command_id || index}
+              className="rounded-lg border border-line bg-canvas px-3 py-2 text-sm"
+            >
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="w-32 shrink-0 font-mono text-xs text-muted">{record.gate}</span>
+                <span
+                  className={cn(
+                    'rounded px-1.5 py-0.5 text-xs',
+                    record.decision === 'approve' ? 'bg-ok/10 text-ok' : 'bg-danger/10 text-danger',
+                  )}
+                >
+                  {record.decision}
+                </span>
+                {record.actor && <span className="text-xs text-muted">审批人 {record.actor}</span>}
+                {record.channel && <span className="text-xs text-muted">通道 {record.channel}</span>}
+                {record.received_at && (
+                  <span className="text-xs text-muted">记录于 {fmtDateTime(record.received_at)}</span>
+                )}
+              </div>
+              {record.comment && <div className="mt-1 text-xs text-ink">意见：{record.comment}</div>}
+              {record.command_id && (
+                <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 font-mono text-[10px] text-muted">
+                  <span>command {record.command_id}</span>
+                  {record.diff_hash && <span>diff {shortHash(record.diff_hash)}</span>}
+                  {record.run_id && <span>run {record.run_id}</span>}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+        {binding && (
+          <div className="mt-3 border-t border-line pt-3">
+            <div className="text-xs text-muted">证据绑定（approval-evidence-v1）</div>
+            <div className="mt-1.5 grid grid-cols-2 gap-x-4 gap-y-1 font-mono text-[11px] text-muted">
+              <span>案件 {binding.case_id}</span>
+              <span>补丁 {binding.patch_id}</span>
+              <span>diff {shortHash(binding.diff_hash)}</span>
+              <span>测试 {shortHash(binding.test_report_hash)}</span>
+              <span>策略 {shortHash(binding.policy_sha256)}</span>
+              <span>run {binding.run_id}</span>
+            </div>
+          </div>
+        )}
+      </Panel>
+
+      {rejected.length > 0 && (
+        <Panel title={`被拒绝的审批命令（${rejected.length}）`}>
+          <div className="space-y-2">
+            {rejected.map((entry, index) => (
+              <div
+                key={entry.command_id || index}
+                className="rounded-lg border border-danger/30 bg-danger/5 px-3 py-2 text-xs"
+              >
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="font-mono">{entry.gate}</span>
+                  <span className="rounded bg-danger/10 px-1.5 py-0.5 text-danger">{entry.code}</span>
+                  {entry.at && <span className="text-muted">{fmtDateTime(entry.at)}</span>}
+                </div>
+                <div className="mt-1 text-danger">{entry.reason}</div>
+                {entry.command_id && (
+                  <div className="mt-1 font-mono text-[10px] text-muted">command {entry.command_id}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
+    </div>
   )
 }
 
@@ -425,6 +547,7 @@ export function FlowDetail() {
   const [tab, setTab] = useState<TabKey>('overview')
   const [queueOpen, setQueueOpen] = useState(false)
   const write = useWriteAction()
+  const approval = useApprovalDialog()
 
   const { data, isError, error } = useQuery({
     queryKey: ['flow', wfId],
@@ -494,7 +617,9 @@ export function FlowDetail() {
         )}
       </header>
 
-      {stage === 'WAIT_APPROVAL' && status && <ApprovalPanel wfId={wfId} status={status} write={write} />}
+      {stage === 'WAIT_APPROVAL' && status && (
+        <ApprovalPanel wfId={wfId} status={status} approval={approval} />
+      )}
       {stage === 'NOTIFYING' && status && (
         <WindowPanel wfId={wfId} status={status} write={write} onQueue={() => setQueueOpen(true)} />
       )}
@@ -552,34 +677,7 @@ export function FlowDetail() {
             <EmptyState title="运行中暂无完整事件流" hint="流程到达终态后可查看完整时间线" />
           ))}
 
-        {tab === 'approvals' &&
-          (result ? (
-            result.approvals.length ? (
-              <Panel title="审批记录">
-                <div className="space-y-2">
-                  {result.approvals.map((approval, index) => (
-                    <div key={index} className="flex items-center gap-3 text-sm">
-                      <span className="w-32 shrink-0 font-mono text-xs text-muted">{approval.gate}</span>
-                      <span
-                        className={cn(
-                          'rounded px-1.5 py-0.5 text-xs',
-                          approval.decision === 'approve'
-                            ? 'bg-ok/10 text-ok'
-                            : 'bg-danger/10 text-danger',
-                        )}
-                      >
-                        {approval.decision}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </Panel>
-            ) : (
-              <EmptyState title="无审批记录" hint="该流程未经过审批环节" />
-            )
-          ) : (
-            <EmptyState title="运行中暂无审批记录" hint="审批动作完成后在这里沉淀" />
-          ))}
+        {tab === 'approvals' && <ApprovalsTab result={result} status={status} />}
 
         {tab === 'artifacts' &&
           (data.artifacts &&
@@ -637,7 +735,12 @@ export function FlowDetail() {
       >
         {write.spec?.detail}
       </ConfirmDialog>
-      <Toast message={write.toast} />
+      <ApprovalDialog
+        request={approval.request}
+        onClose={approval.close}
+        onDone={approval.done}
+      />
+      <Toast message={write.toast ?? approval.toast} />
     </div>
   )
 }

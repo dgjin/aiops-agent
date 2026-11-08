@@ -21,6 +21,54 @@ export interface QueuedPatch {
   alert_id: string
 }
 
+/** 审批证据绑定（approval-evidence-v1）：说明「审批的是哪一次变更」。 */
+export interface EvidenceBinding {
+  contract: string
+  case_id: string
+  patch_id: string
+  diff_hash: string
+  test_report_hash: string
+  policy_sha256: string
+  run_id: string
+}
+
+/** 工作流已记录的审批（谁 / 何时 / 哪个通道 / 基于哪份证据 / 什么意见）。 */
+export interface ApprovalRecord {
+  gate: string
+  decision: string
+  actor?: string
+  channel?: string
+  comment?: string
+  command_id?: string
+  submitted_at?: string
+  received_at?: string
+  contract?: string
+  case_id?: string
+  patch_id?: string
+  diff_hash?: string
+  test_report_hash?: string
+  policy_sha256?: string
+  run_id?: string
+}
+
+/** 被工作流拒绝的审批命令（未生效；卡片保留按钮便于重试）。 */
+export interface ApprovalRejection {
+  gate: string
+  code: string
+  reason: string
+  command_id: string
+  at: string
+}
+
+/** 审批提交载荷：意见 + 当前页面展示的期望证据（用于拒绝过期页面）。 */
+export interface ApprovalInput {
+  decision: 'approve' | 'reject'
+  comment?: string
+  expected_case_id?: string
+  expected_diff_hash?: string
+  expected_run_id?: string
+}
+
 export interface FlowItem {
   wf_id: string
   run_id: string
@@ -45,6 +93,17 @@ export interface FlowItem {
   /** 闸门事件链（仅终态流程由 result 透出；行内流程图据此精确定位中断点） */
   gate_events?: string[]
   stage_error: string | null
+  /** 审批证据与运行溯源（approval-evidence-v1；旧流程 approval_contract 为空串） */
+  case_id?: string
+  approval_contract?: string
+  evidence_binding?: EvidenceBinding | null
+  approvals?: ApprovalRecord[]
+  approval_error?: ApprovalRejection | null
+  approval_rejections?: ApprovalRejection[]
+  requested_by?: string
+  parent_run_id?: string
+  parent_wf_id?: string
+  retry_wf_id?: string
   /** 审批中心附加：待办类型 */
   pending?: 'approval' | 'second_approval'
   /** 发布窗口附加：公告版本号（从广播留痕提取） */
@@ -131,6 +190,21 @@ export interface StatusPayload {
   second_approval: string | null
   deploy_command: string | null
   queued_patches: QueuedPatch[]
+  /** 审批期补丁与测试证据（供对话框核对） */
+  patch?: PatchInfo | null
+  test_report?: TestReport | null
+  /** 审批证据与运行溯源（approval-evidence-v1；旧流程 approval_contract 为空串） */
+  case_id?: string
+  approval_contract?: string
+  evidence_binding?: EvidenceBinding | null
+  approvals?: ApprovalRecord[]
+  gate_events?: string[]
+  approval_error?: ApprovalRejection | null
+  approval_rejections?: ApprovalRejection[]
+  requested_by?: string
+  parent_run_id?: string
+  parent_wf_id?: string
+  retry_wf_id?: string
 }
 
 export interface RootCause {
@@ -177,13 +251,24 @@ export interface ResultPayload {
   model_version: string | null
   patch: PatchInfo | null
   test_report: TestReport | null
-  approvals: { gate: string; decision: string }[]
+  approvals: ApprovalRecord[]
   gate_events: string[]
   deploy_result: DeployResult | null
   duration_seconds: number
   queued_patches: string[]
   /** 日志证据归档摘要（TRIAGING 阶段落库；需求流为 null） */
   evidence: EvidenceSummary | null
+  /** 审批证据与运行溯源（approval-evidence-v1；旧流程 approval_contract 为空串） */
+  run_id?: string
+  case_id?: string
+  requested_by?: string
+  approval_contract?: string
+  evidence_binding?: EvidenceBinding | null
+  approval_error?: ApprovalRejection | null
+  approval_rejections?: ApprovalRejection[]
+  parent_run_id?: string
+  parent_wf_id?: string
+  retry_wf_id?: string
 }
 
 /** 证据质量六状态（M1）：与 aiops_agent/evidence_quality.py 固定口径一致；旧归档为 UNKNOWN。 */
@@ -748,6 +833,11 @@ export interface WriteResp extends Timed {
   ok: boolean
   wf_id: string
   action: string
+  /** 审批命令 ID（旧协议流程为空串） */
+  command_id?: string
+  /** 送达语义：accepted=工作流已受理并记录；rejected=工作流业务拒绝；submitted=命令已提交 */
+  delivery?: 'accepted' | 'rejected' | 'submitted'
+  message?: string
 }
 
 // ----------------------------------------------------------------------

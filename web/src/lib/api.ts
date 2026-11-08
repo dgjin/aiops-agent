@@ -1,6 +1,7 @@
 /** BFF API 客户端：统一错误处理 + 服务端时间校准（设计方案 5.4、10）。 */
 
 import type {
+  ApprovalInput,
   ApprovalsResp,
   AuditResp,
   AuditSummaryResp,
@@ -290,15 +291,15 @@ export const api = {
       }
     >('/api/auth/rotate', { method: 'POST', body: JSON.stringify({ reason }) }),
 
-  approval: (wfId: string, decision: 'approve' | 'reject') =>
+  approval: (wfId: string, body: ApprovalInput) =>
     request<WriteResp>(`/api/flows/${encodeURIComponent(wfId)}/approval`, {
       method: 'POST',
-      body: JSON.stringify({ decision }),
+      body: JSON.stringify(body),
     }),
-  secondApproval: (wfId: string, decision: 'approve' | 'reject') =>
+  secondApproval: (wfId: string, body: ApprovalInput) =>
     request<WriteResp>(`/api/flows/${encodeURIComponent(wfId)}/second-approval`, {
       method: 'POST',
-      body: JSON.stringify({ decision }),
+      body: JSON.stringify(body),
     }),
   deployCommand: (wfId: string, command: 'deploy_now' | 'cancel') =>
     request<WriteResp>(`/api/flows/${encodeURIComponent(wfId)}/deploy-command`, {

@@ -3,10 +3,9 @@
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api, describeError } from '../lib/api'
-import { cn, diffStat } from '../lib/format'
-import { useWriteAction } from '../lib/actions'
+import { cn, diffStat, shortHash } from '../lib/format'
+import { ApprovalDialog, useApprovalDialog } from '../components/ApprovalDialog'
 import { ActionButton } from '../components/ActionButton'
-import { ConfirmDialog } from '../components/ConfirmDialog'
 import { CopyableId } from '../components/CopyableId'
 import { CountdownText } from '../components/CountdownText'
 import { EmptyState } from '../components/EmptyState'
@@ -15,86 +14,93 @@ import { StageBadge } from '../components/StageBadge'
 import { Toast } from '../components/Toast'
 import type { FlowItem } from '../lib/types'
 
-type WriteHandle = ReturnType<typeof useWriteAction>
+type ApprovalHandle = ReturnType<typeof useApprovalDialog>
 
-function openDecision(item: FlowItem, second: boolean, decision: 'approve' | 'reject', write: WriteHandle) {
+function openDecision(
+  item: FlowItem,
+  second: boolean,
+  decision: 'approve' | 'reject',
+  approval: ApprovalHandle,
+) {
   const approve = decision === 'approve'
-  write.open({
-    title: second ? `确认二级${approve ? '批准' : '驳回'}？` : `确认${approve ? '批准' : '驳回'}？`,
-    tone: approve ? 'default' : 'danger',
-    confirmLabel: second ? `二级${approve ? '批准' : '驳回'}` : approve ? '批准' : '驳回',
-    detail: (() => {
-      const stat = diffStat(item.patch?.diff)
-      return (
-        <div className="space-y-2.5 text-sm">
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-            <div>服务：{item.alert?.service ?? '—'}</div>
-            <div>
-              置信度：
-              <span className="font-mono text-ink">
-                {item.confidence != null ? item.confidence.toFixed(2) : '—'}
-              </span>
-            </div>
-            <div className="col-span-2">
-              工作流：<span className="font-mono text-xs">{item.wf_id}</span>
-            </div>
-            <div className="col-span-2">
-              告警：<span className="font-mono text-xs">{item.alert?.alert_id ?? '—'}</span>
-            </div>
+  const stat = diffStat(item.patch?.diff)
+  approval.open({
+    wfId: item.wf_id,
+    gate: second ? 'second_approval' : 'approval',
+    decision,
+    binding: item.evidence_binding ?? null,
+    caseId: item.case_id || item.alert?.alert_id || '',
+    summary: (
+      <div className="space-y-2.5 text-sm">
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+          <div>服务：{item.alert?.service ?? '—'}</div>
+          <div>
+            置信度：
+            <span className="font-mono text-ink">
+              {item.confidence != null ? item.confidence.toFixed(2) : '—'}
+            </span>
           </div>
-
-          {item.patch ? (
-            <div className="rounded-lg border border-line bg-canvas p-2.5">
-              <div className="text-xs">
-                补丁改动：<span className="text-ink">{stat.files} 个文件</span>
-                <span className="ml-2 font-mono text-ok">+{stat.added}</span>
-                <span className="ml-1 font-mono text-danger">-{stat.removed}</span>
-              </div>
-              <div className="mt-1 truncate font-mono text-[11px] text-muted" title={item.patch.files.join('、')}>
-                {item.patch.files.join('、')}
-              </div>
-              {item.patch.risk && <div className="mt-1 text-[11px] text-idle">风险：{item.patch.risk}</div>}
-            </div>
-          ) : (
-            <div className="text-xs text-idle">（未取到补丁信息）</div>
-          )}
-
-          {item.test_report && (
-            <div
-              className={cn(
-                'rounded-lg border p-2.5 text-xs',
-                item.test_report.passed
-                  ? 'border-ok/30 bg-ok/10 text-ok'
-                  : 'border-danger/30 bg-danger/10 text-danger',
-              )}
-            >
-              测试结论：{item.test_report.passed ? '通过' : '未通过'} · {item.test_report.unit_tests || '—'}
-              {item.test_report.sast && (
-                <div className="mt-0.5 text-[11px] text-idle">SAST：{item.test_report.sast}</div>
-              )}
-            </div>
-          )}
-
-          <div className="text-ink">
-            决策：{approve ? '批准（进入公告窗口）' : '驳回（转人工处理）'}
+          <div className="col-span-2">
+            工作流：<span className="font-mono text-xs">{item.wf_id}</span>
           </div>
-          <Link
-            to={`/flows/${encodeURIComponent(item.wf_id)}`}
-            className="inline-block text-xs text-accent hover:underline"
-          >
-            查看完整详情（diff / 测试报告 / 事件时间线）→
-          </Link>
+          <div className="col-span-2">
+            告警：<span className="font-mono text-xs">{item.alert?.alert_id ?? '—'}</span>
+          </div>
         </div>
-      )
-    })(),
-    run: () =>
-      second ? api.secondApproval(item.wf_id, decision) : api.approval(item.wf_id, decision),
-    success: `${second ? '二级' : '一级'}审批已提交：${approve ? '批准' : '驳回'}`,
+
+        {item.patch ? (
+          <div className="rounded-lg border border-line bg-canvas p-2.5">
+            <div className="text-xs">
+              补丁改动：<span className="text-ink">{stat.files} 个文件</span>
+              <span className="ml-2 font-mono text-ok">+{stat.added}</span>
+              <span className="ml-1 font-mono text-danger">-{stat.removed}</span>
+            </div>
+            <div className="mt-1 truncate font-mono text-[11px] text-muted" title={item.patch.files.join('、')}>
+              {item.patch.files.join('、')}
+            </div>
+            {item.patch.risk && <div className="mt-1 text-[11px] text-idle">风险：{item.patch.risk}</div>}
+          </div>
+        ) : (
+          <div className="text-xs text-idle">（未取到补丁信息）</div>
+        )}
+
+        {item.test_report && (
+          <div
+            className={cn(
+              'rounded-lg border p-2.5 text-xs',
+              item.test_report.passed
+                ? 'border-ok/30 bg-ok/10 text-ok'
+                : 'border-danger/30 bg-danger/10 text-danger',
+            )}
+          >
+            测试结论：{item.test_report.passed ? '通过' : '未通过'} · {item.test_report.unit_tests || '—'}
+            {item.test_report.sast && (
+              <div className="mt-0.5 text-[11px] text-idle">SAST：{item.test_report.sast}</div>
+            )}
+          </div>
+        )}
+
+        {item.requested_by && (
+          <div className="text-[11px] text-idle">
+            发起人：{item.requested_by}（职责分离：发起人不得审批自己的变更）
+          </div>
+        )}
+        <div className="text-ink">
+          决策：{approve ? '批准（进入公告窗口）' : '驳回（转人工处理）'}
+        </div>
+        <Link
+          to={`/flows/${encodeURIComponent(item.wf_id)}`}
+          className="inline-block text-xs text-accent hover:underline"
+        >
+          查看完整详情（diff / 测试报告 / 事件时间线）→
+        </Link>
+      </div>
+    ),
   })
 }
 
 export function Approvals() {
-  const write = useWriteAction()
+  const approval = useApprovalDialog()
   const { data, isError, error } = useQuery({
     queryKey: ['approvals'],
     queryFn: api.approvals,
@@ -164,7 +170,21 @@ export function Approvals() {
                             {item.test_report.unit_tests ? ` · ${item.test_report.unit_tests}` : ''}
                           </span>
                         )}
+                        {item.requested_by && <span>发起人 {item.requested_by}</span>}
+                        {item.evidence_binding ? (
+                          <span className="font-mono">
+                            diff {shortHash(item.evidence_binding.diff_hash)} · run{' '}
+                            {shortHash(item.evidence_binding.run_id, 16)}
+                          </span>
+                        ) : (
+                          <span className="text-idle">旧协议流程（无证据绑定）</span>
+                        )}
                       </div>
+                      {item.approval_error && (
+                        <div className="mt-2 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">
+                          上次审批未生效（{item.approval_error.code}）：{item.approval_error.reason}
+                        </div>
+                      )}
                     </div>
                     <div className="flex items-center gap-4">
                       <div className="text-right">
@@ -175,13 +195,13 @@ export function Approvals() {
                         <PermissionGate require="operator">
                           <ActionButton
                             tone="accent"
-                            onClick={() => openDecision(item, second, 'approve', write)}
+                            onClick={() => openDecision(item, second, 'approve', approval)}
                           >
                             批准
                           </ActionButton>
                           <ActionButton
                             tone="danger"
-                            onClick={() => openDecision(item, second, 'reject', write)}
+                            onClick={() => openDecision(item, second, 'reject', approval)}
                           >
                             驳回
                           </ActionButton>
@@ -199,19 +219,12 @@ export function Approvals() {
           </div>
         ))}
 
-      <ConfirmDialog
-        open={write.spec !== null}
-        title={write.spec?.title ?? ''}
-        tone={write.spec?.tone}
-        confirmLabel={write.spec?.confirmLabel}
-        busy={write.busy}
-        error={write.error}
-        onConfirm={write.confirm}
-        onClose={write.close}
-      >
-        {write.spec?.detail}
-      </ConfirmDialog>
-      <Toast message={write.toast} />
+      <ApprovalDialog
+        request={approval.request}
+        onClose={approval.close}
+        onDone={approval.done}
+      />
+      <Toast message={approval.toast} />
     </div>
   )
 }

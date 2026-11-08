@@ -25,6 +25,12 @@ export function fmtTime(iso: string | null | undefined): string {
   return d.toLocaleTimeString('zh-CN', { hour12: false })
 }
 
+/** 截断长 ID / 哈希用于紧凑展示（完整值通过复制或详情查看）。 */
+export function shortHash(value: string | null | undefined, size = 12): string {
+  if (!value) return '—'
+  return value.length > size ? `${value.slice(0, size)}…` : value
+}
+
 export function fmtDuration(seconds: number | null | undefined): string {
   if (seconds == null) return '—'
   if (seconds < 60) return `${seconds.toFixed(1)}s`
