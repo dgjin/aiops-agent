@@ -18,6 +18,7 @@ from temporalio.api.taskqueue.v1 import TaskQueue
 from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest, DescribeTaskQueueRequest
 
 from . import config, mode
+from . import tracing
 
 RPC_TIMEOUT = timedelta(seconds=3)
 CHECK_TIMEOUT = 5.0
@@ -144,6 +145,11 @@ async def check(gateway) -> dict:
     """每次重新验证配置和依赖；失败返回稳定原因码，详情仅交由认证端点输出。"""
     checks = {}
     summary = {}
+    otel = tracing.state()
+    checks["tracing"] = status(
+        otel["ok"], otel["detail"], enabled=otel["enabled"],
+        configured=otel["configured"], required=otel["required"],
+    )
     try:
         snapshot = config.startup_snapshot()
         summary = {key: snapshot[key] for key in ("mode", "policy_sha256", "shadow_mode", "namespace", "task_queue")}

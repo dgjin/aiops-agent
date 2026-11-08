@@ -32,6 +32,12 @@ def _authenticated(request: Request) -> None:
         raise HTTPException(401, "Authentication required")
 
 
+def _otel_enabled(report: dict) -> bool:
+    """readyz/subsystems 只读取 readiness 已算好的 tracing 结果；缺项按未启用。"""
+    tracing = (report.get("checks") or {}).get("tracing") or {}
+    return bool(tracing.get("enabled"))
+
+
 @router.get("/livez", include_in_schema=False)
 async def livez(request: Request) -> JSONResponse:
     _loopback_only(request)
@@ -42,6 +48,7 @@ async def livez(request: Request) -> JSONResponse:
 async def readyz(request: Request) -> JSONResponse:
     _loopback_only(request)
     report = await readiness.check(gw)
+    metrics.set_otel_state(_otel_enabled(report))
     return JSONResponse({"ok": report["ok"]}, status_code=200 if report["ok"] else 503,
                         headers={"Cache-Control": "no-store"})
 
@@ -70,6 +77,7 @@ async def api_subsystems(request: Request) -> JSONResponse:
     """认证后的只读详情；LLM/Loki/通知未实测或未接线明确降级。"""
     _authenticated(request)
     report = await readiness.check(gw)
+    metrics.set_otel_state(_otel_enabled(report))
     subsystems = {**report["checks"], **report["degradations"]}
     subsystems["commands"] = await _command_subsystem()
     degraded = sorted(name for name, info in subsystems.items() if not info["ok"])

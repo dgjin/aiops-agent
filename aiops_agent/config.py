@@ -389,6 +389,13 @@ def startup_snapshot(root: Path | None = None) -> dict:
         raise runtime_mode.ModeConfigError("production 需要完整 MySQL URL（详情已隐藏）") from None
     if production and not os.environ.get("AIOPS_REDIS_URL", "").startswith(("redis://", "rediss://")):
         raise runtime_mode.ModeConfigError("production 必须配置 AIOPS_REDIS_URL")
+    # M5：追踪生产门禁——声明 required 就必须配置端点；真实 Collector 联通仍属外部验收
+    from . import tracing
+
+    if production and tracing.required() and not tracing.enabled():
+        raise runtime_mode.ModeConfigError(
+            "AIOPS_OTEL_REQUIRED=true 时必须配置 AIOPS_OTEL_ENDPOINT（OTLP HTTP 端点）"
+        )
     from urllib.parse import urlsplit
     try:
         endpoint = urlsplit("//" + os.environ.get("TEMPORAL_ADDRESS", "localhost:7233"))

@@ -158,11 +158,14 @@ if _AVAILABLE:
     )
     HISTORY_GAPS = Gauge("aiops_history_sync_gaps", "检测到事件断档的流程数")
     HISTORY_LAG = Gauge("aiops_history_sync_lag_seconds", "未完成同步流程的最大滞后秒数")
+    # 追踪（M5）：仅表示本进程已初始化 OTLP 导出；不等于 Collector 已收到数据
+    OTEL_ENABLED = Gauge("aiops_otel_enabled", "OTLP 追踪已初始化（1）/未启用或失败（0）")
 else:  # pragma: no cover
     ALERT_PENDING = COMPENSATION_FAILURES = RELEASE_CONFLICTS = ROLLBACK_FAILURES = _NoopMetric()
     COMPONENT_RESTARTS = BACKUP_LAST_SUCCESS = BACKUP_OVERDUE = CERT_EXPIRES = CERT_RENEWAL_DUE = _NoopMetric()
     COMMAND_BACKLOG = COMMAND_OLDEST_WAIT = COMMAND_FAILED_24H = _NoopMetric()
     HISTORY_INCOMPLETE = HISTORY_GAPS = HISTORY_LAG = _NoopMetric()
+    OTEL_ENABLED = _NoopMetric()
 
 _backup_success = 0.0
 _certificate_expiry = 0.0
@@ -189,6 +192,11 @@ def set_history_state(*, incomplete: int, gaps: int, lag_seconds: float) -> None
     HISTORY_INCOMPLETE.set(max(0, int(incomplete)))
     HISTORY_GAPS.set(max(0, int(gaps)))
     HISTORY_LAG.set(max(0.0, float(lag_seconds)))
+
+
+def set_otel_state(enabled_state: bool) -> None:
+    """追踪初始化状态（M5）：由 readiness 探测刷新，不代表 Collector 已接收。"""
+    OTEL_ENABLED.set(1 if enabled_state else 0)
 
 
 def observe_compensation_failure() -> None:
