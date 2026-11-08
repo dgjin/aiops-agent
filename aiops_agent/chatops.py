@@ -8,9 +8,9 @@
 命令集（中英别名，发送「帮助」查看用法）：
     帮助                              命令一览
     待办                              列出待审批流程
-    状态 <流程ID前缀>                 单流程状态（阶段/补丁/审批/截止）
-    批准 / 驳回 <流程ID前缀>          一级审批决策
-    二级批准 / 二级驳回 <流程ID前缀>  二级审批决策（受保护目录）
+    状态 <流程ID前缀>                 单流程状态（阶段/补丁/审批/截止/拒绝原因）
+    批准 / 驳回 <流程ID前缀> [-- 意见]  一级审批决策（驳回必须附意见）
+    二级批准 / 二级驳回 <ID前缀> [-- 意见]  二级审批决策（受保护目录，驳回必须附意见）
 
 权限模型：``ROLE_ORDER`` 与控制台一致（viewer < operator < admin）；
 查询类命令要求 viewer，审批类要求 operator。BFF 侧通过 AIOPS_IM_USERS 把发送者
@@ -64,10 +64,10 @@ ROLE_BY_VERB: dict[str, str] = {
 # 规范命令 → 用法文本（缺参提示用）
 USAGE: dict[str, str] = {
     "status": "状态 <流程ID前缀>",
-    "approve": "批准 <流程ID前缀>",
-    "reject": "驳回 <流程ID前缀>",
-    "second_approve": "二级批准 <流程ID前缀>",
-    "second_reject": "二级驳回 <流程ID前缀>",
+    "approve": "批准 <流程ID前缀> [-- 审批意见]",
+    "reject": "驳回 <流程ID前缀> -- <审批意见（必填）>",
+    "second_approve": "二级批准 <流程ID前缀> [-- 审批意见]",
+    "second_reject": "二级驳回 <流程ID前缀> -- <审批意见（必填）>",
 }
 
 # 决策命令 → (闸门, 决策)（与 notify.parse_callback 的回调契约同构）
@@ -78,12 +78,12 @@ _SIGNALS: dict[str, tuple[str, str]] = {
     "second_reject": ("second_approval", "reject"),
 }
 
-# 决策命令 → 成功回复动作词
+# 决策命令 → 成功回复动作词（signal RPC 成功只代表命令已提交）
 DECISION_ACTIONS: dict[str, str] = {
-    "approve": "一级审批已批准",
-    "reject": "一级审批已驳回",
-    "second_approve": "二级审批已批准",
-    "second_reject": "二级审批已驳回",
+    "approve": "一级审批命令已提交",
+    "reject": "一级审批命令已提交",
+    "second_approve": "二级审批命令已提交",
+    "second_reject": "二级审批命令已提交",
 }
 
 # 流程阶段中文（与 workflows.py 的 stage 取值对齐；未知值回落原文）
@@ -122,11 +122,15 @@ _DEADLINE_LABELS: dict[str, str] = {
 
 @dataclass(frozen=True)
 class Command:
-    """解析后的命令：verb 为规范名，arg 保留原始大小写（wf_id 大小写敏感）。"""
+    """解析后的命令：verb 为规范名，arg 保留原始大小写（wf_id 大小写敏感）。
+
+    ``comment`` 为驳回意见（决策命令可用 ``--`` 或空格分隔在 ID 之后）。
+    """
 
     verb: str
     arg: str
     role: str
+    comment: str = ""
 
 
 @dataclass(frozen=True)
@@ -147,15 +151,35 @@ def parse_command(text: str) -> Command | None:
     head = parts[0].lower()
     if head in _VERBS:
         verb, _ = _VERBS[head]
-        arg = parts[1].strip() if len(parts) > 1 else ""
-        return Command(verb=verb, arg=arg, role=ROLE_BY_VERB[verb])
+        arg, comment = _split_decision_arg(verb, parts[1].strip() if len(parts) > 1 else "")
+        return Command(verb=verb, arg=arg, role=ROLE_BY_VERB[verb], comment=comment)
     # 无空格连写（如「批准abc-123」）：仅对有参命令做最长前缀匹配，
     # 避免「待办事项」被误解析为「待办」+ 垃圾参数
     for alias in sorted((a for a, (_, need) in _VERBS.items() if need), key=len, reverse=True):
         if lower.startswith(alias):
             verb, _ = _VERBS[alias]
-            return Command(verb=verb, arg=raw[len(alias):].strip(), role=ROLE_BY_VERB[verb])
+            arg, comment = _split_decision_arg(verb, raw[len(alias):].strip())
+            return Command(verb=verb, arg=arg, role=ROLE_BY_VERB[verb], comment=comment)
     return None
+
+
+def _split_decision_arg(verb: str, raw_arg: str) -> tuple[str, str]:
+    """拆分决策命令的「ID + 意见」：优先 ``--``，否则首个空白。
+
+    非决策命令（状态/待办）不拆分，保持原参数。意见中的空格原样保留。
+    """
+    if verb not in _SIGNALS:
+        return raw_arg, ""
+    text = raw_arg.strip()
+    if not text:
+        return "", ""
+    if "--" in text:
+        head, _, tail = text.partition("--")
+        return head.strip(), tail.strip()
+    parts = text.split(maxsplit=1)
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], parts[1].strip()
 
 
 def signal_target(verb: str) -> tuple[str, str] | None:
@@ -187,13 +211,14 @@ def render_help() -> str:
     return (
         "AIOps 助手 · 可用命令\n"
         "  待办                    待审批流程列表\n"
-        "  状态 <ID前缀>           查看流程状态\n"
-        "  批准 <ID前缀>           一级审批：批准\n"
-        "  驳回 <ID前缀>           一级审批：驳回\n"
-        "  二级批准 <ID前缀>       二级审批：批准（受保护目录）\n"
-        "  二级驳回 <ID前缀>       二级审批：驳回\n"
+        "  状态 <ID前缀>           查看流程状态（含审批拒绝原因）\n"
+        "  批准 <ID前缀> [-- 意见] 一级审批：批准\n"
+        "  驳回 <ID前缀> -- 意见  一级审批：驳回（意见必填）\n"
+        "  二级批准 <ID前缀> [-- 意见]  二级审批：批准（受保护目录）\n"
+        "  二级驳回 <ID前缀> -- 意见  二级审批：驳回（意见必填）\n"
         "  帮助                    本说明\n"
-        "流程 ID 支持唯一前缀（如：批准 aiops-fix-order）"
+        "流程 ID 支持唯一前缀（如：批准 aiops-fix-order）\n"
+        "审批命令仅代表已提交；是否生效以流程状态为准"
     )
 
 
@@ -254,6 +279,10 @@ def render_status(item: dict) -> str:
         lines.append(f"补丁：{patch_id}")
     if stage == "WAIT_APPROVAL":
         lines.extend(_approval_lines(item))
+    error = item.get("approval_error")
+    if isinstance(error, dict) and error.get("reason"):
+        # 审批被拒后流程仍停在 WAIT_APPROVAL：必须让值班人看到原因并修正后重提
+        lines.append(f"最近审批被拒：{error['reason']}")
     deadline = item.get("deadline")
     if isinstance(deadline, dict) and deadline.get("at"):
         label = _DEADLINE_LABELS.get(str(deadline.get("kind") or ""), "截止")

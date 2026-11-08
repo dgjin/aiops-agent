@@ -79,6 +79,25 @@ def classify_release_status(stage: str | None) -> str:
     }.get(stage or "", "unknown")
 
 
+def approval_receipt_from(payload: dict, command_id: str) -> tuple[str, dict] | None:
+    """从 status/result 中定位审批命令回执（纯函数）。
+
+    - 命中 ``approvals[].command_id`` → ``accepted``（工作流已记录并生效）；
+    - 命中 ``approval_error.command_id`` → ``rejected``（工作流业务拒绝）；
+    - 未命中 → None（尚未可见，仍为已提交）。
+    """
+    command_id = str(command_id or "")
+    if not command_id or not isinstance(payload, dict):
+        return None
+    for record in reversed(payload.get("approvals") or []):
+        if isinstance(record, dict) and record.get("command_id") == command_id:
+            return "accepted", record
+    error = payload.get("approval_error")
+    if isinstance(error, dict) and error.get("command_id") == command_id:
+        return "rejected", error
+    return None
+
+
 def _item_from_status(base: dict, status: dict) -> None:
     base.update(
         stage=status.get("stage"),
@@ -95,7 +114,25 @@ def _item_from_status(base: dict, status: dict) -> None:
         test_report=status.get("test_report"),
         root_cause=status.get("root_cause"),
         confidence=(status.get("root_cause") or {}).get("confidence"),
+        **_audit_fields(status),
     )
+
+
+def _audit_fields(payload: dict) -> dict:
+    """审批证据与运行溯源字段（status 与 result 同名同义，缺失时保持网关默认值）。"""
+    return {
+        "case_id": payload.get("case_id") or "",
+        "approval_contract": payload.get("approval_contract") or "",
+        "evidence_binding": payload.get("evidence_binding"),
+        "approvals": payload.get("approvals") or [],
+        "gate_events": payload.get("gate_events") or [],
+        "approval_error": payload.get("approval_error"),
+        "approval_rejections": payload.get("approval_rejections") or [],
+        "requested_by": payload.get("requested_by") or "",
+        "parent_run_id": payload.get("parent_run_id") or "",
+        "parent_wf_id": payload.get("parent_wf_id") or "",
+        "retry_wf_id": payload.get("retry_wf_id") or "",
+    }
 
 
 def _item_from_result(base: dict, result: dict) -> None:
@@ -114,13 +151,12 @@ def _item_from_result(base: dict, result: dict) -> None:
         patch_id=result.get("patch_id"),
         patch=result.get("patch"),
         test_report=result.get("test_report"),
-        # 闸门事件链（P1-3 升级原因摘要 / P1-4 拦截率统计的数据源）
-        gate_events=result.get("gate_events") or [],
         root_cause=result.get("root_cause"),
         queued_patches=[
             {"workflow_id": None, "alert_id": alert_id}
             for alert_id in result.get("queued_patches") or []
         ],
+        **_audit_fields(result),
     )
 
 
@@ -215,6 +251,18 @@ class TemporalGateway:
             "patch": None,
             "test_report": None,
             "root_cause": None,
+            # 审批证据与运行溯源（approval-evidence-v1；旧流程 contract 为空）
+            "case_id": "",
+            "approval_contract": "",
+            "evidence_binding": None,
+            "approvals": [],
+            "gate_events": [],
+            "approval_error": None,
+            "approval_rejections": [],
+            "requested_by": "",
+            "parent_run_id": "",
+            "parent_wf_id": "",
+            "retry_wf_id": "",
             "stage_error": None,
         }
         handle = client.get_workflow_handle(wf.id, run_id=wf.run_id)
@@ -302,10 +350,12 @@ class TemporalGateway:
     # 信号（写操作；前置校验与审计由 app 层负责）
     # ------------------------------------------------------------------
 
-    async def signal_approval(self, wf_id: str, decision: str) -> None:
+    async def signal_approval(self, wf_id: str, decision: str | dict) -> None:
+        """下发一级审批：字符串＝旧协议；dict＝approval-evidence-v1 证据信封。"""
         await self.handle(wf_id).signal(AIOpsFixWorkflow.submit_approval, decision)
 
-    async def signal_second_approval(self, wf_id: str, decision: str) -> None:
+    async def signal_second_approval(self, wf_id: str, decision: str | dict) -> None:
+        """下发二级审批：字符串＝旧协议；dict＝approval-evidence-v1 证据信封。"""
         await self.handle(wf_id).signal(AIOpsFixWorkflow.submit_second_approval, decision)
 
     async def signal_deploy_command(self, wf_id: str, command: str) -> None:
@@ -314,10 +364,47 @@ class TemporalGateway:
     async def signal_queue_patch(self, wf_id: str, new_wf_id: str, alert) -> None:
         await self.handle(wf_id).signal(AIOpsFixWorkflow.submit_patch, args=[new_wf_id, alert])
 
-    async def start_flow(self, alert, wf_id: str) -> str:
+    async def approval_receipt(
+        self, wf_id: str, command_id: str, attempts: int = 4, delay: float = 0.1
+    ) -> tuple[str, dict | None]:
+        """审批命令业务回执：``accepted`` / ``rejected`` / ``submitted``（尚未可见）。
+
+        signal RPC 成功只表示命令已送达 Temporal，不代表工作流接受了审批（证据过期、
+        职责分离等会在工作流侧拒绝）。控制台必须展示真实回执，避免把「已提交」误报为
+        「已批准」。短轮询仅用于消除信号与 query 之间的可见性延迟。
+        """
+        handle = self.handle(wf_id)
+        last_error = ""
+        for attempt in range(max(1, attempts)):
+            receipt = None
+            try:
+                status = await handle.query(
+                    AIOpsFixWorkflow.status, rpc_timeout=_QUERY_TIMEOUT
+                )
+                if isinstance(status, dict):
+                    receipt = approval_receipt_from(status, command_id)
+            except Exception as exc:  # noqa: BLE001 - 流程可能已结束，回退读 result
+                last_error = str(exc)
+                try:
+                    desc = await handle.describe(rpc_timeout=_QUERY_TIMEOUT)
+                    if desc.status != WorkflowExecutionStatus.RUNNING:
+                        result = await handle.result(rpc_timeout=_QUERY_TIMEOUT)
+                        if isinstance(result, dict):
+                            receipt = approval_receipt_from(result, command_id)
+                except Exception:  # noqa: BLE001 - 保持 submitted
+                    pass
+            if receipt is not None:
+                return receipt
+            if attempt + 1 < attempts:
+                await asyncio.sleep(delay)
+        return "submitted", ({"error": last_error} if last_error else None)
+
+    async def start_flow(self, alert, wf_id: str, evidence_context: dict | None = None) -> str:
         """以指定幂等键启动修复流程（P1-3 重试修复）；已存在同 ID 流程时抛 ValueError。
 
         策略快照在启动时读取（与 webhook/demo_cli 同约定：启动方决定快照）。
+        ``evidence_context``：人工重试溯源（case_id / requested_by / parent_run_id /
+        parent_wf_id / retry_wf_id），工作流据此把重试关联回原件并拒绝自审。
         """
         from temporalio.exceptions import WorkflowAlreadyStartedError
         from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
@@ -325,6 +412,8 @@ class TemporalGateway:
         from aiops_agent.config import load_policy, snapshot_for_workflow
 
         snapshot = snapshot_for_workflow(load_policy())
+        if evidence_context:
+            snapshot["evidence_context"] = dict(evidence_context)
         client = await self.client()
         try:
             handle = await client.start_workflow(
@@ -340,7 +429,13 @@ class TemporalGateway:
         self.invalidate_cache()
         return handle.id
 
-    async def start_requirement_flow(self, task, wf_id: str, resume_patch: dict | None = None) -> str:
+    async def start_requirement_flow(
+        self,
+        task,
+        wf_id: str,
+        resume_patch: dict | None = None,
+        evidence_context: dict | None = None,
+    ) -> str:
         """启动需求驱动修复流程（管理员批准分析结果后）；幂等键 ``aiops-req-{analysis_id}-v{version}``。
 
         与 :meth:`start_flow` 同约定：策略快照在启动时读取；已存在同 ID 流程时抛 ValueError。
@@ -358,6 +453,8 @@ class TemporalGateway:
         snapshot = snapshot_for_workflow(load_policy())
         if resume_patch is not None:
             snapshot["resume_patch"] = resume_patch
+        if evidence_context:
+            snapshot["evidence_context"] = dict(evidence_context)
         client = await self.client()
         try:
             handle = await client.start_workflow(

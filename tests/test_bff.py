@@ -1360,6 +1360,31 @@ class ImCommandEndpointTest(unittest.IsolatedAsyncioTestCase):
         base.update(overrides)
         return base
 
+    _BINDING: dict = {
+        "contract": "approval-evidence-v1",
+        "case_id": "a-201",
+        "patch_id": "patch-201",
+        "diff_hash": "a" * 64,
+        "test_report_hash": "b" * 64,
+        "policy_sha256": "c" * 64,
+        "run_id": "run-201",
+    }
+
+    def _v2_status(self, **overrides) -> dict:
+        """v2 流程 status：命令必须携带证据信封，审计需回写哈希。"""
+        base = {
+            "stage": "WAIT_APPROVAL",
+            "approval": None,
+            "needs_second": False,
+            "second_approval": None,
+            "approval_contract": "approval-evidence-v1",
+            "evidence_binding": dict(self._BINDING),
+            "case_id": "a-201",
+            "requested_by": "bob",
+        }
+        base.update(overrides)
+        return base
+
     async def test_help_reply(self):
         payload = await chatops_routes.api_im_command(self._im_request(), {"sender": "alice", "text": "帮助"})
         self.assertTrue(payload["ok"])
@@ -1422,13 +1447,89 @@ class ImCommandEndpointTest(unittest.IsolatedAsyncioTestCase):
                 )
                 rows = audit.read_audit()
         self.assertTrue(payload["ok"])
-        self.assertIn("一级审批已批准", payload["reply"])
+        self.assertIn("一级审批命令已提交", payload["reply"])
         signal.assert_awaited_once_with(self._WF_ID, "approve")
         invalidate.assert_called_once()
         self.assertEqual(rows[0]["actor"], "im:alice")
         self.assertEqual(rows[0]["action"], "chatops:approval:approve")
         self.assertEqual(rows[0]["result"], "signaled")
         self.assertEqual(rows[0]["params"]["channel"], "im")
+        self.assertEqual(rows[0]["params"]["delivery"], "submitted")
+
+    async def test_v2_approve_sends_evidence_envelope(self):
+        roles = json.dumps({"alice": "operator"})
+        accepted = {"command_id": "cmd-x", "gate": "approval", "decision": "approve"}
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"AIOPS_IM_USERS": roles}), \
+                 mock.patch.object(chatops_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+                 mock.patch.object(chatops_routes.gw, "flow_detail", mock.AsyncMock(return_value=self._detail(status=self._v2_status()))), \
+                 mock.patch.object(chatops_routes.gw, "signal_approval", mock.AsyncMock()) as signal, \
+                 mock.patch.object(chatops_routes.gw, "approval_receipt", mock.AsyncMock(return_value=("accepted", accepted))) as receipt, \
+                 mock.patch.object(chatops_routes.gw, "invalidate_cache"), \
+                 mock.patch.object(chatops_routes.kill_switch, "get_state", return_value={"active": False}), \
+                 mock.patch.object(chatops_routes.audit, "DATA_DIR", Path(tmp)):
+                payload = await chatops_routes.api_im_command(self._im_request(),
+                    {"sender": "alice", "text": f"批准 {self._WF_ID}"}
+                )
+                rows = audit.read_audit()
+        self.assertTrue(payload["ok"])
+        envelope = signal.await_args.args[1]
+        self.assertEqual(envelope["contract"], "approval-evidence-v1")
+        self.assertEqual(envelope["actor"], "alice")
+        self.assertEqual(envelope["channel"], "im")
+        self.assertEqual(envelope["diff_hash"], "a" * 64)
+        self.assertEqual(envelope["run_id"], "run-201")
+        self.assertTrue(envelope["command_id"])
+        receipt.assert_awaited_once_with(self._WF_ID, envelope["command_id"])
+        self.assertEqual(rows[0]["params"]["delivery"], "accepted")
+        self.assertEqual(rows[0]["params"]["command_id"], envelope["command_id"])
+        self.assertEqual(rows[0]["params"]["diff_hash"], "a" * 64)
+
+    async def test_v2_reject_requires_comment(self):
+        roles = json.dumps({"alice": "operator"})
+        with mock.patch.dict(os.environ, {"AIOPS_IM_USERS": roles}), \
+             mock.patch.object(chatops_routes.gw, "signal_approval", mock.AsyncMock()) as signal:
+            payload = await chatops_routes.api_im_command(self._im_request(),
+                {"sender": "alice", "text": f"驳回 {self._WF_ID}"}
+            )
+        self.assertFalse(payload["ok"])
+        self.assertIn("驳回必须填写审批意见", payload["reply"])
+        signal.assert_not_awaited()
+
+    async def test_v2_duty_separation_blocks_self_approval(self):
+        roles = json.dumps({"alice": "operator"})
+        status = self._v2_status(requested_by="alice")
+        with mock.patch.dict(os.environ, {"AIOPS_IM_USERS": roles}), \
+             mock.patch.object(chatops_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+             mock.patch.object(chatops_routes.gw, "flow_detail", mock.AsyncMock(return_value=self._detail(status=status))), \
+             mock.patch.object(chatops_routes.gw, "signal_approval", mock.AsyncMock()) as signal, \
+             mock.patch.object(chatops_routes.kill_switch, "get_state", return_value={"active": False}), \
+             mock.patch.object(chatops_routes.audit, "write_audit") as write_audit:
+            payload = await chatops_routes.api_im_command(self._im_request(),
+                {"sender": "alice", "text": f"批准 {self._WF_ID}"}
+            )
+        self.assertFalse(payload["ok"])
+        self.assertIn("职责分离", payload["reply"])
+        signal.assert_not_awaited()
+        self.assertEqual(write_audit.call_args.kwargs["result"], "denied")
+
+    async def test_v2_workflow_rejection_is_reported(self):
+        roles = json.dumps({"alice": "operator"})
+        rejection = {"command_id": "cmd-x", "reason": "证据绑定已变化"}
+        with mock.patch.dict(os.environ, {"AIOPS_IM_USERS": roles}), \
+             mock.patch.object(chatops_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+             mock.patch.object(chatops_routes.gw, "flow_detail", mock.AsyncMock(return_value=self._detail(status=self._v2_status()))), \
+             mock.patch.object(chatops_routes.gw, "signal_approval", mock.AsyncMock()), \
+             mock.patch.object(chatops_routes.gw, "approval_receipt", mock.AsyncMock(return_value=("rejected", rejection))), \
+             mock.patch.object(chatops_routes.gw, "invalidate_cache"), \
+             mock.patch.object(chatops_routes.kill_switch, "get_state", return_value={"active": False}), \
+             mock.patch.object(chatops_routes.audit, "write_audit") as write_audit:
+            payload = await chatops_routes.api_im_command(self._im_request(),
+                {"sender": "alice", "text": f"批准 {self._WF_ID}"}
+            )
+        self.assertFalse(payload["ok"])
+        self.assertIn("未生效：证据绑定已变化", payload["reply"])
+        self.assertEqual(write_audit.call_args.kwargs["result"], "rejected")
 
     async def test_approve_guard_rejections(self):
         """前置校验与 Web 控制台同款：阶段不符 / 已结束 / 已决策均被拒绝（ok:false）。"""
@@ -1594,19 +1695,48 @@ class CardCallbackEndpointTest(unittest.IsolatedAsyncioTestCase):
         operator: str | None = _OPERATOR,
         wf_id: str | None = None,
         event_type: str = "card.action.trigger",
+        comment: str = "",
+        evidence: dict | None = None,
     ) -> dict:
         """新版卡片动作回调载荷（Verification Token 在 header.token）。"""
+        value = {"wf_id": wf_id or self._WF_ID, "gate": gate, "decision": decision}
+        if comment:
+            value["comment"] = comment
+        if evidence:
+            value.update(evidence)
         return {
             "schema": "2.0",
             "header": {"event_id": "ev-1", "event_type": event_type, "token": self._TOKEN},
             "event": {
                 "operator": {"open_id": operator} if operator is not None else {},
-                "action": {
-                    "tag": "button",
-                    "value": {"wf_id": wf_id or self._WF_ID, "gate": gate, "decision": decision},
-                },
+                "action": {"tag": "button", "value": value},
             },
         }
+
+    _BINDING: dict = {
+        "contract": "approval-evidence-v1",
+        "case_id": "a-301",
+        "patch_id": "patch-301",
+        "diff_hash": "a" * 64,
+        "test_report_hash": "b" * 64,
+        "policy_sha256": "c" * 64,
+        "run_id": "run-301",
+    }
+
+    def _v2_status(self, **overrides) -> dict:
+        """v2 流程 status：携带契约、证据绑定与发起人。"""
+        base = {
+            "stage": "WAIT_APPROVAL",
+            "approval": None,
+            "needs_second": False,
+            "second_approval": None,
+            "approval_contract": "approval-evidence-v1",
+            "evidence_binding": dict(self._BINDING),
+            "case_id": "a-301",
+            "requested_by": "alice",
+        }
+        base.update(overrides)
+        return base
 
     @contextlib.contextmanager
     def _channel_env(self, token: str = _TOKEN, users: dict | None = None):
@@ -1653,15 +1783,16 @@ class CardCallbackEndpointTest(unittest.IsolatedAsyncioTestCase):
                 reply = await im_callback_routes.api_im_card_callback(self._v2())
                 rows = audit.read_audit()
         self.assertEqual(reply["toast"]["type"], "success")
-        self.assertIn("一级审批已批准", reply["toast"]["content"])
+        self.assertIn("一级审批批准命令已提交", reply["toast"]["content"])
         card = reply["card"]
         self.assertEqual(card["type"], "raw")
-        self.assertEqual(card["data"]["header"]["template"], "green")
+        self.assertEqual(card["data"]["header"]["template"], "blue")
         signal.assert_awaited_once_with(self._WF_ID, "approve")
         invalidate.assert_called_once()
         self.assertEqual(rows[0]["actor"], f"im:{self._OPERATOR}")
         self.assertEqual(rows[0]["action"], "card-callback:approval:approve")
         self.assertEqual(rows[0]["params"]["channel"], "feishu-card")
+        self.assertEqual(rows[0]["params"]["delivery"], "submitted")
         self.assertEqual(rows[0]["result"], "signaled")
 
     async def test_second_approval_approve(self):
@@ -1675,7 +1806,7 @@ class CardCallbackEndpointTest(unittest.IsolatedAsyncioTestCase):
              mock.patch.object(im_callback_routes.audit, "write_audit"):
             reply = await im_callback_routes.api_im_card_callback(self._v2(gate="second_approval"))
         self.assertEqual(reply["toast"]["type"], "success")
-        self.assertIn("二级审批已批准", reply["toast"]["content"])
+        self.assertIn("二级审批批准命令已提交", reply["toast"]["content"])
         signal.assert_awaited_once_with(self._WF_ID, "approve")
 
     async def test_unmapped_operator_cannot_approve(self):
@@ -1755,7 +1886,12 @@ class CardCallbackEndpointTest(unittest.IsolatedAsyncioTestCase):
             "token": self._TOKEN,
             "action": {
                 "tag": "button",
-                "value": {"wf_id": self._WF_ID, "gate": "approval", "decision": "reject"},
+                "value": {
+                    "wf_id": self._WF_ID,
+                    "gate": "approval",
+                    "decision": "reject",
+                    "comment": "历史原因：变更窗口冲突",
+                },
             },
         }
         with self._channel_env(), \
@@ -1767,10 +1903,87 @@ class CardCallbackEndpointTest(unittest.IsolatedAsyncioTestCase):
              mock.patch.object(im_callback_routes.audit, "write_audit"):
             reply = await im_callback_routes.api_im_card_callback(payload)
         self.assertEqual(reply["toast"]["type"], "success")
-        self.assertIn("一级审批已驳回", reply["toast"]["content"])
+        self.assertIn("一级审批驳回命令已提交", reply["toast"]["content"])
         self.assertNotIn("type", reply["card"])  # 旧版响应：card 直接为卡片 JSON
-        self.assertEqual(reply["card"]["header"]["template"], "red")
+        self.assertEqual(reply["card"]["header"]["template"], "blue")
         signal.assert_awaited_once_with(self._WF_ID, "reject")
+
+    async def test_v2_approval_carries_evidence_and_receipt(self):
+        evidence = {"case_id": "a-301", "diff_hash": "a" * 64, "run_id": "run-301"}
+        accepted = {"command_id": "cmd-x", "gate": "approval", "decision": "approve"}
+        with self._channel_env(), \
+             mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+             mock.patch.object(im_callback_routes.gw, "flow_detail", mock.AsyncMock(return_value=self._detail(status=self._v2_status()))), \
+             mock.patch.object(im_callback_routes.gw, "signal_approval", mock.AsyncMock()) as signal, \
+             mock.patch.object(im_callback_routes.gw, "approval_receipt", mock.AsyncMock(return_value=("accepted", accepted))) as receipt, \
+             mock.patch.object(im_callback_routes.gw, "invalidate_cache"), \
+             mock.patch.object(im_callback_routes.kill_switch, "get_state", return_value={"active": False}), \
+             mock.patch.object(im_callback_routes.audit, "write_audit") as write_audit:
+            reply = await im_callback_routes.api_im_card_callback(self._v2(evidence=evidence))
+        self.assertEqual(reply["toast"]["type"], "success")
+        self.assertIn("一级审批批准命令已提交", reply["toast"]["content"])
+        envelope = signal.await_args.args[1]
+        self.assertEqual(envelope["contract"], "approval-evidence-v1")
+        self.assertEqual(envelope["case_id"], "a-301")
+        self.assertEqual(envelope["diff_hash"], "a" * 64)
+        self.assertEqual(envelope["run_id"], "run-301")
+        self.assertEqual(envelope["channel"], "feishu-card")
+        self.assertTrue(envelope["command_id"])
+        receipt.assert_awaited_once_with(self._WF_ID, envelope["command_id"])
+        params = write_audit.call_args.kwargs["params"]
+        self.assertEqual(params["delivery"], "accepted")
+        self.assertEqual(params["command_id"], envelope["command_id"])
+        self.assertEqual(params["diff_hash"], "a" * 64)
+        self.assertEqual(write_audit.call_args.kwargs["result"], "signaled")
+
+    async def test_v2_reject_without_comment_rejected(self):
+        with self._channel_env(), \
+             mock.patch.object(im_callback_routes.gw, "signal_approval", mock.AsyncMock()) as signal:
+            reply = await im_callback_routes.api_im_card_callback(self._v2(decision="reject"))
+        self.assertEqual(reply["toast"]["type"], "error")
+        self.assertIn("驳回必须填写审批意见", reply["toast"]["content"])
+        signal.assert_not_awaited()
+
+    async def test_v2_self_approval_denied(self):
+        with self._channel_env(users={self._OPERATOR: "operator", "alice": "operator"}), \
+             mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+             mock.patch.object(im_callback_routes.gw, "flow_detail", mock.AsyncMock(return_value=self._detail(status=self._v2_status(requested_by=self._OPERATOR)))), \
+             mock.patch.object(im_callback_routes.gw, "signal_approval", mock.AsyncMock()) as signal, \
+             mock.patch.object(im_callback_routes.kill_switch, "get_state", return_value={"active": False}), \
+             mock.patch.object(im_callback_routes.audit, "write_audit") as write_audit:
+            reply = await im_callback_routes.api_im_card_callback(self._v2())
+        self.assertEqual(reply["toast"]["type"], "error")
+        self.assertIn("职责分离", reply["toast"]["content"])
+        signal.assert_not_awaited()
+        self.assertEqual(write_audit.call_args.kwargs["result"], "denied")
+
+    async def test_v2_stale_card_rejected(self):
+        stale = {"case_id": "a-301", "diff_hash": "d" * 64, "run_id": "run-301"}
+        with self._channel_env(), \
+             mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+             mock.patch.object(im_callback_routes.gw, "flow_detail", mock.AsyncMock(return_value=self._detail(status=self._v2_status()))), \
+             mock.patch.object(im_callback_routes.gw, "signal_approval", mock.AsyncMock()) as signal, \
+             mock.patch.object(im_callback_routes.kill_switch, "get_state", return_value={"active": False}):
+            reply = await im_callback_routes.api_im_card_callback(self._v2(evidence=stale))
+        self.assertEqual(reply["toast"]["type"], "error")
+        self.assertIn("审批依据已变化", reply["toast"]["content"])
+        signal.assert_not_awaited()
+
+    async def test_v2_workflow_rejection_keeps_card(self):
+        rejection = {"command_id": "cmd-x", "reason": "证据绑定已变化"}
+        with self._channel_env(), \
+             mock.patch.object(im_callback_routes.gw, "list_flows", mock.AsyncMock(return_value=[dict(self._WAIT_ITEM)])), \
+             mock.patch.object(im_callback_routes.gw, "flow_detail", mock.AsyncMock(return_value=self._detail(status=self._v2_status()))), \
+             mock.patch.object(im_callback_routes.gw, "signal_approval", mock.AsyncMock()), \
+             mock.patch.object(im_callback_routes.gw, "approval_receipt", mock.AsyncMock(return_value=("rejected", rejection))), \
+             mock.patch.object(im_callback_routes.gw, "invalidate_cache"), \
+             mock.patch.object(im_callback_routes.kill_switch, "get_state", return_value={"active": False}), \
+             mock.patch.object(im_callback_routes.audit, "write_audit") as write_audit:
+            reply = await im_callback_routes.api_im_card_callback(self._v2())
+        self.assertEqual(reply["toast"]["type"], "error")
+        self.assertIn("未生效：证据绑定已变化", reply["toast"]["content"])
+        self.assertNotIn("card", reply)  # 拒收不清空按钮区，便于修正后重试
+        self.assertEqual(write_audit.call_args.kwargs["result"], "rejected")
 
     async def test_registered_in_openapi(self):
         paths = set(app.app.openapi().get("paths", {}))

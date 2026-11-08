@@ -13,11 +13,17 @@
     parse_callback            卡片按钮回调解析（飞书 v2 卡片动作事件 / v1 action.value /
                               钉钉 actionURL 查询参数），返回 (workflow_id, gate, decision)，
                               供回调服务端校验后转发 signal
+    extract_callback_comment  卡片回调携带的审批意见（表单 / value.comment / URL 参数），
+                              飞书/钉钉按钮无法自然输入文本，驳回缺失时由调用方拒绝
+    extract_callback_evidence 卡片回调携带的证据摘要（case_id / diff_hash / run_id），
+                              用于 stale 页面校验
     extract_callback_operator 回调触发者提取（飞书 v2 event.operator / v1 open_id），
                               用于审批人身份与命令级权限判定
-    render_approval_result_card  审批处置结果卡片（卡片回调响应：按钮区替换为处置结果）
+    render_approval_result_card  审批命令回执卡片（按钮区替换为命令提交结果，
+                              业务结果以流程状态为准，不再声称"已批准"）
 
-回调契约（按钮载荷）：{"wf_id": "aiops-fix-order-a-1", "gate": "approval", "decision": "approve"}
+回调契约（按钮载荷）：{"wf_id": "aiops-fix-order-a-1", "gate": "approval",
+"decision": "approve"}；v2 流程额外携带 case_id / diff_hash / run_id。
 
 回调网关：BFF ``POST /api/im/card-callback`` 接收飞书卡片动作回调（Verification Token
 校验 fail-closed）→ 解析载荷与操作者 → 转发 Temporal signal → 3 秒内响应 toast + 更新卡片。
@@ -76,10 +82,45 @@ def _workflow_id(alert: Alert) -> str:
     return f"aiops-fix-{alert.service}-{alert.alert_id}"
 
 
-def _callback_url(base: str, wf_id: str, gate: str, decision: str) -> str:
-    """钉钉 actionURL：按钮点击回调地址（查询参数携带回调契约）。"""
-    query = urllib.parse.urlencode({"wf_id": wf_id, "gate": gate, "decision": decision})
-    return f"{base.rstrip('/')}?{query}"
+def _callback_url(
+    base: str, wf_id: str, gate: str, decision: str, evidence: dict | None = None
+) -> str:
+    """钉钉 actionURL：按钮点击回调地址（查询参数携带回调契约与证据摘要）。"""
+    query = {
+        "wf_id": wf_id,
+        "gate": gate,
+        "decision": decision,
+        **_evidence_fields(evidence),
+    }
+    return f"{base.rstrip('/')}?{urllib.parse.urlencode(query)}"
+
+
+def _evidence_fields(evidence: dict | None) -> dict:
+    """回调载荷中的证据摘要字段（仅 v2 流程；旧流程不增加任何字段）。"""
+    if not isinstance(evidence, dict):
+        return {}
+    fields = {}
+    for key in ("case_id", "diff_hash", "run_id"):
+        value = str(evidence.get(key) or "")
+        if value:
+            fields[key] = value
+    return fields
+
+
+def _evidence_summary(evidence: dict | None) -> str:
+    """卡片上的证据绑定摘要：让审批人看到自己审批的是哪一次变更。"""
+    if not isinstance(evidence, dict):
+        return ""
+    lines = [
+        f"案件：{evidence.get('case_id') or '-'} · 补丁：{evidence.get('patch_id') or '-'}",
+        "diff：{diff} · 测试：{test} · 策略：{policy}".format(
+            diff=str(evidence.get("diff_hash") or "-")[:12],
+            test=str(evidence.get("test_report_hash") or "-")[:12],
+            policy=str(evidence.get("policy_sha256") or "-")[:12],
+        ),
+        f"run：{str(evidence.get('run_id') or '-')[:12]}",
+    ]
+    return "**证据绑定**\n" + "\n".join(lines)
 
 
 def render_approval_card(
@@ -92,14 +133,20 @@ def render_approval_card(
     provider: str = DEFAULT_PROVIDER,
     callback_base: str = DEFAULT_CALLBACK_BASE,
     wf_id: str | None = None,
+    evidence: dict | None = None,
 ) -> dict:
     """审批卡片：根因分析 + 完整 diff + 测试报告 + 回滚预案 + 审批按钮。
 
     ``wf_id`` 为按钮回调载荷中的流程标识：活动层应传入运行中的真实 workflow id
     （需求流程 / 重跑后缀流程的公式值与实际 ID 不一致，否则点击回调无法定位流程）；
     缺省按 ``aiops-fix-{service}-{alert_id}`` 公式生成（兼容直接调用场景）。
+
+    ``evidence`` 为 approval-evidence-v1 绑定快照：提供时卡片展示证据摘要，按钮
+    回调携带 case_id / diff_hash / run_id，供 BFF 拒绝基于过期页面的审批。
     """
     wf_id = wf_id or _workflow_id(alert)
+    evidence_fields = _evidence_fields(evidence)
+    evidence_text = _evidence_summary(evidence)
     title = f"AI 修复待审批 · {alert.service}/{alert.alert_id}"
     test_line = (
         f"单测 {test_report.unit_tests} / 回归 {test_report.regression_tests} / SAST {test_report.sast}"
@@ -111,6 +158,8 @@ def render_approval_card(
             f"**测试**：{test_line}",
             f"**回滚预案**：{ROLLBACK_PLAN}",
         ]
+        if evidence_text:
+            lines.append(evidence_text)
         if needs_second:
             lines.append("**需二级审批**：命中受保护目录，请二级审批人确认")
         lines.append(f"**Diff**：\n```diff\n{patch.diff}\n```")
@@ -123,11 +172,15 @@ def render_approval_card(
                 "btns": [
                     {
                         "title": "批准",
-                        "actionURL": _callback_url(callback_base, wf_id, "approval", "approve"),
+                        "actionURL": _callback_url(
+                            callback_base, wf_id, "approval", "approve", evidence
+                        ),
                     },
                     {
                         "title": "驳回",
-                        "actionURL": _callback_url(callback_base, wf_id, "approval", "reject"),
+                        "actionURL": _callback_url(
+                            callback_base, wf_id, "approval", "reject", evidence
+                        ),
                     },
                 ],
             },
@@ -149,8 +202,14 @@ def render_approval_card(
         },
         {"tag": "div", "text": {"tag": "lark_md", "content": f"**测试**\n{test_line}"}},
         {"tag": "div", "text": {"tag": "lark_md", "content": f"**回滚预案**\n{ROLLBACK_PLAN}"}},
-        {"tag": "div", "text": {"tag": "lark_md", "content": f"**Diff**\n```diff\n{patch.diff}\n```"}},
     ]
+    if evidence_text:
+        elements.append(
+            {"tag": "div", "text": {"tag": "lark_md", "content": evidence_text}}
+        )
+    elements.append(
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**Diff**\n```diff\n{patch.diff}\n```"}},
+    )
     if needs_second:
         elements.append(
             {
@@ -169,13 +228,23 @@ def render_approval_card(
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "批准"},
                     "type": "primary",
-                    "value": {"wf_id": wf_id, "gate": "approval", "decision": "approve"},
+                    "value": {
+                        "wf_id": wf_id,
+                        "gate": "approval",
+                        "decision": "approve",
+                        **evidence_fields,
+                    },
                 },
                 {
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "驳回"},
                     "type": "danger",
-                    "value": {"wf_id": wf_id, "gate": "approval", "decision": "reject"},
+                    "value": {
+                        "wf_id": wf_id,
+                        "gate": "approval",
+                        "decision": "reject",
+                        **evidence_fields,
+                    },
                 },
             ],
         }
@@ -562,15 +631,8 @@ class NotificationSender:
         return result
 
 
-def parse_callback(payload: dict | str) -> tuple[str, str, str] | None:
-    """解析卡片按钮回调（回调服务端入口）。
-
-    支持三种结构：
-        飞书 v2：{"event": {"action": {"value": {"wf_id": ..., ...}}}}（card.action.trigger）
-        飞书 v1：{"action": {"value": {"wf_id": ..., ...}}}
-        钉钉：actionURL 字符串（查询参数携带同构字段）
-    返回 (wf_id, gate, decision)；字段缺失或取值非法返回 None（服务端据此拒绝）。
-    """
+def _callback_data(payload: dict | str) -> dict | None:
+    """从卡片回调中提取扁平字段（兼容飞书 v2 / v1 / 钉钉 actionURL）。"""
     data: dict | None = None
     if isinstance(payload, str):
         data = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(payload).query))
@@ -585,6 +647,19 @@ def parse_callback(payload: dict | str) -> tuple[str, str, str] | None:
                 data = value
             elif isinstance(value, str):
                 data = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(value).query))
+    return data or None
+
+
+def parse_callback(payload: dict | str) -> tuple[str, str, str] | None:
+    """解析卡片按钮回调（回调服务端入口）。
+
+    支持三种结构：
+        飞书 v2：{"event": {"action": {"value": {"wf_id": ..., ...}}}}（card.action.trigger）
+        飞书 v1：{"action": {"value": {"wf_id": ..., ...}}}
+        钉钉：actionURL 字符串（查询参数携带同构字段）
+    返回 (wf_id, gate, decision)；字段缺失或取值非法返回 None（服务端据此拒绝）。
+    """
+    data = _callback_data(payload)
     if not data:
         return None
     wf_id = str(data.get("wf_id") or "")
@@ -593,6 +668,42 @@ def parse_callback(payload: dict | str) -> tuple[str, str, str] | None:
     if not wf_id or gate not in _ALLOWED_GATES or decision not in _ALLOWED_DECISIONS:
         return None
     return wf_id, gate, decision
+
+
+def extract_callback_evidence(payload: dict | str) -> dict:
+    """提取回调携带的证据摘要（仅返回非空字段；旧卡片为空 dict）。"""
+    data = _callback_data(payload)
+    if not data:
+        return {}
+    return {
+        key: str(data[key])
+        for key in ("case_id", "diff_hash", "run_id")
+        if str(data.get(key) or "")
+    }
+
+
+def extract_callback_comment(payload: dict | str) -> str:
+    """提取卡片回调的审批意见。
+
+    飞书卡片可配置输入表单（``event.action.form_value``）；钉钉按钮无法输入文本，
+    只能在 actionURL 中携带。均未命中时返回空串，由调用方按「驳回必须填写意见」拒绝。
+    """
+    if isinstance(payload, dict):
+        event = payload.get("event")
+        source = event if isinstance(event, dict) else payload
+        action = source.get("action", source)
+        if isinstance(action, dict):
+            form = action.get("form_value")
+            if isinstance(form, dict):
+                value = form.get("comment")
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    data = _callback_data(payload)
+    if data:
+        value = data.get("comment")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def extract_callback_operator(payload: dict) -> str:
@@ -617,43 +728,63 @@ def extract_callback_operator(payload: dict) -> str:
     return ""
 
 
-# 闸门 / 决策中文标签（回调处置结果卡片用）
+# 闸门 / 决策中文标签（回调命令回执卡片用）
 _GATE_LABELS = {"approval": "一级审批", "second_approval": "二级审批"}
-_RESULT_LABELS = {"approve": "已批准", "reject": "已驳回"}
+_RESULT_LABELS = {"approve": "批准命令", "reject": "驳回命令"}
 
 
 def render_approval_result_card(
-    wf_id: str, gate: str, decision: str, operator: str, at: str
+    wf_id: str,
+    gate: str,
+    decision: str,
+    operator: str,
+    at: str,
+    *,
+    comment: str = "",
+    command_id: str = "",
 ) -> dict:
-    """审批处置结果卡片（卡片回调响应：按钮区替换为处置结果，防重复点击与状态不明）。
+    """审批命令回执卡片（卡片回调响应：按钮区替换为命令提交结果）。
 
+    只声明「命令已提交」，不声称业务已生效：signal RPC 成功不等于流程接受了审批
+    （工作流仍会二次校验证据/职责分离，结果以流程状态为准）。
     返回飞书 1.0 交互卡片消息结构；回调端点取 ``["card"]`` 作为响应 ``type=raw`` 数据。
-    ``at`` 为处置时间（调用方格式化）；渲染层保持纯函数（无时钟依赖）。
+    ``at`` 为提交时间（调用方格式化）；渲染层保持纯函数（无时钟依赖）。
     """
-    icon = "✅" if decision == "approve" else "❌"
+    icon = "📨"
     action_label = f"{_GATE_LABELS.get(gate, gate)}{_RESULT_LABELS.get(decision, decision)}"
-    title = f"AI 修复审批处置结果 · {wf_id}"
+    title = f"AI 修复审批命令回执 · {wf_id}"
+    elements = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"{icon} **{action_label}已提交**"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**流程**：{wf_id}"}},
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"**操作者**：{operator} · {at}"},
+        },
+    ]
+    if comment:
+        elements.append(
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**审批意见**：{comment}"}}
+        )
+    if command_id:
+        elements.append(
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**命令 ID**：{command_id}"}}
+        )
+    elements.append(
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "命令已送达流程；是否生效以流程状态为准（可能因证据过期或职责分离被拒绝）。",
+            },
+        }
+    )
     return {
         "msg_type": "interactive",
         "card": {
             "header": {
                 "title": {"tag": "plain_text", "content": title},
-                "template": "green" if decision == "approve" else "red",
+                "template": "blue",
             },
-            "elements": [
-                {"tag": "div", "text": {"tag": "lark_md", "content": f"{icon} **{action_label}**"}},
-                {"tag": "div", "text": {"tag": "lark_md", "content": f"**流程**：{wf_id}"}},
-                {
-                    "tag": "div",
-                    "text": {"tag": "lark_md", "content": f"**操作者**：{operator} · {at}"},
-                },
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": "流程将继续推进；后续节点（公告/发布/终态）将另行通知。",
-                    },
-                },
-            ],
+            "elements": elements,
         },
     }

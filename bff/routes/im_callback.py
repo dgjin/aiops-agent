@@ -14,9 +14,20 @@
 - 操作者审批权限在路由内判定（未映射发送者＝viewer，仅可查询不可审批）。
 
 响应策略：除凭证/格式错误外一律 HTTP 200 + toast——业务拒绝（未找到流程 / 阶段不符 /
-重复提交 / 权限不足 / kill switch）在卡片内呈现；5xx 会触发飞书重试与客户端错误码，
-且协议要求 3 秒内响应（本地 Temporal 调用为毫秒级）。兼容旧版回调结构（action 在
-顶层）的解析与响应包装；飞书后台建议仅订阅新版 card.action.trigger。
+重复提交 / 权限不足 / 职责分离 / 证据过期 / kill switch）在卡片内呈现；5xx 会触发
+飞书重试与客户端错误码，且协议要求 3 秒内响应（本地 Temporal 调用为毫秒级）。
+
+审批治理（与 Web 控制台 / ChatOps 同源）：
+- 职责分离：发起人不得自审，二级审批人与一级审批人不得相同；
+- 证据绑定：卡片携带 case_id/diff_hash/run_id，仅用于拒绝过期页面，可信绑定从
+  工作流 status 派生（不信任回调字段）；
+- 命令回执：signal RPC 成功只代表命令已送达，端点短轮询 status 取业务回执；
+  仅「已记录」时替换按钮区为回执卡，拒收时保留卡片便于修正重试；
+- 驳回意见：卡片按钮无法输入文本，无意见时拒绝并引导至控制台 / ChatOps，
+  绝不代填理由。
+
+兼容旧版回调结构（action 在顶层）的解析与响应包装；飞书后台建议仅订阅新版
+card.action.trigger。
 """
 
 from __future__ import annotations
@@ -34,13 +45,20 @@ from aiops_agent import kill_switch, metrics, notify
 from .. import audit
 from ..deps import ApiError, gw, log
 from .chatops import _find_flow, _sender_roles
-from .flows import _first_approval_extra, _second_approval_extra, _write_guard
+from .flows import (
+    _approval_audit_params,
+    _first_approval_extra,
+    _second_approval_extra,
+    _signal_envelope,
+    _write_guard,
+    duty_separation_error,
+)
 
 router = APIRouter()
 
 _TOKEN_ENV = "AIOPS_FEISHU_VERIFY_TOKEN"
 _ACTION_LABELS = {"approval": "一级审批", "second_approval": "二级审批"}
-_RESULT_LABELS = {"approve": "已批准", "reject": "已驳回"}
+_DECISION_LABELS = {"approve": "批准", "reject": "驳回"}
 
 
 def _declared_token(payload: dict) -> str:
@@ -86,6 +104,14 @@ async def api_im_card_callback(payload: dict) -> dict:
     if parsed is None:
         return _toast("error", "无法解析回调载荷（wf_id/gate/decision 缺失或非法）")
     wf_arg, gate, decision = parsed
+    comment = notify.extract_callback_comment(payload)
+    if decision == "reject" and not comment:
+        # 按钮无法输入理由：不代填、不推进，引导到可留痕的通道
+        log.info("[card-callback] 驳回缺少意见：gate=%s wf=%s", gate, wf_arg)
+        return _toast(
+            "error",
+            "驳回必须填写审批意见：请在控制台或群内发送「驳回 <ID前缀> -- 意见」",
+        )
     operator = notify.extract_callback_operator(payload)
     if not operator:
         return _toast("error", "无法识别操作者身份，已拒绝本次操作")
@@ -113,36 +139,96 @@ async def api_im_card_callback(payload: dict) -> dict:
         return _toast("error", exc.message)
     extra = _first_approval_extra if gate == "approval" else _second_approval_extra
     try:
-        await _write_guard(wf_id, {"WAIT_APPROVAL"}, extra)
+        status = await _write_guard(wf_id, {"WAIT_APPROVAL"}, extra)
+    except ApiError as exc:
+        log.info("[card-callback] 拒绝：operator=%s wf=%s：%s", operator, wf_id, exc.message)
+        return _toast("error", f"未执行：{exc.message}")
+
+    action = f"card-callback:{'approval' if gate == 'approval' else 'second-approval'}:{decision}"
+    separation = duty_separation_error(status, gate, operator)
+    if separation:
+        audit.write_audit(
+            actor=f"im:{operator}",
+            action=action,
+            wf_id=wf_id,
+            params={
+                "channel": "feishu-card",
+                "operator": operator,
+                "comment": comment,
+                "delivery": "denied",
+            },
+            result="denied",
+        )
+        return _toast("error", f"未执行：{separation}")
+
+    evidence = notify.extract_callback_evidence(payload)
+    try:
+        signal_payload, command_id = _signal_envelope(
+            status,
+            gate=gate,
+            decision=decision,
+            actor=operator,
+            channel="feishu-card",
+            comment=comment,
+            expected_case_id=evidence.get("case_id", ""),
+            expected_diff_hash=evidence.get("diff_hash", ""),
+            expected_run_id=evidence.get("run_id", ""),
+        )
     except ApiError as exc:
         log.info("[card-callback] 拒绝：operator=%s wf=%s：%s", operator, wf_id, exc.message)
         return _toast("error", f"未执行：{exc.message}")
     try:
         if gate == "approval":
-            await gw.signal_approval(wf_id, decision)
+            await gw.signal_approval(wf_id, signal_payload)
         else:
-            await gw.signal_second_approval(wf_id, decision)
+            await gw.signal_second_approval(wf_id, signal_payload)
     except RPCError as exc:
         log.warning("[card-callback] Temporal 调用失败：%s", exc)
         return _toast("error", "系统暂时不可用，请稍后重试或在控制台处置")
     gw.invalidate_cache()
-    metrics.observe_gate_event(gate, decision)
+
+    # signal RPC 成功只代表命令已送达；业务回执以工作流记录为准。
+    delivery, receipt = (
+        await gw.approval_receipt(wf_id, command_id) if command_id else ("submitted", None)
+    )
     audit.write_audit(
         actor=f"im:{operator}",
-        action=f"card-callback:{'approval' if gate == 'approval' else 'second-approval'}:{decision}",
+        action=action,
         wf_id=wf_id,
-        params={"channel": "feishu-card", "operator": operator},
-        result="signaled",
+        params={
+            **_approval_audit_params(
+                signal_payload, command_id, comment, "feishu-card", delivery
+            ),
+            "operator": operator,
+            **({"receipt": receipt} if delivery == "rejected" else {}),
+        },
+        result="rejected" if delivery == "rejected" else "signaled",
     )
+    if delivery == "rejected":
+        reason = (receipt or {}).get("reason") or "流程拒绝了该审批命令"
+        log.info("[card-callback] 流程拒绝：operator=%s wf=%s：%s", operator, wf_id, reason)
+        return _toast("error", f"未生效：{reason}")
+
+    metrics.observe_gate_event(gate, decision)
     at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    label = f"{_ACTION_LABELS.get(gate, gate)}{_RESULT_LABELS.get(decision, decision)}"
+    label = f"{_ACTION_LABELS.get(gate, gate)}{_DECISION_LABELS.get(decision, decision)}命令已提交"
     log.info("[card-callback] %s → %s/%s（wf=%s）", operator, gate, decision, wf_id)
-    result_card = notify.render_approval_result_card(wf_id, gate, decision, operator, at)
+    result_card = notify.render_approval_result_card(
+        wf_id, gate, decision, operator, at, comment=comment, command_id=command_id
+    )
     if isinstance(header, dict):  # 新版回调：card 带 type=raw 包装
         card_field: dict = {"type": "raw", "data": result_card["card"]}
     else:  # 旧版回调：card 直接为卡片 JSON
         card_field = result_card["card"]
     return {
-        "toast": {"type": "success", "content": f"{label}（操作者 {operator}）"},
+        "toast": {
+            "type": "success",
+            "content": f"{label}（操作者 {operator}）{_delivery_suffix(delivery)}",
+        },
         "card": card_field,
     }
+
+
+def _delivery_suffix(delivery: str) -> str:
+    """回执不确定时提示以流程状态为准；已记录时无需附加说明。"""
+    return "（业务结果以流程状态为准）" if delivery == "submitted" else ""

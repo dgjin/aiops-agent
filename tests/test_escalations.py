@@ -35,6 +35,7 @@ def _flow(
 ) -> dict:
     return {
         "wf_id": wf_id,
+        "run_id": "run-a1",
         "stage": stage,
         "gate_events": gate_events
         if gate_events is not None
@@ -350,6 +351,7 @@ def _req_flow(wf_id: str, alert_id: str, service: str = "nl2sql") -> dict:
     """需求来源的升级流程（如闸门 2 超时升级；alert_id 为 req-N 形态）。"""
     return {
         "wf_id": wf_id,
+        "run_id": "run-req-19",
         "stage": "ESCALATED",
         "gate_events": ["gate2:timeout:300s"],
         "alert": {"alert_id": alert_id, "service": service, "severity": "critical"},
@@ -414,6 +416,12 @@ class RetryRouteTest(unittest.TestCase):
         self.assertEqual(entry["status"], "closed")
         self.assertIn("aiops-req-ra-app-19-v1-req-19-retry1", entry["note"])
         self.assertEqual(self.audit.call_args.kwargs["params"]["mode"], "requirement")
+        context = self.start_req.call_args.kwargs["evidence_context"]
+        self.assertEqual(context["case_id"], "ra-app-19")
+        self.assertEqual(context["requested_by"], "admin1")
+        self.assertEqual(context["parent_run_id"], "run-req-19")
+        self.assertEqual(context["parent_wf_id"], "aiops-req-ra-app-19-v1")
+        self.assertEqual(context["retry_wf_id"], "aiops-req-ra-app-19-v1-req-19-retry1")
 
     def test_cascaded_generic_entry_resolves_by_alert_id(self) -> None:
         """② 旧逻辑级联的告警流待办（req-N-retryM）→ 剥离重试后缀反查会话。"""
@@ -441,6 +449,12 @@ class RetryRouteTest(unittest.TestCase):
         alert, wf_id = self.start_alert.call_args.args
         self.assertEqual(wf_id, "aiops-fix-order-a1-retry1")
         self.assertEqual(alert.alert_id, "a1-retry1")
+        context = self.start_alert.call_args.kwargs["evidence_context"]
+        self.assertEqual(context["case_id"], "a1")
+        self.assertEqual(context["requested_by"], "admin1")
+        self.assertEqual(context["parent_run_id"], "run-a1")
+        self.assertEqual(context["parent_wf_id"], "aiops-fix-order-a1")
+        self.assertEqual(context["retry_wf_id"], "aiops-fix-order-a1-retry1")
 
     def test_requirement_like_without_session_guides_human(self) -> None:
         """疑似需求来源但会话缺失：409 引导（不再按告警流空转）。"""

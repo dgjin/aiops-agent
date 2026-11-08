@@ -209,6 +209,8 @@ def new_entry(flow: dict, now: datetime | None = None) -> dict:
     return {
         "id": f"esc-{wf_id}",
         "wf_id": wf_id,
+        # 原运行实例：重试时作为新流程的 parent_run_id（同一 wf_id 重跑不混淆）
+        "run_id": str(flow.get("run_id") or ""),
         "alert_id": str(alert.get("alert_id") or ""),
         "service": str(alert.get("service") or ""),
         "auto_reason": reason,
@@ -429,6 +431,7 @@ def _row_to_entry(row) -> dict:
     return {
         "id": row["id"],
         "wf_id": row["wf_id"],
+        "run_id": row["run_id"] if "run_id" in row else "",
         "alert_id": row["alert_id"],
         "service": row["service"],
         "auto_reason": row["auto_reason"],
@@ -451,6 +454,7 @@ def _entry_values(entry: dict) -> dict:
     return {
         "id": entry["id"],
         "wf_id": entry["wf_id"],
+        "run_id": entry.get("run_id") or "",
         "alert_id": entry.get("alert_id") or "",
         "service": entry.get("service") or "",
         "auto_reason": entry.get("auto_reason") or "",

@@ -459,25 +459,35 @@ class TestExtractCallbackOperator(unittest.TestCase):
 
 
 class TestApprovalResultCard(unittest.TestCase):
-    """审批处置结果卡片（回调响应）：按钮区替换为处置结果，防重复点击与状态不明。"""
+    """审批命令回执卡片（回调响应）：只声明命令已提交，不代流程宣布生效。"""
 
     def test_approve_card_structure(self) -> None:
         card = notify.render_approval_result_card(
             "aiops-fix-order-nt-1", "approval", "approve", "ou_ops", "2026-10-14 09:00:00 UTC"
         )
         self.assertEqual(card["msg_type"], "interactive")
-        self.assertEqual(card["card"]["header"]["template"], "green")
+        self.assertEqual(card["card"]["header"]["template"], "blue")
         text = _card_text(card)
-        self.assertIn("一级审批已批准", text)
+        self.assertIn("一级审批批准命令已提交", text)
+        self.assertIn("以流程状态为准", text)
         self.assertIn("ou_ops", text)
-        self.assertNotIn('"tag": "action"', text)  # 按钮区已被处置结果替代
+        self.assertNotIn('"tag": "action"', text)  # 按钮区已被回执替代
 
-    def test_reject_card_second_gate(self) -> None:
+    def test_reject_card_second_gate_with_comment(self) -> None:
         card = notify.render_approval_result_card(
-            "aiops-fix-order-nt-1", "second_approval", "reject", "ou_ops", "t"
+            "aiops-fix-order-nt-1",
+            "second_approval",
+            "reject",
+            "ou_ops",
+            "t",
+            comment="变更窗口内不允许",
+            command_id="cmd-123",
         )
-        self.assertEqual(card["card"]["header"]["template"], "red")
-        self.assertIn("二级审批已驳回", _card_text(card))
+        self.assertEqual(card["card"]["header"]["template"], "blue")
+        text = _card_text(card)
+        self.assertIn("二级审批驳回命令已提交", text)
+        self.assertIn("变更窗口内不允许", text)
+        self.assertIn("cmd-123", text)
 
 
 class TestActivityIntegration(unittest.TestCase):

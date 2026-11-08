@@ -165,7 +165,9 @@ class EvidenceGateTest(unittest.IsolatedAsyncioTestCase):
 
         with mock.patch.object(instance, "_call", side_effect=call), mock.patch.object(
             workflows.workflow, "patched", side_effect=self._patched(False)
-        ), mock.patch.object(workflows.workflow, "now", return_value=NOW):
+        ), mock.patch.object(workflows.workflow, "now", return_value=NOW), mock.patch.object(
+            workflows.workflow, "info", return_value=mock.Mock(workflow_id="wf-gate", run_id="run-gate")
+        ):
             with self.assertRaises(_StopAfterEvidence):
                 await instance.run(ALERT, POLICY)
         collect = next(args for name, args in calls if name == "collect_evidence")

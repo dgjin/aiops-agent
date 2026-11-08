@@ -22,6 +22,13 @@ IM 通知（接收/进入修复，patched 守护）：
     - 接收即推送处理流程说明（告警：日志取证→聚类→根因→闸门1；需求：已批准→直接修复）；
     - 进入修复流程前推送分析结论 + 修复链路与模式（影子档/全链路）；
     - 新增活动调用以 workflow.patched 标记守护，旧运行中流程的历史重放不受影响。
+
+审批证据（approval-evidence-v1，patched 守护）：
+    - 进入闸门 2 时把 case / patch / diff / 测试报告 / 策略快照 / run 绑定进
+      ``status.evidence_binding``，审批必须基于该次变更而不是仅凭流程 ID；
+    - 新流程只接受 BFF/CLI 构造的审批信封（actor / channel / comment / command_id），
+      工作流收到信号后二次校验证据、闸门前提与职责分离，非法信号只登记拒绝原因、不推进；
+    - 旧在途流程（无 patch 标记）继续接受字符串 decision，保证历史重放与滚动升级兼容。
 """
 
 from __future__ import annotations
@@ -36,6 +43,7 @@ from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
     from . import activities
+    from . import change_evidence
     from . import gate_decision
     from .models import (
         Alert,
@@ -152,20 +160,38 @@ class AIOpsFixWorkflow:
         self._gate_events: list[str] = []
         self._approvals: list[dict] = []
         self._policy: dict = {}
+        # ---------- 审批证据（approval-evidence-v1） ----------
+        # ``_approval_contract`` 为空表示旧协议（字符串 decision）；进入闸门 2 时
+        # 由 patched 标记决定是否升级为证据信封协议。旧在途流程保持字符串协议。
+        self._approval_contract: str = ""
+        self._evidence_binding: dict | None = None
+        self._approval_error: dict | None = None
+        self._approval_rejections: list[dict] = []
+        self._command_ids: dict[str, str] = {}
+        self._run_id: str = ""
+        self._case_id: str = ""
+        self._requested_by: str = ""
+        self._parent_run_id: str = ""
+        self._parent_wf_id: str = ""
+        self._retry_wf_id: str = ""
 
     # ------------------------------------------------------------------
     # 信号接口（设计方案 8.1）
     # ------------------------------------------------------------------
 
     @workflow.signal
-    def submit_approval(self, decision: str) -> None:
-        """运维一级审批：approve / reject。"""
-        self._approval = decision
+    def submit_approval(self, payload) -> None:
+        """运维一级审批：approval-evidence-v1 信封；旧流程兼容字符串 decision。
+
+        参数故意不加类型注解：Temporal SDK 对无注解参数使用 ``arg_types=[None]``
+        解码，可同时接收字符串（旧协议）与 dict（证据信封），从而支持滚动升级。
+        """
+        self._handle_approval_signal("approval", payload)
 
     @workflow.signal
-    def submit_second_approval(self, decision: str) -> None:
-        """受保护目录二级审批：approve / reject。"""
-        self._second_approval = decision
+    def submit_second_approval(self, payload) -> None:
+        """受保护目录二级审批：approval-evidence-v1 信封；旧流程兼容字符串 decision。"""
+        self._handle_approval_signal("second_approval", payload)
 
     @workflow.signal
     def submit_deploy_command(self, command: str) -> None:
@@ -177,6 +203,132 @@ class AIOpsFixWorkflow:
         """窗口内新补丁：仅 FIFO 入队——不重置倒计时、不合并、数量不设上限（锁定策略）。"""
         self._queued_patches.append((workflow_id, alert))
         self._gate_events.append(f"gate3:patch-queued:{alert.alert_id}")
+
+    # ------------------------------------------------------------------
+    # 审批信号处理（approval-evidence-v1）
+    # ------------------------------------------------------------------
+
+    def _handle_approval_signal(self, gate: str, payload) -> None:
+        """审批信号统一入口（确定性：不读时钟以外的外部状态、无 IO）。
+
+        - 旧流程（``_approval_contract`` 为空）：保持字符串协议，历史重放不受影响；
+        - 新流程：结构 → 闸门前提 → 证据绑定 → 职责分离逐项校验，非法信号只登记
+          拒绝原因并继续等待，绝不推进流程（fail-closed）。
+
+        command_id 幂等：相同 ID + 相同内容视为重复投递（忽略并留痕）；
+        相同 ID + 不同内容视为篡改/冲突，直接拒绝。
+        """
+        if self._approval_contract != change_evidence.CONTRACT:
+            if not isinstance(payload, str):
+                self._record_approval_rejection(
+                    gate,
+                    "legacy-payload",
+                    "旧流程仅接受字符串审批决策；请升级 BFF/控制台后重试",
+                )
+                return
+            if gate == "approval":
+                self._approval = payload
+            else:
+                self._second_approval = payload
+            return
+
+        # 回执关联：即使信封结构非法，只要携带 command_id 也写入拒收记录，
+        # 使 BFF 能把「业务拒绝」准确回给发起命令的客户端。
+        raw_command_id = ""
+        if isinstance(payload, dict):
+            raw_command_id = str(payload.get("command_id") or "")[:128]
+        structure = change_evidence.envelope_problem(payload)
+        if structure is not None:
+            self._record_approval_rejection(
+                gate, structure[0], structure[1], command_id=raw_command_id
+            )
+            return
+        command_id = str(payload["command_id"])
+        digest = change_evidence.envelope_digest(payload)
+        previous = self._command_ids.get(command_id)
+        if previous is not None:
+            if previous == digest:
+                # 重投（网络重试/双点）：幂等忽略，不产生第二条审批记录
+                self._gate_events.append(f"approval:duplicate-command:{command_id}")
+            else:
+                self._record_approval_rejection(
+                    gate,
+                    "command-id-conflict",
+                    f"审批命令 {command_id} 的内容不一致，已拒绝",
+                    command_id=command_id,
+                )
+            return
+
+        current_decision = self._approval if gate == "approval" else self._second_approval
+        problem = change_evidence.validate_envelope(
+            payload,
+            gate=gate,
+            binding=self._evidence_binding,
+            requested_by=self._requested_by,
+            first_approval=self._approved_first_record(),
+            needs_second=self._needs_second,
+            already_decided=current_decision is not None,
+            second_decided=self._second_approval is not None,
+        )
+        if problem is not None:
+            self._record_approval_rejection(
+                gate, problem[0], problem[1], command_id=command_id
+            )
+            return
+
+        self._command_ids[command_id] = digest
+        self._approvals.append(
+            change_evidence.approval_record(payload, received_at=workflow.now().isoformat())
+        )
+        if gate == "approval":
+            self._approval = str(payload["decision"])
+        else:
+            self._second_approval = str(payload["decision"])
+        self._approval_error = None
+        self._gate_events.append(
+            f"approval:received:{gate}:{payload['decision']}:by={payload['actor']}:"
+            f"channel={payload['channel']}:command={command_id}"
+        )
+
+    def _approved_first_record(self) -> dict | None:
+        """已生效的一级审批记录（二级审批职责分离依据）。"""
+        for record in self._approvals:
+            if record.get("gate") == "approval" and record.get("decision") == "approve":
+                return record
+        return None
+
+    def _record_approval_rejection(
+        self, gate: str, code: str, reason: str, *, command_id: str = ""
+    ) -> None:
+        """登记非法审批信号（可见、可审计、不推进流程）；列表上限防历史膨胀。"""
+        entry = {
+            "gate": gate,
+            "code": code,
+            "reason": reason,
+            "command_id": str(command_id or ""),
+            "at": workflow.now().isoformat(),
+        }
+        self._approval_error = entry
+        self._approval_rejections.append(entry)
+        if len(self._approval_rejections) > 20:
+            del self._approval_rejections[0]
+        self._gate_events.append(f"approval_rejected:{gate}:{code}")
+
+    def _record_timeout(self, gate: str) -> None:
+        """超时自动驳回：v2 记录同样携带完整证据绑定，保持审计同构。"""
+        self._approvals.append(
+            {
+                "gate": gate,
+                "decision": "timeout-reject",
+                "actor": "system",
+                "channel": "system",
+                "comment": "审批超时，系统自动驳回",
+                "command_id": "",
+                "submitted_at": "",
+                "received_at": workflow.now().isoformat(),
+                **(self._evidence_binding or {}),
+            }
+        )
 
     # ------------------------------------------------------------------
     # 查询接口（设计方案 8.2）
@@ -203,6 +355,20 @@ class AIOpsFixWorkflow:
                 {"workflow_id": wid, "alert_id": alert.alert_id}
                 for wid, alert in self._queued_patches
             ],
+            # ---------- 审批证据与运行溯源（approval-evidence-v1） ----------
+            # BFF 依据 approval_contract 判断能否构造信封（空串=旧流程，只发字符串）。
+            "run_id": self._run_id,
+            "case_id": self._case_id,
+            "requested_by": self._requested_by,
+            "parent_run_id": self._parent_run_id,
+            "parent_wf_id": self._parent_wf_id,
+            "retry_wf_id": self._retry_wf_id,
+            "approval_contract": self._approval_contract,
+            "evidence_binding": self._evidence_binding,
+            "approvals": self._approvals,
+            "gate_events": self._gate_events,
+            "approval_error": self._approval_error,
+            "approval_rejections": self._approval_rejections,
         }
 
     # ------------------------------------------------------------------
@@ -214,6 +380,9 @@ class AIOpsFixWorkflow:
         started = workflow.now()
         self._policy = policy
         self._alert = alert
+        self._run_id = workflow.info().run_id
+        self._case_id = alert.alert_id
+        self._apply_evidence_context()
         triage_cfg = policy["triage"]
         approval_cfg = policy["approval"]
         notify_cfg = policy["notify_window"]
@@ -441,9 +610,48 @@ class AIOpsFixWorkflow:
         self._second_approval = None
         needs_second = protected
         self._needs_second = needs_second
-        await self._call(
-            activities.notify_approvers, alert, root_cause, patch, test_report, needs_second
-        )
+        # 审批证据 v1：新流程把本次变更绑定进 status，并要求审批携带信封；
+        # 旧在途流程 patched=False（无 marker），继续字符串协议，历史重放无额外命令。
+        approval_evidence = workflow.patched("approval-evidence-v1")
+        if approval_evidence:
+            self._approval_contract = change_evidence.CONTRACT
+            self._evidence_binding = change_evidence.build_binding(
+                case_id=self._case_id,
+                patch=patch,
+                test_report=test_report,
+                policy_sha256=str(self._policy.get("policy_sha256") or ""),
+                run_id=self._run_id,
+            )
+            binding_error = change_evidence.binding_problem(self._evidence_binding)
+            if binding_error is not None:
+                # 证据不完整不能进入审批（不伪造哈希）：fail-closed 转人工
+                self.stage = "ESCALATED"
+                self._gate_events.append("approval:blocked:evidence-unavailable")
+                await self._call(
+                    activities.escalate_to_human,
+                    alert,
+                    _clip_event_text(f"审批证据不可用：{binding_error}；已停止推进并转人工", 400),
+                )
+                return self._final(alert, root_cause, patch, None, started)
+            self._gate_events.append(
+                "approval:evidence-bound:"
+                f"case={self._case_id}:patch={self._evidence_binding['patch_id']}:"
+                f"diff={self._evidence_binding['diff_hash'][:12]}:"
+                f"run={self._run_id}"
+            )
+            await self._call(
+                activities.notify_approvers,
+                alert,
+                root_cause,
+                patch,
+                test_report,
+                needs_second,
+                self._evidence_binding,
+            )
+        else:
+            await self._call(
+                activities.notify_approvers, alert, root_cause, patch, test_report, needs_second
+            )
 
         approval_timeout = timedelta(seconds=approval_cfg["timeout_seconds"])
         self._deadline = {
@@ -456,7 +664,10 @@ class AIOpsFixWorkflow:
                 lambda: self._approval is not None, timeout=approval_timeout
             )
         except asyncio.TimeoutError:
-            self._approvals.append({"gate": "approval", "decision": "timeout-reject"})
+            if approval_evidence:
+                self._record_timeout("approval")
+            else:
+                self._approvals.append({"gate": "approval", "decision": "timeout-reject"})
             self._gate_events.append("gate2:timeout->reject")
             self.stage = "ESCALATED"
             await self._call(
@@ -466,11 +677,17 @@ class AIOpsFixWorkflow:
             )
             return self._final(alert, root_cause, patch, None, started)
 
-        self._approvals.append({"gate": "approval", "decision": self._approval})
+        if not approval_evidence:
+            # v2 的完整审批记录（谁/何时/哪个通道/基于哪份证据/意见）已由信号处理器写入
+            self._approvals.append({"gate": "approval", "decision": self._approval})
         if self._approval != "approve":
             self._gate_events.append(f"gate2:{self._approval}")
             self.stage = "ESCALATED"
-            await self._call(activities.escalate_to_human, alert, f"闸门2：运维{self._approval}")
+            await self._call(
+                activities.escalate_to_human,
+                alert,
+                self._rejection_reason("闸门2：运维", "approval"),
+            )
             return self._final(alert, root_cause, patch, None, started)
         self._gate_events.append("gate2:approved")
 
@@ -485,7 +702,12 @@ class AIOpsFixWorkflow:
                     lambda: self._second_approval is not None, timeout=approval_timeout
                 )
             except asyncio.TimeoutError:
-                self._approvals.append({"gate": "second_approval", "decision": "timeout-reject"})
+                if approval_evidence:
+                    self._record_timeout("second_approval")
+                else:
+                    self._approvals.append(
+                        {"gate": "second_approval", "decision": "timeout-reject"}
+                    )
                 self._gate_events.append("gate2b:timeout->reject")
                 self.stage = "ESCALATED"
                 await self._call(
@@ -493,12 +715,17 @@ class AIOpsFixWorkflow:
                     "闸门2（二级）：受保护目录审批超时，自动驳回并升级",
                 )
                 return self._final(alert, root_cause, patch, None, started)
-            self._approvals.append({"gate": "second_approval", "decision": self._second_approval})
+            if not approval_evidence:
+                self._approvals.append(
+                    {"gate": "second_approval", "decision": self._second_approval}
+                )
             if self._second_approval != "approve":
                 self._gate_events.append(f"gate2b:{self._second_approval}")
                 self.stage = "ESCALATED"
                 await self._call(
-                    activities.escalate_to_human, alert, f"闸门2（二级）：二级审批{self._second_approval}"
+                    activities.escalate_to_human,
+                    alert,
+                    self._rejection_reason("闸门2（二级）：二级审批", "second_approval"),
                 )
                 return self._final(alert, root_cause, patch, None, started)
             self._gate_events.append("gate2b:approved:protected-dir")
@@ -588,6 +815,36 @@ class AIOpsFixWorkflow:
         await self._start_next_cycle()
         return self._final(alert, root_cause, patch, release, started)
 
+    def _apply_evidence_context(self) -> None:
+        """应用启动快照中的证据上下文（重试溯源；旧快照缺键时保持默认值）。
+
+        只读工作流输入，不访问外部状态；因此重放结果确定。
+        """
+        context = self._policy.get("evidence_context")
+        if not isinstance(context, dict):
+            return
+        self._case_id = str(context.get("case_id") or self._case_id)
+        self._requested_by = str(context.get("requested_by") or self._requested_by)
+        self._parent_run_id = str(context.get("parent_run_id") or "")
+        self._parent_wf_id = str(context.get("parent_wf_id") or "")
+        self._retry_wf_id = str(context.get("retry_wf_id") or "")
+
+    def _rejection_reason(self, prefix: str, gate: str) -> str:
+        """驳回升级文案：v2 附审批人与意见（审计可读）；旧流程保持原文案。"""
+        decision = self._approval if gate == "approval" else self._second_approval
+        base = f"{prefix}{decision}"
+        if self._approval_contract != change_evidence.CONTRACT:
+            return base
+        record = next(
+            (item for item in reversed(self._approvals) if item.get("gate") == gate), None
+        )
+        if not record:
+            return base
+        actor = str(record.get("actor") or "")
+        comment = str(record.get("comment") or "").strip()
+        detail = f"{actor}：{comment}" if comment else f"{actor}（未填写意见）"
+        return _clip_event_text(f"{base}（{detail}）", 400)
+
     async def _call(self, activity_fn, *args, timeout: timedelta = _ACTIVITY_TIMEOUT,
                     release_safety: bool = False):
         options = {}
@@ -676,6 +933,17 @@ class AIOpsFixWorkflow:
             "deploy_result": dataclasses.asdict(release) if release else None,
             "duration_seconds": (workflow.now() - started).total_seconds(),
             "queued_patches": [queued_alert.alert_id for _, queued_alert in self._queued_patches],
+            # ---------- 审批证据与运行溯源（approval-evidence-v1） ----------
+            "run_id": self._run_id,
+            "case_id": self._case_id,
+            "requested_by": self._requested_by,
+            "parent_run_id": self._parent_run_id,
+            "parent_wf_id": self._parent_wf_id,
+            "retry_wf_id": self._retry_wf_id,
+            "approval_contract": self._approval_contract,
+            "evidence_binding": self._evidence_binding,
+            "approval_error": self._approval_error,
+            "approval_rejections": self._approval_rejections,
         }
 
 
@@ -733,6 +1001,12 @@ class AIOpsRequirementWorkflow(AIOpsFixWorkflow):
         started = workflow.now()
         self._policy = policy
         self._task = task
+        # 证据绑定：case 为需求分析会话（重试不变），发起人为批准需求的管理员；
+        # 重试时启动快照可携带 evidence_context 覆盖发起人并关联父 run。
+        self._run_id = workflow.info().run_id
+        self._case_id = task.analysis_id
+        self._requested_by = task.approved_by
+        self._apply_evidence_context()
         alert, root_cause = build_requirement_context(task)
         self._alert = alert
         self._root_cause = root_cause

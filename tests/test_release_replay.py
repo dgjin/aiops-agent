@@ -145,8 +145,10 @@ class ReleaseHistoryReplayTest(unittest.IsolatedAsyncioTestCase):
 
     async def _assert_new_failure(self, failure_at, old_attempt=False):
         instance = workflows.AIOpsFixWorkflow()
-        instance._policy = POLICY
+        instance._policy = {**POLICY, "policy_sha256": "a" * 64}
         instance._alert = ALERT
+        instance._run_id = "replay-run-1"
+        instance._case_id = ALERT.alert_id
         calls = []
         async def call(fn, *args, **kwargs):
             calls.append((fn.__name__, kwargs))
@@ -183,6 +185,7 @@ class ReleaseHistoryReplayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(marker.call_args_list, [
             mock.call("fix-start-notify-g1"),
             mock.call("sandbox-verification-gate-v1"),
+            mock.call("approval-evidence-v1"),
             mock.call("release-safety-g1"),
         ] + ([mock.call("release-safety-failure-g1")] if old_attempt else []))
         self.assertEqual(result["stage"], "ESCALATED")

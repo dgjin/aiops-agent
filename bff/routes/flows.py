@@ -16,7 +16,7 @@ from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 from temporalio.service import RPCError, RPCStatusCode
 
-from aiops_agent import evidence_store, metrics
+from aiops_agent import change_evidence, evidence_store, metrics
 from aiops_agent.models import Alert
 
 from .. import aggregator, audit, escalations, runs_store
@@ -175,7 +175,17 @@ async def api_flow_result(wf_id: str) -> dict:
 
 
 class ApprovalBody(BaseModel):
+    """审批请求：``decision`` 必需；v2 流程要求驳回时提供 ``comment``。
+
+    ``expected_case_id`` / ``expected_diff_hash`` / ``expected_run_id`` 由控制台从当前
+    展示的 status 带回，用于拒绝基于过期页面/旧补丁的审批；旧流程忽略这些字段。
+    """
+
     decision: str = Field(pattern="^(approve|reject)$")
+    comment: str = Field(default="", max_length=2000)
+    expected_case_id: str = Field(default="", max_length=128)
+    expected_diff_hash: str = Field(default="", max_length=128)
+    expected_run_id: str = Field(default="", max_length=128)
 
 
 class DeployCommandBody(BaseModel):
@@ -214,19 +224,194 @@ def _first_approval_extra(status: dict) -> str | None:
     return None
 
 
+def _identity_key(value: str) -> str:
+    """身份归一化：ChatOps/CLI 前缀不影响职责分离比较。"""
+    key = str(value or "").strip()
+    for prefix in ("im:", "cli:"):
+        if key.startswith(prefix):
+            key = key[len(prefix):]
+    return key
+
+
+def duty_separation_error(status: dict, gate: str, actor: str) -> str | None:
+    """BFF 前置职责分离（工作流仍会二次校验；这里用于即时反馈与审计）。
+
+    - 发起人（告警重试操作者 / 需求批准人）不得审批自己的变更；
+    - 二级审批人不得与一级审批人相同（旧流程无 actor 记录时无法比较，跳过）。
+    """
+    me = _identity_key(actor)
+    requester = _identity_key(status.get("requested_by") or "")
+    if requester and me == requester:
+        return "职责分离：流程发起人不得审批自己的变更"
+    if gate == "second_approval":
+        first = next(
+            (
+                record
+                for record in status.get("approvals") or []
+                if isinstance(record, dict)
+                and record.get("gate") == "approval"
+                and record.get("decision") == "approve"
+            ),
+            None,
+        )
+        first_actor = _identity_key((first or {}).get("actor") or "")
+        if first_actor and first_actor == me:
+            return "职责分离：一级与二级审批人不得相同"
+    return None
+
+
+def _signal_envelope(
+    status: dict,
+    *,
+    gate: str,
+    decision: str,
+    actor: str,
+    channel: str,
+    comment: str,
+    expected_case_id: str = "",
+    expected_diff_hash: str = "",
+    expected_run_id: str = "",
+) -> tuple[dict | str, str]:
+    """按流程契约构造审批载荷：旧流程返回 decision 字符串，v2 返回证据信封。
+
+    绑定从工作流 status 派生（不信任客户端提交的哈希）；客户端回传的期望值仅用于
+    拒绝过期页面。返回 ``(payload, command_id)``；旧流程 command_id 为空串。
+    """
+    problem = change_evidence.decision_problem(decision, comment)
+    if problem:
+        raise ApiError(400, problem)
+    if change_evidence.contract_of(status) != change_evidence.CONTRACT:
+        return decision, ""
+    binding = change_evidence.binding_from_status(status)
+    if binding is None:
+        raise ApiError(
+            409,
+            "流程审批证据不可用（绑定缺失或契约不匹配）；已拒绝审批，请刷新后重试",
+        )
+    stale = change_evidence.expected_evidence_problem(
+        binding,
+        expected_case_id=expected_case_id,
+        expected_diff_hash=expected_diff_hash,
+        expected_run_id=expected_run_id,
+    )
+    if stale:
+        raise ApiError(409, stale)
+    command_id = change_evidence.new_command_id()
+    envelope = change_evidence.build_envelope(
+        binding=binding,
+        gate=gate,
+        decision=decision,
+        actor=actor,
+        channel=channel,
+        comment=comment,
+        command_id=command_id,
+        submitted_at=change_evidence.utc_now_iso(),
+    )
+    return envelope, command_id
+
+
+def _approval_audit_params(
+    payload: dict | str, command_id: str, comment: str, channel: str, delivery: str
+) -> dict:
+    """审批审计参数：命令、通道、意见与证据哈希（旧流程只记决策）。"""
+    params: dict = {"channel": channel, "comment": comment, "delivery": delivery}
+    if isinstance(payload, dict):
+        params.update(
+            command_id=command_id,
+            diff_hash=payload.get("diff_hash"),
+            test_report_hash=payload.get("test_report_hash"),
+            policy_sha256=payload.get("policy_sha256"),
+            run_id=payload.get("run_id"),
+            case_id=payload.get("case_id"),
+            patch_id=payload.get("patch_id"),
+        )
+    return params
+
+
+async def _submit_approval(
+    request: Request,
+    wf_id: str,
+    *,
+    gate: str,
+    body: ApprovalBody,
+) -> dict:
+    """审批提交统一链路：guard → 职责分离 → 信封 → signal → 回执 → 审计。"""
+    actor = request.state.identity.user
+    allowed_stage = {"WAIT_APPROVAL"}
+    extra = _first_approval_extra if gate == "approval" else _second_approval_extra
+    status = await _write_guard(wf_id, allowed_stage, extra)
+    action = "approval" if gate == "approval" else "second-approval"
+
+    separation = duty_separation_error(status, gate, actor)
+    if separation:
+        audit.write_audit(
+            actor=actor,
+            action=f"{action}:{body.decision}",
+            wf_id=wf_id,
+            params={"channel": "console", "comment": body.comment, "delivery": "denied"},
+            result="denied",
+        )
+        raise ApiError(409, separation)
+
+    payload, command_id = _signal_envelope(
+        status,
+        gate=gate,
+        decision=body.decision,
+        actor=actor,
+        channel="console",
+        comment=body.comment,
+        expected_case_id=body.expected_case_id,
+        expected_diff_hash=body.expected_diff_hash,
+        expected_run_id=body.expected_run_id,
+    )
+    if gate == "approval":
+        await gw.signal_approval(wf_id, payload)
+    else:
+        await gw.signal_second_approval(wf_id, payload)
+    gw.invalidate_cache()
+
+    # signal RPC 成功只代表命令已送达；业务回执以工作流记录为准。
+    # 旧流程无命令 ID，无法关联回执（只能展示已提交）。
+    delivery, receipt = (
+        await gw.approval_receipt(wf_id, command_id) if command_id else ("submitted", None)
+    )
+    audit.write_audit(
+        actor=actor,
+        action=f"{action}:{body.decision}",
+        wf_id=wf_id,
+        params={
+            **_approval_audit_params(payload, command_id, body.comment, "console", delivery),
+            **({"receipt": receipt} if delivery == "rejected" else {}),
+        },
+        result="rejected" if delivery == "rejected" else "signaled",
+    )
+    if delivery == "rejected":
+        reason = (receipt or {}).get("reason") or "流程拒绝了该审批命令"
+        raise ApiError(409, f"审批未生效：{reason}")
+
+    metrics.observe_gate_event(gate, body.decision)
+    message = (
+        "审批命令已受理并记录"
+        if delivery == "accepted"
+        else "审批命令已提交；业务结果以流程状态为准"
+    )
+    if not command_id:
+        message = "审批命令已提交（旧流程）：业务结果以流程状态为准"
+    return ok(
+        {
+            "ok": True,
+            "wf_id": wf_id,
+            "action": f"{action}:{body.decision}",
+            "command_id": command_id,
+            "delivery": delivery,
+            "message": message,
+        }
+    )
+
+
 @router.post("/api/flows/{wf_id}/approval")
 async def api_approval(request: Request, wf_id: str, body: ApprovalBody) -> dict:
-    await _write_guard(wf_id, {"WAIT_APPROVAL"}, _first_approval_extra)
-    await gw.signal_approval(wf_id, body.decision)
-    gw.invalidate_cache()
-    metrics.observe_gate_event("approval", body.decision)
-    audit.write_audit(
-        actor=request.state.identity.user,
-        action=f"approval:{body.decision}",
-        wf_id=wf_id,
-        result="signaled",
-    )
-    return ok({"ok": True, "wf_id": wf_id, "action": f"approval:{body.decision}"})
+    return await _submit_approval(request, wf_id, gate="approval", body=body)
 
 
 def _second_approval_extra(status: dict) -> str | None:
@@ -242,17 +427,7 @@ def _second_approval_extra(status: dict) -> str | None:
 
 @router.post("/api/flows/{wf_id}/second-approval")
 async def api_second_approval(request: Request, wf_id: str, body: ApprovalBody) -> dict:
-    await _write_guard(wf_id, {"WAIT_APPROVAL"}, _second_approval_extra)
-    await gw.signal_second_approval(wf_id, body.decision)
-    gw.invalidate_cache()
-    metrics.observe_gate_event("second_approval", body.decision)
-    audit.write_audit(
-        actor=request.state.identity.user,
-        action=f"second-approval:{body.decision}",
-        wf_id=wf_id,
-        result="signaled",
-    )
-    return ok({"ok": True, "wf_id": wf_id, "action": f"second-approval:{body.decision}"})
+    return await _submit_approval(request, wf_id, gate="second_approval", body=body)
 
 
 @router.post("/api/flows/{wf_id}/deploy-command")

@@ -610,8 +610,13 @@ async def notify_approvers(
     patch: Patch,
     test_report: TestReport,
     needs_second: bool,
+    evidence: dict | None = None,
 ) -> dict:
-    """真实实现（WP8）：飞书/钉钉交互卡片（根因分析 + 完整 diff + 测试报告 + 回滚预案）。"""
+    """真实实现（WP8）：飞书/钉钉交互卡片（根因分析 + 完整 diff + 测试报告 + 回滚预案）。
+
+    ``evidence`` 为 approval-evidence-v1 证据绑定（新流程传入）：卡片展示证据摘要，
+    按钮回调携带 case_id / diff_hash / run_id；旧流程未传时卡片保持原契约。
+    """
     from . import notify
 
     sender = notify.NotificationSender()
@@ -627,6 +632,7 @@ async def notify_approvers(
         provider=sender.provider,
         callback_base=sender.callback_base,
         wf_id=wf_id,
+        evidence=evidence,
     )
     delivery = sender.send(card, msg_id=f"approval-{patch.patch_id}")
     log.info("================= 审批卡片 =================")
@@ -640,6 +646,12 @@ async def notify_approvers(
     log.info("回滚预案: %s", notify.ROLLBACK_PLAN)
     if needs_second:
         log.info("!! 命中受保护目录，需二级审批（submit_second_approval）")
+    if evidence:
+        log.info(
+            "证据绑定: case=%s patch=%s diff=%s run=%s",
+            evidence.get("case_id"), evidence.get("patch_id"),
+            str(evidence.get("diff_hash") or "")[:12], evidence.get("run_id"),
+        )
     log.info("===============================================")
     return {
         "card_id": f"card-{alert.alert_id}",

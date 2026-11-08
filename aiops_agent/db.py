@@ -173,6 +173,8 @@ escalations = Table(
     metadata,
     Column("id", String(160), primary_key=True),  # esc-<wf_id>
     Column("wf_id", String(255), nullable=False),
+    # 原流程 run_id（M1 重试溯源）：重试流程以 parent_run_id 关联，避免同名 wf_id 重跑混淆
+    Column("run_id", String(128), nullable=False, server_default=""),
     Column("alert_id", String(255), nullable=False, server_default=""),
     Column("service", String(128), nullable=False, server_default=""),
     # 自动升级原因摘要（由 gate_events 翻译；MySQL TEXT 无 DEFAULT，写入显式提供）

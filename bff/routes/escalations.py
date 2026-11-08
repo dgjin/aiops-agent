@@ -323,6 +323,9 @@ async def api_escalation_retry(request: Request, esc_id: str) -> dict:
 
     需求来源的待办必须重启**需求修复流**（携带批准版方案，跳过闸门 1 日志诊断）；
     否则告警流对无日志的需求告警必然在闸门 1 被置信度阈值拦截，重试永远无法成功。
+
+    重试溯源（approval-evidence-v1）：新流程快照写入 ``case_id/requested_by/
+    parent_run_id/parent_wf_id/retry_wf_id``，并使重试发起人不得审批自己的变更。
     """
     entry = escalations.get(esc_id)
     if entry is None:
@@ -353,8 +356,16 @@ async def api_escalation_retry(request: Request, esc_id: str) -> dict:
             )
         task, version = requirement_analyses.build_requirement_task(session, actor)
         new_wf_id = f"aiops-req-{session.get('id')}-v{version}-{alert_id}"
+        context = _retry_evidence_context(
+            entry,
+            case_id=str(session.get("id") or ""),
+            actor=actor,
+            retry_wf_id=new_wf_id,
+        )
         try:
-            started = await gw.start_requirement_flow(task, new_wf_id)
+            started = await gw.start_requirement_flow(
+                task, new_wf_id, evidence_context=context
+            )
         except ValueError as exc:
             raise ApiError(409, str(exc)) from exc
         mode = "requirement"
@@ -374,8 +385,14 @@ async def api_escalation_retry(request: Request, esc_id: str) -> dict:
             description=str(alert_meta.get("description") or "")
             or f"重试修复（{entry.get('auto_reason')}）",
         )
+        context = _retry_evidence_context(
+            entry,
+            case_id=str(entry.get("alert_id") or esc_id),
+            actor=actor,
+            retry_wf_id=new_wf_id,
+        )
         try:
-            started = await gw.start_flow(alert, new_wf_id)
+            started = await gw.start_flow(alert, new_wf_id, evidence_context=context)
         except ValueError as exc:
             raise ApiError(409, str(exc)) from exc
         mode = "alert"
@@ -387,8 +404,21 @@ async def api_escalation_retry(request: Request, esc_id: str) -> dict:
         action="escalation:retry",
         wf_id=started,
         target=esc_id,
-        params={"new_wf_id": started, "alert_id": alert_id, "mode": mode},
+        params={"new_wf_id": started, "alert_id": alert_id, "mode": mode, **context},
     )
     return ok(
         {"ok": True, "escalation": _decorate(updated), "new_wf_id": started, "mode": mode}
     )
+
+
+def _retry_evidence_context(
+    entry: dict, *, case_id: str, actor: str, retry_wf_id: str
+) -> dict:
+    """重试溯源上下文（写入新流程策略快照）：关联原件并支持职责分离。"""
+    return {
+        "case_id": case_id,
+        "requested_by": actor,
+        "parent_run_id": str(entry.get("run_id") or ""),
+        "parent_wf_id": str(entry.get("wf_id") or ""),
+        "retry_wf_id": retry_wf_id,
+    }
