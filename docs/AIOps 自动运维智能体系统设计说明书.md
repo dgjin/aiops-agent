@@ -422,6 +422,17 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 - **审计语义**：意图行 `result=pending`；结果行 `signaled`（ACCEPTED/SUBMITTED）或 `rejected` / `failed`（`params.delivery` 区分业务拒收与投递失败），并携带 command_id、channel、操作者与请求摘要。
 - **查询与降级**：`GET /api/commands?status=&wf_id=&limit=`（列表 + 积压统计）与 `GET /api/commands/{command_id}`（详情；`SUBMITTED` 时补查一次业务回执，不重发信号）；`GET /api/subsystems` 新增 `commands` 子系统（PENDING 积压、最老等待超过 `AIOPS_COMMAND_BACKLOG_ALERT_SECONDS`（默认 300s）、24h FAILED 数），并刷新 Prometheus 指标（pending / oldest_wait / failed_24h）。
 
+#### 4.6.4 转人工重试跟踪与送达闭环（`escalation-retry-v1`，2026-11-08 落地）
+
+目标是修掉两个「看着闭环、实际漏跟」的缺口：重试流程启动后原待办立即关闭（新流程再次升级/失败无人接手），以及 SLA 再升级把「仅留痕」当成「已通知」。
+
+- **状态机**：`open → assigned → retrying → closed`。`retry` 仅允许 open/assigned，启动新流程后原待办进入 `retrying`（不关闭）；`assign / plan / close` 在 retrying 期间仍可执行（人工可直接接管）。
+- **终态回写**（`bff/app.py::refresh_retry_outcomes`，周期 `AIOPS_RETRY_CHECK_SECONDS` 默认 30s、最小 5s）：新流程 `DONE` → 自动构造结构化 `resolution`（根因 / 补丁描述取新流程结果，`closed_by=system:retry-tracking`、`source=retry-tracking`，不进知识候选）；`ESCALATED / FAILED / CANCELLED / SHADOWED` → 回到 `assigned`（有责任人）或 `open`，记录 `retry_outcome` 并重置通知周期；`RUNNING` / 未知 → 保持跟踪，绝不伪造成功。
+- **父子链与防重**：`retry_wf_id` + `parent_run_id` 保留完整链路；读侧 `sync_from_flows` 跳过被未关闭待办引用的重试流程，避免再次升级时登记重复待办。
+- **SLA 与送达语义**：`retrying` 暂停 overdue 计时（开放统计与列表角标仍计入）；`due_for_re_escalation` 排除 retrying 与退避窗口未到条目。`notify_mode ∈ {live, recorded, failed}`：仅 `live` 且无错误才置 `re_escalated=true`；recorded/failed 记录 `notify_error`，按 `(60, 300, 900, 1800, 3600)` 秒有界退避重试，期间保持 overdue，前端展示「通知待送达」。
+- **并发控制**：`escalations.version` + CAS——demo 在 fcntl sidecar 文件锁内读-改-写并校验版本，production 用 `UPDATE ... WHERE id AND version`（rowcount≠1 → 409）。客户端写操作回传读取版本；后台终态回写冲突时跳过，不用旧快照覆盖人工操作。
+- **关闭语义**：仅备注关闭已停用，`close` 必须提交结构化记录（400 迁移错误引导升级客户端）；历史仅备注记录保持只读，不批量改写。
+
 ### 4.7 执行层（`release.py`）
 
 - **发布编排 `run_canary`**：

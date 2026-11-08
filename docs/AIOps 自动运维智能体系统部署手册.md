@@ -220,6 +220,22 @@ ollama pull qwen3:8b          # 约 5.2GB；export AIOPS_TRIAGE_MODEL=qwen3:8b �
 - 记录保留 `source_esc_id` / `source_wf_id`，撤销审核后重新导出并重建索引即可从检索中移除；
 - 查询 `--query` 命中的知识块 `file` 为 `data/knowledge_records.json`（`kind=ticket`）。
 
+**重试跟踪与送达闭环（M3，2026-11-08 起）**：迁移 `20261101_0007` 为 `escalations` 增加
+`retrying` 状态与重试/通知/版本列（`retry_wf_id / parent_run_id / retry_started_at / retry_outcome /
+retry_outcome_at / notify_mode / notify_attempts / notify_next_retry_at / notify_error /
+notify_updated_at / version`）。升级与回退：
+
+```bash
+.venv/bin/alembic upgrade head          # 含 0007（MySQL 同时扩展 status 枚举；SQLite 为 VARCHAR 直接兼容）
+.venv/bin/alembic downgrade 20261101_0006   # 回退：先 UPDATE retrying→open 再收窄枚举，避免存量值卡住
+```
+
+- `AIOPS_RETRY_CHECK_SECONDS`（默认 `30`，最小 `5`）：BFF 后台扫描 `retrying` 待办、回写新流程终态的周期；新流程 `DONE` 自动结构化关闭，`ESCALATED/FAILED/CANCELLED/SHADOWED` 重新打开，`RUNNING` 保持跟踪；
+- 再升级通知以**真实送达**为准：`live` 且无错误才置 `re_escalated`；`recorded`（未配置通道仅留痕）/ `failed` 记录 `notify_error`，按 `(60, 300, 900, 1800, 3600)` 秒有界退避重试并保持 overdue，不会显示为已通知；
+- 写操作增加版本 CAS：控制台需同步更新（`web` 重新 `npm run build`）；旧页面提交返回 409，不会再静默覆盖新状态；
+- 重试流程会被 `sync_from_flows` 跳过（已被未关闭待办 `retry_wf_id` 引用），不会因新流程再次升级而登记重复待办；
+- 本项与真实 WORM、多主机协调、真实飞书实机验收无关；多副本共享限速/通知去重仍依赖单实例或共享存储（多主机并发验收**未实测**）。
+
 ### 2.8 稳定容器初始化（发布链路前置）
 
 金丝雀达标后会滚动到稳定容器 `aiops-stable-order`（`:18080`）。首次部署需初始化一个基线版本：
@@ -541,6 +557,7 @@ export AIOPS_MCP_TOKEN=<控制台令牌>                 # 透传 BFF 鉴权；�
 | `AIOPS_RATE_LIMIT_READ_PER_MIN` / `_WRITE_PER_MIN` / `_AUTH_FAIL_PER_MIN` | `240` / `20` / `10` | BFF | 已认证读 / 已认证写 / 认证失败（按 IP）配额 |
 | `AIOPS_METRICS_PORT` | `9091`（production）/ `9090`（demo） | worker | worker 独立指标服务端口（默认仅 loopback，0 关闭）；BFF 指标固定 `127.0.0.1:8600/metrics`（仅回环） |
 | `AIOPS_COMMAND_SWEEP_SECONDS` / `AIOPS_COMMAND_BACKLOG_ALERT_SECONDS` | `5` / `300` | BFF | 写命令 outbox 后台扫尾周期（秒）/ PENDING 积压降级阈值（秒，最小 30） |
+| `AIOPS_ESCALATION_SLA_MINUTES` / `AIOPS_RETRY_CHECK_SECONDS` | `30` / `30` | BFF | 待办超 SLA 阈值（分钟）/ 重试流程终态跟踪周期（秒，最小 5） |
 | `AIOPS_OTEL_ENDPOINT` | 空（no-op） | worker / BFF | OpenTelemetry OTLP HTTP 端点（如 `http://localhost:4318`） |
 | `AIOPS_GIT_TOKEN` | 空（MR 返回 recorded 桩） | worker | Git 平台令牌（配合策略 `git:` 段；未配置/失败自动降级不中断流程） |
 | `AIOPS_CONSOLE_TOKEN_FILE` | `data/console_tokens.json`（demo） | BFF | 运行期令牌注册表（权限 600，含明文令牌，勿提交） |
