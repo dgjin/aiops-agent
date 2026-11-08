@@ -29,6 +29,15 @@ _TERMINAL_STAGES = {"DONE", "ESCALATED", "CANCELLED", "FAILED", "SHADOWED"}
 _last_seen: dict[str, tuple] = {}
 
 
+def _risk_value(item: dict) -> str:
+    """风险列取值（M5）：确定性等级优先，旧流程回退 patch.risk 文本。"""
+    assessment = item.get("risk_assessment") or {}
+    level = str(assessment.get("level") or "").upper()
+    if level in ("LOW", "MEDIUM", "HIGH"):
+        return level
+    return str((item.get("patch") or {}).get("risk") or "")
+
+
 def _signature(item: dict) -> tuple:
     """变化签名：核心字段之外，闸门事件链、测试报告、风险必须参与比对。
 
@@ -39,7 +48,7 @@ def _signature(item: dict) -> tuple:
     return tuple(item.get(field) for field in _SIGNATURE_FIELDS) + (
         len(item.get("gate_events") or []),
         bool(item.get("test_report")),
-        str((item.get("patch") or {}).get("risk") or ""),
+        _risk_value(item),
     )
 
 
@@ -54,9 +63,9 @@ def _upsert(conn, item: dict) -> None:
         "run_id": item.get("run_id") or "",
         "stage": item.get("stage") or "",
         "exec_status": item.get("exec_status") or "",
-        # M5：运营指标按来源与风险分维度；历史行由 server_default/空串兜底
+        # M5：运营指标按来源与风险分维度；确定性等级优先，历史行回退 patch.risk
         "kind": "requirement" if item.get("kind") == "requirement" else "alert",
-        "risk": str((item.get("patch") or {}).get("risk") or "")[:32],
+        "risk": _risk_value(item)[:32],
         "alert": item.get("alert"),
         "confidence": item.get("confidence"),
         "patch_id": item.get("patch_id"),
@@ -70,6 +79,8 @@ def _upsert(conn, item: dict) -> None:
             "test_report": item.get("test_report"),
             "patch": item.get("patch"),
             "root_cause": item.get("root_cause"),
+            "risk_assessment": item.get("risk_assessment"),
+            "policy_snapshot": item.get("policy_snapshot"),
         },
         "mode": "production",
         "updated_at": db_layer.now_dt(),

@@ -46,6 +46,7 @@ with workflow.unsafe.imports_passed_through():
     from . import change_evidence
     from . import command_contract
     from . import gate_decision
+    from . import risk_policy
     from .models import (
         Alert,
         CanaryResult,
@@ -178,6 +179,12 @@ class AIOpsFixWorkflow:
         self._parent_run_id: str = ""
         self._parent_wf_id: str = ""
         self._retry_wf_id: str = ""
+        # ---------- M5：启动快照门禁与确定性风险 ----------
+        # 启动快照中与「窗口内命令」相关的开关，供 status 展示与 BFF 前置校验；
+        # 旧在途流程保持空字典（BFF 按 legacy 兼容处理，不改变历史行为）。
+        self._policy_snapshot: dict = {}
+        # 确定性风险结果（LOW/MEDIUM/HIGH）；None 表示旧流程或尚未评估
+        self._risk_assessment: dict | None = None
 
     # ------------------------------------------------------------------
     # 信号接口（设计方案 8.1）
@@ -267,7 +274,15 @@ class AIOpsFixWorkflow:
 
         payload = envelope["payload"]
         if command_type == "deploy-command":
-            self._deploy_command = str(payload["command"])
+            command = str(payload["command"])
+            # M5：启动快照禁用指令时明确拒收（不推进流程，也不占用 command_id）
+            blocked = self._snapshot_command_error(command)
+            if blocked:
+                self._record_command_rejection(
+                    command_type, "policy-disabled", blocked, command_id=command_id
+                )
+                return
+            self._deploy_command = command
         else:
             queued_alert = Alert(
                 alert_id=str(payload["alert_id"]),
@@ -469,6 +484,10 @@ class AIOpsFixWorkflow:
             "command_error": self._command_error,
             # 已应用命令 ID（BFF outbox 回执依据：即使命令随后被消费/出队也可确认受理）
             "command_ids": list(self._command_ids),
+            # ---------- M5：确定性风险与启动快照门禁 ----------
+            # ``policy_snapshot`` 为空字典 = 旧流程（BFF 不做快照级禁用判定）
+            "policy_snapshot": self._policy_snapshot,
+            "risk_assessment": self._risk_assessment,
         }
 
     # ------------------------------------------------------------------
@@ -483,6 +502,7 @@ class AIOpsFixWorkflow:
         self._run_id = workflow.info().run_id
         self._case_id = alert.alert_id
         self._apply_evidence_context()
+        self._capture_policy_snapshot()
         triage_cfg = policy["triage"]
         approval_cfg = policy["approval"]
         notify_cfg = policy["notify_window"]
@@ -685,16 +705,37 @@ class AIOpsFixWorkflow:
             )
             return self._final(alert, root_cause, patch, None, started)
 
-        # ---------- 发布准入：静态验收不得单独支撑高风险发布（M4） ----------
+        # ---------- 发布准入：确定性风险（M5）与静态验收限制（M4） ----------
+        # M5：风险等级只由受保护目录、敏感路径、影响面、降级标记与真实验证方式决定，
+        # 不再采信 LLM 自述的 patch.risk 文本；旧在途流程保持原有文本判定。
+        risk_gate = workflow.patched("deterministic-risk-v1")
+        if risk_gate:
+            self._risk_assessment = risk_policy.assess(
+                files=patch.files,
+                services=[alert.service],
+                protected_patterns=approval_cfg["second_approval_dirs"],
+                verification_mode=test_report.verification_mode if test_report else "",
+                degraded=patch.degraded,
+            )
+            self._gate_events.append(
+                "risk:assessed:" + risk_policy.summarize(self._risk_assessment)
+            )
+
         protected = self._is_protected(patch.files, approval_cfg["second_approval_dirs"])
         block_reason = ""
         if workflow.patched("sandbox-verification-gate-v1"):
-            block_reason = self._static_verification_block(
-                patch,
-                test_report,
-                protected,
-                bool(self._policy.get("sandbox", {}).get("require_real_tests_for_high_risk", True)),
-            )
+            if risk_gate:
+                block_reason = risk_policy.verification_block(
+                    self._risk_assessment,
+                    test_report.verification_mode if test_report else "",
+                )
+            else:
+                block_reason = self._static_verification_block(
+                    patch,
+                    test_report,
+                    protected,
+                    bool(self._policy.get("sandbox", {}).get("require_real_tests_for_high_risk", True)),
+                )
         if block_reason:
             self.stage = "ESCALATED"
             self._gate_events.append("release:blocked:static-only:high-risk")
@@ -708,7 +749,9 @@ class AIOpsFixWorkflow:
         self.stage = "WAIT_APPROVAL"
         self._approval = None  # 清空历史信号，防幽灵审批
         self._second_approval = None
-        needs_second = protected
+        # M5：确定性高风险同样需要双人审批（受保护目录与风险等级取「或」）
+        high_risk = bool(self._risk_assessment and self._risk_assessment.get("level") == "HIGH")
+        needs_second = protected or high_risk
         self._needs_second = needs_second
         # 审批证据 v1：新流程把本次变更绑定进 status，并要求审批携带信封；
         # 旧在途流程 patched=False（无 marker），继续字符串协议，历史重放无额外命令。
@@ -929,6 +972,32 @@ class AIOpsFixWorkflow:
         self._parent_wf_id = str(context.get("parent_wf_id") or "")
         self._retry_wf_id = str(context.get("retry_wf_id") or "")
 
+    def _capture_policy_snapshot(self) -> None:
+        """固化窗口内命令开关（M5）：只读启动快照，运行期磁盘变更不影响在途流程。
+
+        BFF 与工作流双侧据此执行 ``allow_deploy_now`` / ``allow_cancel``；旧快照
+        缺键时按 True 兼容（与 M5 前的行为一致）。
+        """
+        notify = self._policy.get("notify_window")
+        if not isinstance(notify, dict):
+            return
+        self._policy_snapshot = {
+            "policy_sha256": str(self._policy.get("policy_sha256") or ""),
+            "shadow_mode": bool(self._policy.get("shadow_mode", False)),
+            "allow_deploy_now": bool(notify.get("allow_deploy_now", True)),
+            "allow_cancel": bool(notify.get("allow_cancel", True)),
+        }
+
+    def _snapshot_command_error(self, command: str) -> str | None:
+        """启动快照禁用该指令时返回原因（空 = 允许）。旧流程无快照，保持兼容。"""
+        snapshot = self._policy_snapshot
+        if not snapshot:
+            return None
+        key = "allow_deploy_now" if command == "deploy_now" else "allow_cancel"
+        if snapshot.get(key, True):
+            return None
+        return f"流程启动快照已禁用 {command}（{key}=false）；请在策略调整后重新发起流程"
+
     def _rejection_reason(self, prefix: str, gate: str) -> str:
         """驳回升级文案：v2 附审批人与意见（审计可读）；旧流程保持原文案。"""
         decision = self._approval if gate == "approval" else self._second_approval
@@ -1047,6 +1116,9 @@ class AIOpsFixWorkflow:
             "command_rejections": self._command_rejections,
             "command_error": self._command_error,
             "command_ids": list(self._command_ids),
+            # ---------- M5：确定性风险与启动快照门禁 ----------
+            "policy_snapshot": self._policy_snapshot,
+            "risk_assessment": self._risk_assessment,
         }
 
 
@@ -1110,6 +1182,7 @@ class AIOpsRequirementWorkflow(AIOpsFixWorkflow):
         self._case_id = task.analysis_id
         self._requested_by = task.approved_by
         self._apply_evidence_context()
+        self._capture_policy_snapshot()
         alert, root_cause = build_requirement_context(task)
         self._alert = alert
         self._root_cause = root_cause
