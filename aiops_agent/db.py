@@ -224,7 +224,8 @@ escalations = Table(
     Column("alert", JSON),
     Column(
         "status",
-        Enum("open", "assigned", "closed", name="escalation_status"),
+        # retrying（M3）：人工重试已启动，原待办等待新流程终态；不立即关闭
+        Enum("open", "assigned", "retrying", "closed", name="escalation_status"),
         nullable=False,
         server_default="open",
     ),
@@ -235,6 +236,22 @@ escalations = Table(
     Column("closed_at", DateTime),
     Column("re_escalated", Boolean, nullable=False, server_default=text("0")),
     Column("history", JSON, nullable=False),
+    # ---- 人工重试跟踪（M3）----
+    # 新流程 ID 与原运行实例：DONE 才自动关闭，其他终态重开并保留完整父子链
+    Column("retry_wf_id", String(255), nullable=False, server_default=""),
+    Column("parent_run_id", String(128), nullable=False, server_default=""),
+    Column("retry_started_at", DateTime),
+    Column("retry_outcome", String(32), nullable=False, server_default=""),
+    Column("retry_outcome_at", DateTime),
+    # ---- 再升级通知真实送达（M3）----
+    # 只有 notify_mode=live 才 re_escalated；recorded/failed 按退避持续重试
+    Column("notify_mode", String(16), nullable=False, server_default=""),
+    Column("notify_attempts", Integer, nullable=False, server_default=text("0")),
+    Column("notify_next_retry_at", DateTime),
+    Column("notify_error", Text),
+    Column("notify_updated_at", DateTime),
+    # 记录版本（M3 CAS）：人工写操作携带 version，避免并发覆盖
+    Column("version", Integer, nullable=False, server_default=text("1")),
     Index("idx_escalations_status", "status"),
     Index("idx_escalations_wf", "wf_id"),
 )

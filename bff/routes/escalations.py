@@ -2,14 +2,16 @@
 
 读侧每次先做**幂等登记**（sync_from_flows：ESCALATED 流程 → open 待办），
 再返回列表与统计；写侧动作全部落操作审计（wf_id 记录待办的 wf_id）：
-    - assign：指派/改派责任人（open/assigned 均可）；
+    - assign：指派/改派责任人（open/assigned/retrying 均可）；
     - plan：登记未关闭待办的处理计划（允许保持 open，不强制清零）；
-    - close：处置关闭——新客户端提交结构化记录（关闭原因 / 实际根因 / 实际处置 /
-      验证结果 / 对智能体判断的评价），旧客户端仅传备注时行为不变；
-    - retry：以**新幂等键**重启修复流程（同 alert_id 的旧流程已存在，不能复用 wf_id），
-      成功后待办自动关闭并注明新流程 ID；
+    - close：M3 起**只接受结构化记录**（关闭原因 / 实际根因 / 实际处置 /
+      验证结果 / 对智能体判断的评价），仅备注的弱关闭返回明确迁移错误；
+    - retry：以**新幂等键**重启修复流程，原待办进入 ``retrying``（不立即关闭），
+      后台跟踪新流程终态：DONE 才自动关闭，失败/再升级重新打开；
     - knowledge/review：知识审核（approve / reject / revoke，仅管理员），批准后
       同步导出 ``knowledge_records.json``，索引重建仍需显式执行。
+
+所有写操作携带 ``version`` 做 CAS：与库中版本不一致返回 409，不得用旧页面覆盖新状态。
 
 需求来源的 retry 特殊化：待办源于需求修复流（wf_id ``aiops-req-*``，或旧版误按
 告警流重启后级联的 ``req-N-retryM*``）时**重启需求修复流**（沿用批准版方案、
@@ -35,13 +37,16 @@ router = APIRouter()
 
 class AssignBody(BaseModel):
     assignee: str = Field(min_length=1, max_length=64)
+    # 记录版本（M3 CAS）：0 表示旧客户端未提供，按服务端读取版本校验
+    version: int = 0
 
 
 class CloseBody(BaseModel):
-    """结构化关闭请求：新字段全空时按旧客户端处理（仅备注关闭）。
+    """结构化关闭请求（M3 起唯一关闭入口；仅备注关闭已停用）。
 
     关闭原因 ``RESOLVED`` 要求三项必填（实际根因 / 实际处置 / 验证结果），由
     ``escalations.build_resolution`` 统一校验，路由不重复实现规则。
+    ``version`` 用于并发 CAS：与库中版本不一致返回 409。
     """
 
     note: str = Field(default="", max_length=2000)
@@ -52,23 +57,56 @@ class CloseBody(BaseModel):
     verdict: str = Field(default="", max_length=32)
     knowledge_candidate: bool = False
     sensitive_confirmed: bool = False
+    version: int = 0
 
 
 class PlanBody(BaseModel):
     plan: str = Field(default="", max_length=1000)
+    version: int = 0
+
+
+class RetryBody(BaseModel):
+    """重试请求（可选请求体）：携带读取时的 ``version`` 防并发覆盖。"""
+
+    version: int = 0
 
 
 class KnowledgeReviewBody(BaseModel):
     decision: str = Field(min_length=1, max_length=16)
     reason: str = Field(default="", max_length=500)
+    version: int = 0
 
 
 # 需求来源识别：需求流的 alert_id 固定为 ``req-<条目ID>``（workflows.build_requirement_context），
 # 级联重试会追加 ``-retryN`` 后缀（req-19 → req-19-retry1 → req-19-retry1-retry1）。
 _REQUIREMENT_ALERT_ID = re.compile(r"^req-(?P<entry_id>.+?)(?:-retry\d+)*$")
 
+# 通知投递方式（M3）：只有 live 才算“已通知”；recorded/failed 仍在退避重试
+NOTIFY_LABELS = {
+    "": "未通知",
+    "live": "已送达",
+    "recorded": "仅留档",
+    "failed": "投递失败",
+}
+
+# 重试流程终态展示
+RETRY_OUTCOME_LABELS = {
+    "": "跟踪中",
+    "DONE": "已成功",
+    "ESCALATED": "再次升级",
+    "FAILED": "执行失败",
+    "CANCELLED": "已取消",
+    "SHADOWED": "影子观察",
+}
+
 # _decorate 的哨兵：区分「未传（需单查）」与「批量查过但没有证据（None）」
 _EVIDENCE_UNSET = object()
+
+
+def _expected_version(body) -> int | None:
+    """请求体里的版本号：0/缺省 → None（用服务端读取的版本做 CAS）。"""
+    version = int(getattr(body, "version", 0) or 0)
+    return version if version > 0 else None
 
 
 def _looks_requirement(entry: dict) -> bool:
@@ -132,7 +170,7 @@ def _sync_knowledge() -> dict:
 
 
 def _is_structured_close(payload: dict) -> bool:
-    """是否为新版结构化关闭（任一结构化字段非空）；全空时保持旧客户端语义。"""
+    """是否为结构化关闭（任一结构化字段非空）；M3 起全空一律拒绝。"""
     return any(
         payload.get(key)
         for key in (
@@ -149,12 +187,14 @@ def _is_structured_close(payload: dict) -> bool:
 def _decorate(
     entry: dict, systems: dict[str, dict] | None = None, evidence: object = _EVIDENCE_UNSET
 ) -> dict:
-    """附加 SLA 派生状态、需求来源标识、处置分类、所属监控系统与日志证据摘要。
+    """附加 SLA 派生、需求来源、处置分类、监控系统、重试跟踪与通知送达状态。
 
     systems / evidence 可由列表侧批量取好传入（避免逐条查库 / 读盘），缺省时按需现查。
+    ``retrying`` 暂停 SLA 计超时（新流程运行中）；recorded/failed 仍保持 overdue。
     """
+    status = str(entry.get("status") or "")
     overdue = False
-    if entry.get("status") != "closed":
+    if status in ("open", "assigned"):
         try:
             escalated_at = datetime.fromisoformat(str(entry.get("escalated_at")))
             if escalated_at.tzinfo is None:
@@ -174,6 +214,13 @@ def _decorate(
     resolution = resolution if isinstance(resolution, dict) else None
     close_reason = str((resolution or {}).get("close_reason") or "")
     review_status = escalations.knowledge_status(entry)
+    notify_mode = str(entry.get("notify_mode") or "")
+    notify_pending = (
+        status in ("open", "assigned")
+        and not entry.get("re_escalated")
+        and notify_mode in ("recorded", "failed")
+    )
+    retry_outcome = str(entry.get("retry_outcome") or "")
     return {
         **entry,
         "category": category,
@@ -191,12 +238,26 @@ def _decorate(
         "close_reason_label": escalations.CLOSE_REASONS.get(close_reason, ""),
         "knowledge_status": review_status,
         "knowledge_label": escalations.KNOWLEDGE_LABELS.get(review_status, review_status),
+        # ---- M3：重试跟踪与通知真实送达 ----
+        "retry_wf_id": str(entry.get("retry_wf_id") or ""),
+        "parent_run_id": str(entry.get("parent_run_id") or ""),
+        "retry_started_at": entry.get("retry_started_at"),
+        "retry_outcome": retry_outcome,
+        "retry_outcome_label": RETRY_OUTCOME_LABELS.get(retry_outcome, retry_outcome),
+        "notify_mode": notify_mode,
+        "notify_label": NOTIFY_LABELS.get(notify_mode, notify_mode),
+        "notify_attempts": int(entry.get("notify_attempts") or 0),
+        "notify_next_retry_at": entry.get("notify_next_retry_at"),
+        "notify_error": str(entry.get("notify_error") or ""),
+        "notify_updated_at": entry.get("notify_updated_at"),
+        "notify_pending": notify_pending,
+        "version": int(entry.get("version") or 1),
     }
 
 
 @router.get("/api/escalations")
 async def api_escalations(
-    status: str = Query("all", pattern="^(all|open|assigned|closed)$"),
+    status: str = Query("all", pattern="^(all|open|assigned|retrying|closed)$"),
 ) -> dict:
     flows = await gw.list_flows(limit=200)
     added = escalations.sync_from_flows(flows)
@@ -220,13 +281,16 @@ async def api_escalation_assign(request: Request, esc_id: str, body: AssignBody)
         updated = escalations.apply_assign(entry, body.assignee, request.state.identity.user)
     except escalations.EscalationStoreError as exc:
         raise ApiError(400, str(exc)) from exc
-    escalations.persist_entry(updated)
+    try:
+        escalations.persist_entry(updated, expected_version=_expected_version(body))
+    except escalations.EscalationConflictError as exc:
+        raise ApiError(409, str(exc)) from exc
     audit.write_audit(
         actor=request.state.identity.user,
         action="escalation:assign",
         wf_id=updated["wf_id"],
         target=esc_id,
-        params={"assignee": updated["assignee"]},
+        params={"assignee": updated["assignee"], "version": updated["version"]},
     )
     return ok({"ok": True, "escalation": _decorate(updated)})
 
@@ -240,21 +304,29 @@ async def api_escalation_close(
         raise ApiError(404, f"未找到待办：{esc_id}")
     actor = request.state.identity.user
     payload = body.model_dump() if body else {}
-    # 结构化关闭：任何结构化字段非空即走新版校验；全空保持旧客户端「仅备注关闭」
-    resolution = None
-    if _is_structured_close(payload):
-        try:
-            resolution = escalations.build_resolution(payload, actor)
-        except escalations.EscalationStoreError as exc:
-            raise ApiError(400, str(exc)) from exc
+    # M3：仅备注的弱关闭已停用；production 与 demo 均要求结构化处置记录
+    if not _is_structured_close(payload):
+        raise ApiError(
+            400,
+            "关闭必须提交结构化处置记录（关闭原因 / 实际根因 / 实际处置 / 验证结果）；"
+            "仅备注关闭已停用，请升级客户端后重试",
+        )
     try:
-        updated = escalations.apply_close(entry, actor, str(payload.get("note") or ""), resolution)
+        resolution = escalations.build_resolution(payload, actor)
+        updated = escalations.apply_close(
+            entry, actor, str(payload.get("note") or ""), resolution
+        )
     except escalations.EscalationStoreError as exc:
         raise ApiError(400, str(exc)) from exc
-    escalations.persist_entry(updated)
-    result: dict = {"ok": True, "escalation": _decorate(updated)}
-    if resolution is not None:
-        result["knowledge_export"] = _sync_knowledge()
+    try:
+        escalations.persist_entry(updated, expected_version=_expected_version(body))
+    except escalations.EscalationConflictError as exc:
+        raise ApiError(409, str(exc)) from exc
+    result: dict = {
+        "ok": True,
+        "escalation": _decorate(updated),
+        "knowledge_export": _sync_knowledge(),
+    }
     audit.write_audit(
         actor=actor,
         action="escalation:close",
@@ -262,9 +334,10 @@ async def api_escalation_close(
         target=esc_id,
         params={
             "note": updated["note"],
-            "close_reason": str((resolution or {}).get("close_reason") or ""),
-            "verdict": str((resolution or {}).get("verdict") or ""),
+            "close_reason": resolution["close_reason"],
+            "verdict": resolution["verdict"],
             "knowledge_status": escalations.knowledge_status(updated),
+            "version": updated["version"],
         },
     )
     return ok(result)
@@ -281,13 +354,16 @@ async def api_escalation_plan(request: Request, esc_id: str, body: PlanBody) -> 
         updated = escalations.apply_plan(entry, body.plan, actor)
     except escalations.EscalationStoreError as exc:
         raise ApiError(400, str(exc)) from exc
-    escalations.persist_entry(updated)
+    try:
+        escalations.persist_entry(updated, expected_version=_expected_version(body))
+    except escalations.EscalationConflictError as exc:
+        raise ApiError(409, str(exc)) from exc
     audit.write_audit(
         actor=actor,
         action="escalation:plan",
         wf_id=updated["wf_id"],
         target=esc_id,
-        params={"plan": updated["plan"]},
+        params={"plan": updated["plan"], "version": updated["version"]},
     )
     return ok({"ok": True, "escalation": _decorate(updated)})
 
@@ -305,21 +381,29 @@ async def api_escalation_knowledge_review(
         updated = escalations.apply_knowledge_review(entry, body.decision, actor, body.reason)
     except escalations.EscalationStoreError as exc:
         raise ApiError(400, str(exc)) from exc
-    escalations.persist_entry(updated)
+    try:
+        escalations.persist_entry(updated, expected_version=_expected_version(body))
+    except escalations.EscalationConflictError as exc:
+        raise ApiError(409, str(exc)) from exc
     export = _sync_knowledge()
     audit.write_audit(
         actor=actor,
         action=f"knowledge:{body.decision.strip().lower()}",
         wf_id=updated["wf_id"],
         target=esc_id,
-        params={"reason": body.reason, **export},
+        params={"reason": body.reason, "version": updated["version"], **export},
     )
     return ok({"ok": True, "escalation": _decorate(updated), "knowledge_export": export})
 
 
 @router.post("/api/escalations/{esc_id}/retry")
-async def api_escalation_retry(request: Request, esc_id: str) -> dict:
-    """重试修复：以新 alert_id 派生新幂等键启动流程，成功后关闭待办。
+async def api_escalation_retry(
+    request: Request, esc_id: str, body: RetryBody | None = None
+) -> dict:
+    """重试修复：以新 alert_id 派生新幂等键启动流程，原待办进入 ``retrying``。
+
+    新流程启动后**不立即关闭**原待办：后台跟踪新流程终态，DONE 才自动结构化关闭，
+    ESCALATED/FAILED/CANCELLED/SHADOWED 重新打开并记录原因（保留父子链）。
 
     需求来源的待办必须重启**需求修复流**（携带批准版方案，跳过闸门 1 日志诊断）；
     否则告警流对无日志的需求告警必然在闸门 1 被置信度阈值拦截，重试永远无法成功。
@@ -332,6 +416,8 @@ async def api_escalation_retry(request: Request, esc_id: str) -> dict:
         raise ApiError(404, f"未找到待办：{esc_id}")
     if entry.get("status") == "closed":
         raise ApiError(400, "该待办已关闭，无需重试")
+    if entry.get("status") == "retrying":
+        raise ApiError(409, "该待办已在重试跟踪中，请等待新流程终态或手动关闭")
 
     alert_meta = entry.get("alert") or {}
     retry_no = sum(1 for h in entry.get("history") or [] if h.get("action") == "retry") + 1
@@ -398,16 +484,32 @@ async def api_escalation_retry(request: Request, esc_id: str) -> dict:
         mode = "alert"
 
     updated = escalations.apply_retried(entry, started, actor)
-    escalations.persist_entry(updated)
+    try:
+        escalations.persist_entry(updated, expected_version=_expected_version(body))
+    except escalations.EscalationStoreError as exc:
+        # 含版本冲突（EscalationConflictError）与状态校验失败：均不得静默覆盖
+        raise ApiError(409, str(exc)) from exc
     audit.write_audit(
         actor=actor,
         action="escalation:retry",
         wf_id=started,
         target=esc_id,
-        params={"new_wf_id": started, "alert_id": alert_id, "mode": mode, **context},
+        params={
+            "new_wf_id": started,
+            "alert_id": alert_id,
+            "mode": mode,
+            "version": updated["version"],
+            **context,
+        },
     )
     return ok(
-        {"ok": True, "escalation": _decorate(updated), "new_wf_id": started, "mode": mode}
+        {
+            "ok": True,
+            "escalation": _decorate(updated),
+            "new_wf_id": started,
+            "retry_wf_id": started,
+            "mode": mode,
+        }
     )
 
 

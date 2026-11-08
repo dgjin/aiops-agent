@@ -40,7 +40,8 @@ def _open_escalations(items: list[dict]) -> int:
     try:
         escalations.sync_from_flows(items)
         stats = escalations.stats()
-        return stats["open"] + stats["assigned"]
+        # retrying 仍属未闭环（M3）：侧栏角标与待办页口径一致
+        return stats["open"] + stats["assigned"] + stats.get("retrying", 0)
     except Exception:  # noqa: BLE001 - 存储故障不阻塞总览
         return 0
 

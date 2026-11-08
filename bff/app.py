@@ -31,7 +31,7 @@ from fastapi.staticfiles import StaticFiles
 
 from aiops_agent import tracing
 
-from . import auth, commands, escalations
+from . import audit, auth, commands, escalations
 from .deps import ApiError, WEB_DIST, gw, log, ok
 from .middleware import register_middlewares
 from .middleware import required_role as required_role  # noqa: F401 - 兼容测试引用（bff.app.required_role）
@@ -85,18 +85,21 @@ def _escalation_sweep_seconds() -> int:
 
 
 async def _escalation_loop() -> None:
-    """转人工待办 SLA 巡检（P1-3）：超时未处置则再升级一次。
+    """转人工待办 SLA 巡检（P1-3 / M3）：超时未处置则再升级。
 
     ``sweep_due`` 为同步（读存储 + 发通知），放线程池避免阻塞事件循环；
-    每单只升级一次（``re_escalated`` 打标），巡检失败不影响控制台服务。
+    仅真实送达（live）才打标完成，recorded/failed 按退避持续重试。
     """
     while True:
         try:
-            escalated = await asyncio.to_thread(escalations.sweep_due)
-            if escalated:
+            processed = await asyncio.to_thread(escalations.sweep_due)
+            if processed:
+                delivered = sum(1 for entry in processed if entry.get("re_escalated"))
                 log.warning(
-                    "[escalations] %d 个待办超时未处置，已再升级（SLA %s 分钟）",
-                    len(escalated),
+                    "[escalations] %d 个待办超时未处置：再升级送达 %d，待重试 %d（SLA %s 分钟）",
+                    len(processed),
+                    delivered,
+                    len(processed) - delivered,
                     escalations.sla_minutes(),
                 )
         except asyncio.CancelledError:
@@ -104,6 +107,86 @@ async def _escalation_loop() -> None:
         except Exception as exc:  # noqa: BLE001 - 巡检失败不影响服务
             log.warning("[escalations] SLA 巡检失败：%s", exc)
         await asyncio.sleep(_escalation_sweep_seconds())
+
+
+def _retry_check_seconds() -> int:
+    """重试流程终态跟踪周期（秒）：只查少量 retrying 待办，默认 30 秒。"""
+    try:
+        return max(5, int(os.environ.get("AIOPS_RETRY_CHECK_SECONDS", "30")))
+    except ValueError:
+        return 30
+
+
+async def refresh_retry_outcomes(fetch=None) -> list[dict]:
+    """扫描 ``retrying`` 待办并按新流程终态推进（M3）。
+
+    - DONE → 自动结构化关闭；
+    - ESCALATED / FAILED / CANCELLED / SHADOWED → 重新打开并记录原因；
+    - RUNNING / 查询失败 → 保持跟踪（不伪造终态）。
+
+    ``fetch`` 可注入（测试用），缺省查 Temporal ``gw.flow_detail``。
+    """
+    entries = await asyncio.to_thread(escalations.list_retrying)
+    fetcher = fetch or gw.flow_detail
+    changed: list[dict] = []
+    for entry in entries:
+        wf_id = str(entry.get("retry_wf_id") or "")
+        if not wf_id:
+            continue
+        try:
+            detail = await fetcher(wf_id)
+        except Exception as exc:  # noqa: BLE001 - 单个查询失败不影响其他待办
+            log.warning("[escalations] 重试流程 %s 终态查询失败：%s", wf_id, exc)
+            continue
+        outcome, reason = escalations.retry_outcome_from_detail(detail)
+        if outcome in ("", "RUNNING"):
+            continue
+        updated = escalations.apply_retry_outcome(
+            entry, outcome, "system:retry-tracking", detail=detail, reason=reason
+        )
+        try:
+            await asyncio.to_thread(escalations.persist_entry, updated)
+        except escalations.EscalationConflictError as exc:
+            log.info("[escalations] 待办 %s 已被并发更新，跳过终态回写：%s", entry.get("id"), exc)
+            continue
+        changed.append(updated)
+        await asyncio.to_thread(
+            audit.write_audit,
+            actor="system:retry-tracking",
+            action="escalation:retry-outcome",
+            wf_id=str(updated.get("wf_id") or ""),
+            target=str(updated.get("id") or ""),
+            params={
+                "retry_wf_id": wf_id,
+                "outcome": outcome,
+                "status": updated.get("status"),
+                "reason": reason,
+                "version": updated.get("version"),
+            },
+        )
+        if updated.get("status") == "closed":
+            log.info("[escalations] 重试流程 %s 成功，待办 %s 已自动关闭", wf_id, entry.get("id"))
+        else:
+            log.warning(
+                "[escalations] 重试流程 %s 终态 %s，待办 %s 已重新打开（%s）",
+                wf_id,
+                outcome,
+                entry.get("id"),
+                reason,
+            )
+    return changed
+
+
+async def _retry_tracking_loop() -> None:
+    """人工重试后台跟踪（M3）：新流程 DONE 才关闭，失败/再升级重新打开原待办。"""
+    while True:
+        try:
+            await refresh_retry_outcomes()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 跟踪失败不影响服务
+            log.warning("[escalations] 重试终态跟踪失败：%s", exc)
+        await asyncio.sleep(_retry_check_seconds())
 
 
 async def _command_dispatch_loop() -> None:
@@ -131,17 +214,21 @@ async def lifespan(_: FastAPI):
         pass
     rotation_task = asyncio.create_task(_rotation_loop())
     escalation_task = asyncio.create_task(_escalation_loop())
+    retry_task = asyncio.create_task(_retry_tracking_loop())
     command_task = asyncio.create_task(_command_dispatch_loop())
     try:
         yield
     finally:
         rotation_task.cancel()
         escalation_task.cancel()
+        retry_task.cancel()
         command_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await rotation_task
         with contextlib.suppress(asyncio.CancelledError):
             await escalation_task
+        with contextlib.suppress(asyncio.CancelledError):
+            await retry_task
         with contextlib.suppress(asyncio.CancelledError):
             await command_task
 
