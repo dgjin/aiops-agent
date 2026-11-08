@@ -289,7 +289,9 @@ class TracingTest(unittest.TestCase):
     """OTel 追踪：未配置 no-op；初始化失败降级（绝不阻塞服务）。"""
 
     def tearDown(self) -> None:
-        tracing._initialized = False  # 恢复模块级全局（防跨测试污染）
+        # 恢复模块级全局（防跨测试污染）
+        tracing._initialized = False
+        tracing._last_error = ""
 
     def test_disabled_without_endpoint(self) -> None:
         with mock.patch.dict(os.environ, {"AIOPS_OTEL_ENDPOINT": ""}):
@@ -308,6 +310,59 @@ class TracingTest(unittest.TestCase):
             ):
                 self.assertFalse(tracing.setup_tracing("aiops-bff"))
             self.assertFalse(tracing._initialized)
+
+    def test_state_optional_without_endpoint(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"AIOPS_OTEL_ENDPOINT": "", "AIOPS_OTEL_REQUIRED": ""}
+        ):
+            state = tracing.state()
+        self.assertEqual(state["detail"], "otlp_not_configured")
+        self.assertTrue(state["ok"])
+        self.assertFalse(state["enabled"])
+        self.assertFalse(state["configured"])
+
+    def test_state_required_without_endpoint_is_not_ready(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"AIOPS_OTEL_ENDPOINT": "", "AIOPS_OTEL_REQUIRED": "true"}
+        ):
+            state = tracing.state()
+        self.assertFalse(state["ok"])
+        self.assertTrue(state["required"])
+        self.assertEqual(state["detail"], "otlp_not_configured")
+
+    def test_state_configured_but_not_initialized_is_ok(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"AIOPS_OTEL_ENDPOINT": "http://localhost:4318", "AIOPS_OTEL_REQUIRED": "true"},
+        ):
+            state = tracing.state()
+        self.assertEqual(state["detail"], "otlp_configured_not_initialized")
+        self.assertTrue(state["ok"])
+        # 未初始化不算 enabled：指标不得冒充「已导出」
+        self.assertFalse(state["enabled"])
+
+    def test_state_init_failure_blocks_only_when_required(self) -> None:
+        tracing._last_error = "RuntimeError"
+        with mock.patch.dict(os.environ, {"AIOPS_OTEL_ENDPOINT": "http://localhost:4318"}):
+            optional = tracing.state()
+        self.assertEqual(optional["detail"], "otlp_init_failed")
+        self.assertTrue(optional["ok"])
+        with mock.patch.dict(
+            os.environ,
+            {"AIOPS_OTEL_ENDPOINT": "http://localhost:4318", "AIOPS_OTEL_REQUIRED": "true"},
+        ):
+            required = tracing.state()
+        self.assertEqual(required["detail"], "otlp_init_failed")
+        self.assertFalse(required["ok"])
+        # 稳定原因码：不返回异常类型/端点
+        self.assertNotIn("RuntimeError", json.dumps(required))
+        self.assertNotIn("4318", json.dumps(required))
+
+    def test_otel_gauge_reflects_state(self) -> None:
+        metrics.set_otel_state(True)
+        self.assertEqual(_value("aiops_otel_enabled", {}), 1.0)
+        metrics.set_otel_state(False)
+        self.assertEqual(_value("aiops_otel_enabled", {}), 0.0)
 
 
 class LogShipHealthMetricTest(unittest.TestCase):

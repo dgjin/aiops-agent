@@ -181,9 +181,11 @@ class ReleaseHistoryReplayTest(unittest.IsolatedAsyncioTestCase):
                 workflows.workflow, "info", return_value=mock.Mock(workflow_id="test")), mock.patch.object(
                 workflows.workflow, "wait_condition", new=mock.AsyncMock()):
             result = await instance._fix_to_release(ALERT, CAUSE, NOW)
-        # patched 调用序列即历史兼容边界：新增门必须出现在旧门之后（重放不产生额外命令）
+        # patched 调用序列即历史兼容边界：新 gate 以新名称声明，旧历史无 marker 时返回 False，
+        # 重放不产生额外命令；M5 的 deterministic-risk-v1 置于 sandbox 门之前。
         self.assertEqual(marker.call_args_list, [
             mock.call("fix-start-notify-g1"),
+            mock.call("deterministic-risk-v1"),
             mock.call("sandbox-verification-gate-v1"),
             mock.call("approval-evidence-v1"),
             mock.call("release-safety-g1"),

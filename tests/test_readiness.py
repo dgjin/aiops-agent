@@ -156,6 +156,38 @@ class ReadinessReportTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(set(report["degradations"]), {"llm", "loki", "notifications"})
             self.assertTrue(all(not v["ok"] for v in report["degradations"].values()))
 
+    async def test_tracing_check_marks_required_gate_failure(self):
+        """M5：readiness 明示 tracing；required 且初始化失败时必须未就绪。"""
+        snapshot = dict(mode="production", policy_sha256="abc", shadow_mode=True,
+                        namespace="aiops-production", task_queue="aiops-production-tasks")
+        values = {name: readiness.status(True, "fixture")
+                  for name in ("mysql", "schema", "redis", "temporal", "worker")}
+        cases = (
+            ({"enabled": True, "configured": True, "required": True,
+              "ok": True, "detail": "otlp_initialized"}, True),
+            ({"enabled": False, "configured": True, "required": True,
+              "ok": False, "detail": "otlp_init_failed"}, False),
+        )
+        for state, expected in cases:
+            with self.subTest(detail=state["detail"]), \
+                    patch.object(readiness.config, "startup_snapshot", return_value=snapshot), \
+                    patch.object(readiness, "probe_mysql",
+                                 return_value={k: values[k] for k in ("mysql", "schema")}), \
+                    patch.object(readiness, "probe_redis", return_value=values["redis"]), \
+                    patch.object(readiness, "probe_temporal", new=AsyncMock(
+                        return_value={k: values[k] for k in ("temporal", "worker")})), \
+                    patch.object(readiness.tracing, "state", return_value=state):
+                report = await readiness.check(Mock())
+            self.assertEqual(report["ok"], expected)
+            self.assertEqual(report["checks"]["tracing"]["detail"], state["detail"])
+            self.assertEqual(report["checks"]["tracing"]["required"], True)
+
+    async def test_configuration_failure_reports_tracing(self):
+        with patch.dict(os.environ, {"AIOPS_MODE": "invalid"}):
+            report = await readiness.check(Mock())
+        self.assertIn("tracing", report["checks"])
+        self.assertFalse(report["checks"]["configuration"]["ok"])
+
 
 class HealthRouteTest(unittest.TestCase):
     def setUp(self):

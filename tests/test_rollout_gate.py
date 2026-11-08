@@ -37,6 +37,15 @@ def _metrics(**overrides) -> dict:
             "override_rate": 0.1,
         },
         "rollback": {"rate": 0.0, "sample": 0, "released": 6},
+        # M5 治理硬门禁分量：默认全部健康，用例按需覆写
+        "audit_integrity": {"available": True, "ok": True, "checked": 120, "legacy": 0},
+        "commands": {
+            "available": True,
+            "pending": 0,
+            "oldest_pending_seconds": 0.0,
+            "failed_24h": 0,
+        },
+        "escalation_detail": {"available": True, "notify_pending": 0},
     }
     base.update(overrides)
     return base
@@ -176,6 +185,70 @@ class ExpandStageTest(unittest.TestCase):
     def test_unknown_stage_rejected(self) -> None:
         with self.assertRaises(ValueError):
             rollout_gate.evaluate("full", _metrics())
+
+
+class GovernanceHardGateTest(unittest.TestCase):
+    """M5：审计完整性 / 命令积压 / 通知送达是所有阶段的硬门禁。"""
+
+    def _run(self, **overrides) -> dict:
+        return rollout_gate.evaluate(
+            "staging-shadow", _metrics(**overrides), confirmed=CONFIRMED
+        )
+
+    def test_tampered_chain_blocks(self) -> None:
+        result = self._run(
+            audit_integrity={
+                "available": True,
+                "ok": False,
+                "error": "entry_hash 校验失败（记录内容已被修改）",
+            }
+        )
+        self.assertEqual(result["decision"], "block")
+        self.assertIn("audit-integrity", _ids(result, "fail"))
+
+    def test_integrity_unavailable_is_unknown(self) -> None:
+        result = self._run(audit_integrity={"available": False})
+        self.assertEqual(result["decision"], "pending")
+        self.assertIn("audit-integrity", _ids(result, "unknown"))
+
+    def test_command_backlog_and_failure_block(self) -> None:
+        backlog = self._run(
+            commands={
+                "available": True,
+                "pending": 1,
+                "oldest_pending_seconds": 301.0,
+                "failed_24h": 0,
+            }
+        )
+        self.assertEqual(backlog["decision"], "block")
+        self.assertIn("command-backlog", _ids(backlog, "fail"))
+        failed = self._run(
+            commands={
+                "available": True,
+                "pending": 0,
+                "oldest_pending_seconds": 0.0,
+                "failed_24h": 2,
+            }
+        )
+        self.assertEqual(failed["decision"], "block")
+
+    def test_notify_pending_blocks(self) -> None:
+        result = self._run(escalation_detail={"available": True, "notify_pending": 3})
+        self.assertEqual(result["decision"], "block")
+        self.assertIn("notify-delivery", _ids(result, "fail"))
+
+    def test_missing_governance_sections_pending(self) -> None:
+        metrics = _metrics()
+        for key in ("audit_integrity", "commands", "escalation_detail"):
+            metrics.pop(key)
+        result = rollout_gate.evaluate(
+            "staging-shadow", metrics, confirmed=CONFIRMED
+        )
+        self.assertEqual(result["decision"], "pending")
+        self.assertTrue(
+            {"audit-integrity", "command-backlog", "notify-delivery"}
+            <= _ids(result, "unknown")
+        )
 
 
 class CliTest(unittest.TestCase):

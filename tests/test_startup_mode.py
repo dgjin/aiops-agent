@@ -128,6 +128,38 @@ class StartupModeTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(config.resolve_policy_path(), ROOT / "release-gate-policy.yaml")
 
+    def test_otel_required_without_endpoint_rejected(self):
+        """M5：声明 AIOPS_OTEL_REQUIRED=true 却未配置端点 → 启动失败（不伪造就绪）。"""
+        with mock.patch.dict(
+            os.environ, {"AIOPS_OTEL_REQUIRED": "true", "AIOPS_OTEL_ENDPOINT": ""}
+        ):
+            with self.assertRaisesRegex(mode.ModeConfigError, "AIOPS_OTEL_ENDPOINT"):
+                config.startup_snapshot(self.root)
+
+    def test_otel_required_with_endpoint_allowed_and_redacted(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AIOPS_OTEL_REQUIRED": "true",
+                "AIOPS_OTEL_ENDPOINT": "http://localhost:4318",
+            },
+        ):
+            snapshot = config.startup_snapshot(self.root)
+        # 端点不进入快照/审计：只声明「已配置」，真实 Collector 联通属外部验收
+        self.assertNotIn("4318", json.dumps(snapshot))
+
+    def test_otel_required_is_production_only(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AIOPS_MODE": "demo",
+                "AIOPS_OTEL_REQUIRED": "true",
+                "AIOPS_OTEL_ENDPOINT": "",
+            },
+        ):
+            snapshot = config.startup_snapshot(self.root)
+        self.assertEqual(snapshot["mode"], "demo")
+
 
 class TemporalEntrypointsTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
