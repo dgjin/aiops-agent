@@ -32,6 +32,9 @@ alert_events    告警聚合事件（C 批次）：代表告警/流程 + pending
 alert_members   事件成员（C 批次）：(domain_key, alert_id) 唯一去重，跨实例幂等计数
 log_evidence    日志证据归档（转人工核对）：流程 TRIAGING 采集的原始日志 + 模板聚类
 workflow_commands  写命令 outbox（M2）：意图审计 + 投递状态 + 有界重试
+workflow_events     Temporal History 投影（M4）：(workflow_id,run_id,event_id) 幂等事件
+audit_chain_heads   审计哈希链链头（M4）：受控串行写入的 tamper-evident 链
+audit_archives      审计归档清单（M4）：清理前必须已归档且校验通过
 =============== ============================================================
 """
 
@@ -139,9 +142,17 @@ audit_events = Table(
     Column("detail", JSON, nullable=False),
     Column("result", String(32), nullable=False, server_default="ok"),
     Column("mode", String(16), nullable=False, server_default="production"),
+    # ---- tamper-evident 哈希链（M4）----
+    # event_id 为条目身份；prev_hash/entry_hash 串成单链（历史行可为 NULL，链从首条新记录开始）
+    Column("event_id", String(64)),
+    Column("command_id", String(64)),
+    Column("prev_hash", String(64)),
+    Column("entry_hash", String(64)),
     Index("idx_audit_ts", "ts"),
     Index("idx_audit_wf", "workflow_id"),
     Index("idx_audit_actor", "actor"),
+    Index("idx_audit_event", "event_id"),
+    Index("idx_audit_command", "command_id"),
 )
 
 workflow_runs = Table(
@@ -162,6 +173,11 @@ workflow_runs = Table(
     Column("close_time", DateTime),
     Column("duration_seconds", Float),
     Column("result", JSON),
+    # ---- Temporal History 同步位置（M4）----
+    # last_history_event_id 是已落库的最大事件号；history_complete 表示终态流程已完成最终同步
+    Column("last_history_event_id", _BIGINT, nullable=True),
+    Column("history_synced_at", DateTime, nullable=True),
+    Column("history_complete", Boolean, nullable=False, server_default=text("0")),
     Column("mode", String(16), nullable=False, server_default="production"),
     Column("updated_at", DateTime, nullable=False),
     Index("idx_runs_stage", "stage"),
@@ -200,6 +216,57 @@ workflow_commands = Table(
     Column("completed_at", DateTime),
     Index("idx_commands_status_next", "status", "next_retry_at"),
     Index("idx_commands_wf", "wf_id"),
+)
+
+# ---- Temporal History 投影（M4，语义见 bff/history_projector.py）----
+# 以 (workflow_id,run_id,event_id) 幂等写入；detail 保存完整 HistoryEvent JSON，
+# 不受 UI 列表 200 条上限影响。运行中增量追加，终态完成一次最终同步。
+workflow_events = Table(
+    "workflow_events",
+    metadata,
+    Column("workflow_id", String(255), primary_key=True),
+    Column("run_id", String(128), primary_key=True),
+    Column("event_id", _BIGINT, primary_key=True),
+    Column("event_time", DateTime),
+    Column("event_type", String(64), nullable=False, server_default=""),
+    Column("detail", JSON, nullable=False),
+    Column("mode", String(16), nullable=False, server_default="production"),
+    Column("synced_at", DateTime, nullable=False),
+    Index("idx_wf_events_type", "event_type"),
+    Index("idx_wf_events_time", "event_time"),
+)
+
+# ---- 审计哈希链链头（M4）----
+# 单链 scope=audit；写入方在同一事务/文件锁内读取链头 → 追加条目 → 更新链头。
+# 明确边界：tamper-evident（可发现篡改），不等同外部 WORM 不可变存储。
+audit_chain_heads = Table(
+    "audit_chain_heads",
+    metadata,
+    Column("scope", String(64), primary_key=True),
+    Column("last_event_id", String(64), nullable=False, server_default=""),
+    Column("last_hash", String(64), nullable=False, server_default=""),
+    Column("updated_at", DateTime, nullable=False),
+)
+
+# ---- 审计归档清单（M4）----
+# 清理任务只删除「已有归档记录且校验通过」的过期审计；归档本体保留在本地。
+audit_archives = Table(
+    "audit_archives",
+    metadata,
+    Column("archive_id", String(64), primary_key=True),
+    Column("day", String(16), nullable=False),
+    Column("path", String(1024), nullable=False),
+    Column("rows", Integer, nullable=False, server_default=text("0")),
+    # 归档覆盖的审计行 ID 区间（production 清理按区间删除，不按时间二次推断）
+    Column("first_id", _BIGINT, nullable=True),
+    Column("last_id", _BIGINT, nullable=True),
+    Column("first_ts", DateTime),
+    Column("last_ts", DateTime),
+    Column("chain_ok", Boolean, nullable=False, server_default=text("0")),
+    Column("manifest_sha256", String(64), nullable=False, server_default=""),
+    Column("status", String(16), nullable=False, server_default="archived"),
+    Column("created_at", DateTime, nullable=False),
+    Index("idx_audit_archives_day", "day"),
 )
 
 escalations = Table(

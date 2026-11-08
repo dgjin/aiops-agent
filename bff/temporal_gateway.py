@@ -286,6 +286,36 @@ class TemporalGateway:
         return base
 
     # ------------------------------------------------------------------
+    # 轻量执行列表（History 投影器专用）
+    # ------------------------------------------------------------------
+
+    async def list_executions(self, limit: int = 200) -> list[dict]:
+        """只返回执行元数据（不 query status / result），供后台 History 同步使用。
+
+        与 :meth:`list_flows` 共用同一查询口径，但避免为每个流程额外发 query RPC；
+        M4 投影器按 ``exec_status`` 决定增量同步或终态最终同步。
+        """
+        client = await self.client()
+        records: list[WorkflowExecution] = []
+        query = f'WorkflowType="{WF_TYPE}" OR WorkflowType="{WF_TYPE_REQUIREMENT}"'
+        async for wf in client.list_workflows(query):
+            records.append(wf)
+            if len(records) >= _LIST_MAX_FETCH:
+                break
+        records.sort(key=lambda wf: _aware(wf.start_time), reverse=True)
+        return [
+            {
+                "wf_id": wf.id,
+                "run_id": wf.run_id,
+                "exec_status": wf.status.name if wf.status else "UNKNOWN",
+                "start_time": _iso(wf.start_time),
+                "close_time": _iso(wf.close_time),
+                "workflow_type": str(wf.workflow_type),
+            }
+            for wf in records[:limit]
+        ]
+
+    # ------------------------------------------------------------------
     # 详情
     # ------------------------------------------------------------------
 
