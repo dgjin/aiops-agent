@@ -19,11 +19,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -247,6 +249,26 @@ class TestProposePatch(QoderTestBase):
             self._propose()
 
 
+class _QoderTimeProxy:
+    """qoder_fix.time 的局部替身：仅 sleep 被捕获，其余属性透传真实 time 模块。"""
+
+    def __init__(self) -> None:
+        self.sleep = mock.Mock()
+        self._real = time
+
+    def __getattr__(self, name: str):
+        return getattr(self._real, name)
+
+
+@contextlib.contextmanager
+def _capture_backoff_sleep():
+    """只替换 qoder_fix 模块内的 time：patch 全局 time.sleep 会把其他线程的
+    休眠一并记入断言（全量跑时出现无关的 0.001s 调用），造成测试隔离污染。"""
+    proxy = _QoderTimeProxy()
+    with mock.patch.object(qoder_fix, "time", proxy):
+        yield proxy.sleep
+
+
 class TestServerTransientRetry(QoderTestBase):
     """回归防护：服务端「会话初始化被拒」500 签名的快速重试（2026-10-09 排查结论）。
 
@@ -307,7 +329,7 @@ class TestServerTransientRetry(QoderTestBase):
         """首次命中瞬时故障签名 → 15s 退避重试 → 第二次成功产出改动。"""
         os.environ["FAKE_QODER_MODE"] = "server_flaky_once"
         os.environ["FAKE_QODER_MARKER"] = str(self.root / "flaky-once.marker")
-        with mock.patch("aiops_agent.qoder_fix.time.sleep") as sleep:
+        with _capture_backoff_sleep() as sleep:
             diff, _desc, _risk, meta = self._propose()
         self.assertIn("if coupon else 0", diff)
         self.assertEqual(meta["server_retry_attempts"], 1)
@@ -320,7 +342,7 @@ class TestServerTransientRetry(QoderTestBase):
     def test_retries_exhausted_reports_server_fault(self) -> None:
         """持续瞬时故障：共 3 次调用（首次+2 次重试，退避 15s/45s），报错含服务端故障提示。"""
         os.environ["FAKE_QODER_MODE"] = "server_fail"
-        with mock.patch("aiops_agent.qoder_fix.time.sleep") as sleep, mock.patch(
+        with _capture_backoff_sleep() as sleep, mock.patch(
             "aiops_agent.qoder_fix.run_qoder_cli", wraps=qoder_fix.run_qoder_cli
         ) as cli:
             with self.assertRaises(qoder_fix.QoderFixError) as ctx:
@@ -332,9 +354,7 @@ class TestServerTransientRetry(QoderTestBase):
 
     def test_slow_failure_not_retried(self) -> None:
         os.environ["FAKE_QODER_MODE"] = "server_fail"
-        with mock.patch.object(qoder_fix, "SERVER_FAST_FAIL_SECONDS", 0), mock.patch(
-            "aiops_agent.qoder_fix.time.sleep"
-        ) as sleep, mock.patch(
+        with mock.patch.object(qoder_fix, "SERVER_FAST_FAIL_SECONDS", 0), _capture_backoff_sleep() as sleep, mock.patch(
             "aiops_agent.qoder_fix.run_qoder_cli", wraps=qoder_fix.run_qoder_cli
         ) as cli:
             with self.assertRaises(qoder_fix.QoderFixError):
@@ -345,7 +365,7 @@ class TestServerTransientRetry(QoderTestBase):
     def test_plain_failure_not_retried(self) -> None:
         """非签名失败（如普通调用失败）不重试，维持现状行为。"""
         os.environ["FAKE_QODER_MODE"] = "fail"
-        with mock.patch("aiops_agent.qoder_fix.time.sleep") as sleep, mock.patch(
+        with _capture_backoff_sleep() as sleep, mock.patch(
             "aiops_agent.qoder_fix.run_qoder_cli", wraps=qoder_fix.run_qoder_cli
         ) as cli:
             with self.assertRaises(qoder_fix.QoderFixError):
