@@ -44,6 +44,7 @@ from temporalio.exceptions import ActivityError
 with workflow.unsafe.imports_passed_through():
     from . import activities
     from . import change_evidence
+    from . import command_contract
     from . import gate_decision
     from .models import (
         Alert,
@@ -168,6 +169,9 @@ class AIOpsFixWorkflow:
         self._approval_error: dict | None = None
         self._approval_rejections: list[dict] = []
         self._command_ids: dict[str, str] = {}
+        # 窗口指令（deploy/queue）拒收记录：与审批拒收同类，只登记不推进
+        self._command_rejections: list[dict] = []
+        self._command_error: dict | None = None
         self._run_id: str = ""
         self._case_id: str = ""
         self._requested_by: str = ""
@@ -194,15 +198,107 @@ class AIOpsFixWorkflow:
         self._handle_approval_signal("second_approval", payload)
 
     @workflow.signal
-    def submit_deploy_command(self, command: str) -> None:
-        """窗口内指令：deploy_now / cancel。"""
-        self._deploy_command = command
+    def submit_deploy_command(self, payload) -> None:
+        """窗口内指令：deploy_now / cancel。
+
+        dict＝``workflow-command-v1`` 信封（command_id 幂等，BFF outbox 可安全重投）；
+        字符串＝旧协议（历史重放与旧 BFF 兼容）。
+        """
+        if isinstance(payload, dict):
+            self._handle_workflow_command("deploy-command", payload)
+            return
+        self._deploy_command = payload
 
     @workflow.signal
-    def submit_patch(self, workflow_id: str, alert: Alert) -> None:
-        """窗口内新补丁：仅 FIFO 入队——不重置倒计时、不合并、数量不设上限（锁定策略）。"""
+    def submit_patch(self, workflow_id, alert=None) -> None:
+        """窗口内新补丁：仅 FIFO 入队——不重置倒计时、不合并、数量不设上限（锁定策略）。
+
+        单参数 dict＝``workflow-command-v1`` 信封；两参数＝旧协议。
+        """
+        if isinstance(workflow_id, dict) and alert is None:
+            self._handle_workflow_command("queue-patch", workflow_id)
+            return
         self._queued_patches.append((workflow_id, alert))
         self._gate_events.append(f"gate3:patch-queued:{alert.alert_id}")
+
+    # ------------------------------------------------------------------
+    # 窗口指令信封处理（workflow-command-v1）
+    # ------------------------------------------------------------------
+
+    def _handle_workflow_command(self, command_type: str, envelope) -> None:
+        """deploy/queue 命令的统一入口：结构 → 阶段 → command_id 幂等 → 应用。
+
+        与审批一致：任何非法信号只登记拒收原因（可见、可审计），绝不推进流程。
+        相同 command_id + 相同内容＝重投（忽略）；相同 ID + 不同内容＝冲突（拒绝）。
+        """
+        raw_command_id = ""
+        if isinstance(envelope, dict):
+            raw_command_id = str(envelope.get("command_id") or "")[:128]
+        problem = command_contract.envelope_problem(envelope, command_type)
+        if problem is not None:
+            self._record_command_rejection(
+                command_type, problem[0], problem[1], command_id=raw_command_id
+            )
+            return
+
+        command_id = str(envelope["command_id"])
+        digest = command_contract.envelope_digest(envelope)
+        previous = self._command_ids.get(command_id)
+        if previous is not None:
+            if previous == digest:
+                self._gate_events.append(f"command:duplicate:{command_type}:{command_id}")
+            else:
+                self._record_command_rejection(
+                    command_type,
+                    "command-id-conflict",
+                    f"命令 {command_id} 的内容不一致，已拒绝",
+                    command_id=command_id,
+                )
+            return
+
+        if self.stage != "NOTIFYING":
+            self._record_command_rejection(
+                command_type,
+                "wrong-stage",
+                f"当前阶段 {self.stage} 不接受{command_type}命令（需 NOTIFYING）",
+                command_id=command_id,
+            )
+            return
+
+        payload = envelope["payload"]
+        if command_type == "deploy-command":
+            self._deploy_command = str(payload["command"])
+        else:
+            queued_alert = Alert(
+                alert_id=str(payload["alert_id"]),
+                service=str(payload["service"]),
+                description=str(payload.get("description") or ""),
+            )
+            self._queued_patches.append((str(payload["new_wf_id"]), queued_alert))
+            self._gate_events.append(f"gate3:patch-queued:{queued_alert.alert_id}")
+        self._command_ids[command_id] = digest
+        self._command_error = None
+        self._gate_events.append(
+            f"command:received:{command_type}:by={envelope['actor']}:"
+            f"channel={envelope['channel']}:command={command_id}"
+        )
+
+    def _record_command_rejection(
+        self, command_type: str, code: str, reason: str, *, command_id: str = ""
+    ) -> None:
+        """登记非法窗口命令（不推进流程）；列表上限防历史膨胀。"""
+        entry = {
+            "type": command_type,
+            "code": code,
+            "reason": reason,
+            "command_id": str(command_id or ""),
+            "at": workflow.now().isoformat(),
+        }
+        self._command_error = entry
+        self._command_rejections.append(entry)
+        if len(self._command_rejections) > 20:
+            del self._command_rejections[0]
+        self._gate_events.append(f"command:rejected:{command_type}:{code}")
 
     # ------------------------------------------------------------------
     # 审批信号处理（approval-evidence-v1）
@@ -369,6 +465,10 @@ class AIOpsFixWorkflow:
             "gate_events": self._gate_events,
             "approval_error": self._approval_error,
             "approval_rejections": self._approval_rejections,
+            "command_rejections": self._command_rejections,
+            "command_error": self._command_error,
+            # 已应用命令 ID（BFF outbox 回执依据：即使命令随后被消费/出队也可确认受理）
+            "command_ids": list(self._command_ids),
         }
 
     # ------------------------------------------------------------------
@@ -944,6 +1044,9 @@ class AIOpsFixWorkflow:
             "evidence_binding": self._evidence_binding,
             "approval_error": self._approval_error,
             "approval_rejections": self._approval_rejections,
+            "command_rejections": self._command_rejections,
+            "command_error": self._command_error,
+            "command_ids": list(self._command_ids),
         }
 
 
