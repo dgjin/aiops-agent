@@ -1,6 +1,6 @@
 """P5-03：数据清理 TTL（cleanup）单测。
 
-覆盖：TTL 表（demo / production）/ 审计文件名日期判定与 mtime 回退 / 工作区目录 /
+覆盖：TTL 表（demo / production）/ 审计文件「先归档后清理」与未归档保留 / 工作区目录 /
 通知与 ArgoCD 文件 / DB 行清理（SQLite 生产分支）/ dry-run / 单域失败隔离 / 报告结构。
 """
 
@@ -77,6 +77,7 @@ class ReportShapeTest(_TmpRootsTest):
                 "qoder_records",
                 "qoder_workspaces",
                 "sandbox_workspaces",
+                "workflow_events",
                 "workflow_runs",
             ],
         )
@@ -107,7 +108,7 @@ class AuditFilesTest(_TmpRootsTest):
         self.assertFalse(old.exists())
         self.assertTrue(keep.exists())
 
-    def test_unknown_name_falls_back_to_mtime(self) -> None:
+    def test_unknown_name_is_reported_but_kept(self) -> None:
         stale = self.root / "web-audit" / "legacy.jsonl"
         notes = self.root / "web-audit" / "notes.txt"
         stale.write_text("", encoding="utf-8")
@@ -115,10 +116,11 @@ class AuditFilesTest(_TmpRootsTest):
         _utime(stale, 90)
         _utime(notes, 90)
         report = self._run()
-        # 无日期前缀的 jsonl 按 mtime 判定（90 天 > demo 30 天）→ 删除；
+        # 非 audit-YYYYMMDD 命名无法进入归档清单 → 只报告不删除（未归档不得静默删除）；
         # 非 jsonl 文件不属审计留痕形态 → 不受影响
-        self.assertEqual(report["deleted"]["audit_files"], 1)
-        self.assertFalse(stale.exists())
+        self.assertEqual(report["deleted"]["audit_files"], 0)
+        self.assertEqual(report["audit"]["unarchived"], 1)
+        self.assertTrue(stale.exists())
         self.assertTrue(notes.exists())
 
     def test_dry_run_counts_without_deleting(self) -> None:

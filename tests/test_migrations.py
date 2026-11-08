@@ -10,6 +10,7 @@ from unittest import mock
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import IntegrityError
 
 from aiops_agent import db
 
@@ -155,6 +156,59 @@ class MigrationBaselineTest(unittest.TestCase):
         columns = {item["name"] for item in inspect(engine).get_columns("escalations")}
         self.assertIn("retry_wf_id", columns)
         self.assertIn("version", columns)
+
+    def test_history_and_audit_chain_added_and_downgraded(self) -> None:
+        """M4：History 投影 / 审计链 / 归档清单；降级 0007 移除后重放升级可重建。"""
+        command.upgrade(self._config(), "head")
+        engine = db.get_engine()
+        tables = set(inspect(engine).get_table_names())
+        for name in ("workflow_events", "audit_chain_heads", "audit_archives"):
+            with self.subTest(table=name):
+                self.assertIn(name, tables)
+
+        run_columns = {item["name"] for item in inspect(engine).get_columns("workflow_runs")}
+        for name in ("last_history_event_id", "history_synced_at", "history_complete"):
+            with self.subTest(column=name):
+                self.assertIn(name, run_columns)
+        audit_columns = {item["name"] for item in inspect(engine).get_columns("audit_events")}
+        for name in ("event_id", "command_id", "prev_hash", "entry_hash"):
+            with self.subTest(column=name):
+                self.assertIn(name, audit_columns)
+        audit_indexes = {item["name"] for item in inspect(engine).get_indexes("audit_events")}
+        self.assertIn("idx_audit_event", audit_indexes)
+        self.assertIn("idx_audit_command", audit_indexes)
+
+        # 复合主键幂等：同一 (workflow_id, run_id, event_id) 不得重复
+        values = {
+            "workflow_id": "wf-m4",
+            "run_id": "run-1",
+            "event_id": 1,
+            "event_type": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
+            "detail": {},
+            "synced_at": db.now_dt(),
+        }
+        with engine.begin() as conn:
+            conn.execute(db.workflow_events.insert().values(**values))
+        with self.assertRaises(IntegrityError):
+            with engine.begin() as conn:
+                conn.execute(db.workflow_events.insert().values(**values))
+
+        command.downgrade(self._config(), "20261101_0007")
+        tables = set(inspect(engine).get_table_names())
+        for name in ("workflow_events", "audit_chain_heads", "audit_archives"):
+            with self.subTest(table=name):
+                self.assertNotIn(name, tables)
+        run_columns = {item["name"] for item in inspect(engine).get_columns("workflow_runs")}
+        self.assertNotIn("last_history_event_id", run_columns)
+        audit_columns = {item["name"] for item in inspect(engine).get_columns("audit_events")}
+        self.assertNotIn("event_id", audit_columns)
+        self.assertNotIn("command_id", audit_columns)
+
+        command.upgrade(self._config(), "head")
+        tables = set(inspect(engine).get_table_names())
+        self.assertIn("workflow_events", tables)
+        audit_columns = {item["name"] for item in inspect(engine).get_columns("audit_events")}
+        self.assertIn("entry_hash", audit_columns)
 
 
 if __name__ == "__main__":
