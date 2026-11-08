@@ -25,20 +25,11 @@ import json
 import os
 
 from fastapi import APIRouter, Request
-from temporalio.service import RPCError
 
-from aiops_agent import chatops, kill_switch, metrics
+from aiops_agent import chatops, kill_switch
 
-from .. import audit
 from ..deps import ApiError, gw, log, ok
-from .flows import (
-    _approval_audit_params,
-    _first_approval_extra,
-    _second_approval_extra,
-    _signal_envelope,
-    _write_guard,
-    duty_separation_error,
-)
+from .flows import ApprovalBody, submit_approval_command
 
 router = APIRouter()
 
@@ -123,7 +114,7 @@ async def api_im_command(request: Request, payload: dict) -> dict:
 
 
 async def _handle_decision(sender: str, command: chatops.Command) -> dict:
-    """审批决策：kill switch → 解析流程 → 前置校验 → 信封 → signal → 回执 → 审计。"""
+    """审批决策：kill switch → 解析流程 → 统一 outbox 链路（校验/审计/投递）。"""
     if not command.arg:
         return _reply(success=False, text=f"用法：{chatops.usage(command.verb)}")
     if command.verb.endswith("reject") and not command.comment:
@@ -152,68 +143,39 @@ async def _handle_decision(sender: str, command: chatops.Command) -> dict:
     except ApiError as exc:
         return _reply(success=False, text=exc.message)
 
-    extra = _first_approval_extra if gate == "approval" else _second_approval_extra
-    try:
-        status = await _write_guard(wf_id, {"WAIT_APPROVAL"}, extra)
-    except ApiError as exc:
-        log.info("[chatops] 拒绝：sender=%s verb=%s wf=%s：%s", sender, command.verb, wf_id, exc.message)
-        return _reply(success=False, text=f"未执行：{exc.message}")
-
     action = f"chatops:{'approval' if gate == 'approval' else 'second-approval'}:{decision}"
-    separation = duty_separation_error(status, gate, sender)
-    if separation:
-        audit.write_audit(
-            actor=f"im:{sender}",
-            action=action,
-            wf_id=wf_id,
-            params={"channel": "im", "sender": sender, "comment": command.comment},
-            result="denied",
-        )
-        return _reply(success=False, text=f"未执行：{separation}")
-
     try:
-        payload, command_id = _signal_envelope(
-            status,
+        outcome = await submit_approval_command(
+            wf_id=wf_id,
             gate=gate,
-            decision=decision,
             actor=sender,
             channel="im",
-            comment=command.comment,
+            body=ApprovalBody(decision=decision, comment=command.comment),
+            audit_action=action,
+            audit_actor=f"im:{sender}",
         )
     except ApiError as exc:
+        log.info(
+            "[chatops] 拒绝：sender=%s verb=%s wf=%s：%s",
+            sender, command.verb, wf_id, exc.message,
+        )
         return _reply(success=False, text=f"未执行：{exc.message}")
 
-    try:
-        if gate == "approval":
-            await gw.signal_approval(wf_id, payload)
-        else:
-            await gw.signal_second_approval(wf_id, payload)
-    except RPCError as exc:
-        raise ApiError(502, f"Temporal 调用失败：{exc}") from exc
-    gw.invalidate_cache()
-
-    delivery, receipt = (
-        await gw.approval_receipt(wf_id, command_id) if command_id else ("submitted", None)
-    )
-    audit.write_audit(
-        actor=f"im:{sender}",
-        action=action,
-        wf_id=wf_id,
-        params={
-            **_approval_audit_params(payload, command_id, command.comment, "im", delivery),
-            "sender": sender,
-            **({"receipt": receipt} if delivery == "rejected" else {}),
-        },
-        result="rejected" if delivery == "rejected" else "signaled",
-    )
-    if delivery == "rejected":
-        reason = (receipt or {}).get("reason") or "流程拒绝了该审批命令"
+    if outcome["rejected"]:
+        reason = outcome["reason"] or "流程拒绝了该审批命令"
         log.info("[chatops] 流程拒绝：sender=%s wf=%s：%s", sender, wf_id, reason)
         return _reply(success=False, text=f"未生效：{reason}")
+    if outcome["delivery"] == "pending":
+        return _reply(
+            success=False,
+            text=(
+                f"命令已登记（{outcome['command_id']}），系统暂不可用，将自动重试；"
+                "请稍后用「状态」确认"
+            ),
+        )
 
-    metrics.observe_gate_event(gate, decision)
     log.info("[chatops] %s → %s（wf=%s）", sender, command.verb, wf_id)
-    suffix = "（业务结果以流程状态为准）" if delivery == "submitted" else ""
+    suffix = "（业务结果以流程状态为准）" if outcome["delivery"] != "accepted" else ""
     return _reply(
         success=True,
         text=f"✓ {wf_id}：{chatops.DECISION_ACTIONS[command.verb]}（操作者 {sender}）{suffix}",

@@ -1,9 +1,10 @@
 """流程域：/api/overview、/api/flows*（列表 / 详情 / 结果）与写侧四端点。
 
 写侧（approval / second-approval / deploy-command / queue-patch）统一走
-``_write_guard`` 前置校验：运行中 + 阶段允许 + 业务附加条件 → Temporal signal →
-操作审计（前端不可绕过；对已关闭 workflow 发 signal 会被 Temporal 静默接受，
-因此必须 BFF 侧拦截，见设计方案 6.3）。
+``_write_guard`` 前置校验（运行中 + 阶段允许 + 业务附加条件），随后进入
+``bff.commands`` 的 outbox：意图审计与命令同事务落库 → 立即投递 → 业务回执。
+Temporal 暂不可达时命令保留为 PENDING 并退避重试，不再丢失用户意图；
+``signal RPC 成功``不等于业务受理，业务结果仍以工作流记录为准（设计方案 6.3、M2）。
 """
 
 from __future__ import annotations
@@ -16,10 +17,9 @@ from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 from temporalio.service import RPCError, RPCStatusCode
 
-from aiops_agent import change_evidence, evidence_store, metrics
-from aiops_agent.models import Alert
+from aiops_agent import change_evidence, command_contract, evidence_store, metrics
 
-from .. import aggregator, audit, escalations, runs_store
+from .. import aggregator, audit, commands, escalations, runs_store
 from ..deps import ApiError, close_dt, gw, log, ok
 from ..temporal_gateway import check_stage_allowed
 
@@ -310,22 +310,133 @@ def _signal_envelope(
     return envelope, command_id
 
 
-def _approval_audit_params(
-    payload: dict | str, command_id: str, comment: str, channel: str, delivery: str
+async def _record_and_deliver(
+    *,
+    command_type: str,
+    wf_id: str,
+    actor: str,
+    channel: str,
+    payload: dict | str,
+    audit_action: str,
+    command_id: str | None = None,
+    run_id: str = "",
+    audit_params: dict | None = None,
 ) -> dict:
-    """审批审计参数：命令、通道、意见与证据哈希（旧流程只记决策）。"""
-    params: dict = {"channel": channel, "comment": comment, "delivery": delivery}
-    if isinstance(payload, dict):
-        params.update(
+    """意图审计 + 命令入库（同一事务）→ 立即投递一次；返回命令记录。
+
+    存储不可用即拒绝新操作（fail-closed），绝不出现「无审计推进」。
+    """
+    try:
+        record = await asyncio.to_thread(
+            commands.record_intent,
+            command_type=command_type,
+            wf_id=wf_id,
+            actor=actor,
+            channel=channel,
+            payload=payload,
+            audit_action=audit_action,
             command_id=command_id,
-            diff_hash=payload.get("diff_hash"),
-            test_report_hash=payload.get("test_report_hash"),
-            policy_sha256=payload.get("policy_sha256"),
-            run_id=payload.get("run_id"),
-            case_id=payload.get("case_id"),
-            patch_id=payload.get("patch_id"),
+            run_id=run_id,
+            audit_params=audit_params,
         )
-    return params
+    except commands.CommandStoreError as exc:
+        raise ApiError(503, f"写操作未能登记（审计/命令存储不可用）：{exc}") from exc
+    try:
+        return await commands.deliver(record["command_id"])
+    except commands.CommandNotFound as exc:
+        raise ApiError(503, "命令已登记但读取失败，请稍后用命令 ID 查询") from exc
+    except Exception as exc:  # noqa: BLE001 - 投递异常不得谎报成功
+        log.warning("[commands] 投递异常：command=%s %s", record["command_id"], exc)
+        raise ApiError(
+            503, f"命令已登记（{record['command_id']}）但投递状态未知：{exc}"
+        ) from exc
+
+
+def _command_outcome(record: dict, *, legacy: bool = False) -> dict:
+    """命令记录 → 路由语义：业务拒收用返回值表达，系统类失败抛 503。"""
+    if record["status"] == "FAILED":
+        reason = record.get("last_error") or "命令投递失败"
+        if str(reason).startswith(("Temporal", "kill switch", "命令存储")):
+            raise ApiError(503, f"命令未送达（{record['command_id']}）：{reason}")
+        return {
+            "record": record,
+            "rejected": True,
+            "reason": reason,
+            "delivery": "rejected",
+            "command_id": record["command_id"],
+            "legacy": legacy,
+        }
+    delivery = {"ACCEPTED": "accepted", "SUBMITTED": "submitted"}.get(
+        record["status"], "pending"
+    )
+    if legacy and delivery != "pending":
+        delivery = "submitted"
+    return {
+        "record": record,
+        "rejected": False,
+        "reason": "",
+        "delivery": delivery,
+        "command_id": record["command_id"],
+        "legacy": legacy,
+    }
+
+
+async def submit_approval_command(
+    *,
+    wf_id: str,
+    gate: str,
+    actor: str,
+    channel: str,
+    body: ApprovalBody,
+    audit_action: str,
+    audit_actor: str | None = None,
+) -> dict:
+    """审批统一写链路（Web 控制台 / ChatOps / 飞书卡片共用）。
+
+    前置校验 → 职责分离 → 证据信封 → 意图审计+命令入库 → 投递 → 结果口径。
+    业务拒收由返回值 ``rejected`` 表达（调用方决定 HTTP/卡片语义）；
+    存储或投递系统故障抛 ``ApiError(503)``，保证未送达不会被谎报为已提交。
+    """
+    extra = _first_approval_extra if gate == "approval" else _second_approval_extra
+    status = await _write_guard(wf_id, {"WAIT_APPROVAL"}, extra)
+
+    separation = duty_separation_error(status, gate, actor)
+    if separation:
+        audit.write_audit(
+            actor=audit_actor or actor,
+            action=audit_action,
+            wf_id=wf_id,
+            params={"channel": channel, "comment": body.comment, "delivery": "denied"},
+            result="denied",
+        )
+        raise ApiError(409, separation)
+
+    payload, envelope_id = _signal_envelope(
+        status,
+        gate=gate,
+        decision=body.decision,
+        actor=actor,
+        channel=channel,
+        comment=body.comment,
+        expected_case_id=body.expected_case_id,
+        expected_diff_hash=body.expected_diff_hash,
+        expected_run_id=body.expected_run_id,
+    )
+    record = await _record_and_deliver(
+        command_type="approval" if gate == "approval" else "second-approval",
+        wf_id=wf_id,
+        actor=audit_actor or actor,
+        channel=channel,
+        payload=payload,
+        audit_action=audit_action,
+        command_id=envelope_id or None,
+        run_id=str(status.get("run_id") or ""),
+        audit_params={"decision": body.decision, "comment": body.comment},
+    )
+    outcome = _command_outcome(record, legacy=not envelope_id)
+    if not outcome["rejected"] and outcome["delivery"] in ("accepted", "submitted"):
+        metrics.observe_gate_event(gate, body.decision)
+    return outcome
 
 
 async def _submit_approval(
@@ -335,74 +446,35 @@ async def _submit_approval(
     gate: str,
     body: ApprovalBody,
 ) -> dict:
-    """审批提交统一链路：guard → 职责分离 → 信封 → signal → 回执 → 审计。"""
+    """Web 控制台审批入口：统一链路 + 409/503 语义。"""
     actor = request.state.identity.user
-    allowed_stage = {"WAIT_APPROVAL"}
-    extra = _first_approval_extra if gate == "approval" else _second_approval_extra
-    status = await _write_guard(wf_id, allowed_stage, extra)
     action = "approval" if gate == "approval" else "second-approval"
-
-    separation = duty_separation_error(status, gate, actor)
-    if separation:
-        audit.write_audit(
-            actor=actor,
-            action=f"{action}:{body.decision}",
-            wf_id=wf_id,
-            params={"channel": "console", "comment": body.comment, "delivery": "denied"},
-            result="denied",
-        )
-        raise ApiError(409, separation)
-
-    payload, command_id = _signal_envelope(
-        status,
+    outcome = await submit_approval_command(
+        wf_id=wf_id,
         gate=gate,
-        decision=body.decision,
         actor=actor,
         channel="console",
-        comment=body.comment,
-        expected_case_id=body.expected_case_id,
-        expected_diff_hash=body.expected_diff_hash,
-        expected_run_id=body.expected_run_id,
+        body=body,
+        audit_action=f"{action}:{body.decision}",
     )
-    if gate == "approval":
-        await gw.signal_approval(wf_id, payload)
-    else:
-        await gw.signal_second_approval(wf_id, payload)
-    gw.invalidate_cache()
+    if outcome["rejected"]:
+        raise ApiError(409, f"审批未生效：{outcome['reason']}")
 
-    # signal RPC 成功只代表命令已送达；业务回执以工作流记录为准。
-    # 旧流程无命令 ID，无法关联回执（只能展示已提交）。
-    delivery, receipt = (
-        await gw.approval_receipt(wf_id, command_id) if command_id else ("submitted", None)
-    )
-    audit.write_audit(
-        actor=actor,
-        action=f"{action}:{body.decision}",
-        wf_id=wf_id,
-        params={
-            **_approval_audit_params(payload, command_id, body.comment, "console", delivery),
-            **({"receipt": receipt} if delivery == "rejected" else {}),
-        },
-        result="rejected" if delivery == "rejected" else "signaled",
-    )
-    if delivery == "rejected":
-        reason = (receipt or {}).get("reason") or "流程拒绝了该审批命令"
-        raise ApiError(409, f"审批未生效：{reason}")
-
-    metrics.observe_gate_event(gate, body.decision)
-    message = (
-        "审批命令已受理并记录"
-        if delivery == "accepted"
-        else "审批命令已提交；业务结果以流程状态为准"
-    )
-    if not command_id:
+    delivery = outcome["delivery"]
+    if delivery == "accepted":
+        message = "审批命令已受理并记录"
+    elif delivery == "pending":
+        message = "审批命令已登记，系统暂不可达，将自动重试；请稍后用命令 ID 查询"
+    elif outcome["legacy"]:
         message = "审批命令已提交（旧流程）：业务结果以流程状态为准"
+    else:
+        message = "审批命令已提交；业务结果以流程状态为准"
     return ok(
         {
             "ok": True,
             "wf_id": wf_id,
             "action": f"{action}:{body.decision}",
-            "command_id": command_id,
+            "command_id": outcome["command_id"],
             "delivery": delivery,
             "message": message,
         }
@@ -432,32 +504,94 @@ async def api_second_approval(request: Request, wf_id: str, body: ApprovalBody) 
 
 @router.post("/api/flows/{wf_id}/deploy-command")
 async def api_deploy_command(request: Request, wf_id: str, body: DeployCommandBody) -> dict:
-    await _write_guard(wf_id, {"NOTIFYING"})
-    await gw.signal_deploy_command(wf_id, body.command)
-    gw.invalidate_cache()
-    metrics.observe_gate_event("deploy_command", body.command)
-    audit.write_audit(
-        actor=request.state.identity.user,
-        action=f"deploy-command:{body.command}",
-        wf_id=wf_id,
-        result="signaled",
+    status = await _write_guard(wf_id, {"NOTIFYING"})
+    actor = request.state.identity.user
+    command_id = command_contract.new_command_id()
+    envelope = command_contract.build_envelope(
+        command_type="deploy-command",
+        command_id=command_id,
+        actor=actor,
+        channel="console",
+        submitted_at=command_contract.utc_now_iso(),
+        payload=command_contract.deploy_payload(body.command),
     )
-    return ok({"ok": True, "wf_id": wf_id, "action": f"deploy-command:{body.command}"})
+    record = await _record_and_deliver(
+        command_type="deploy-command",
+        wf_id=wf_id,
+        actor=actor,
+        channel="console",
+        payload=envelope,
+        audit_action=f"deploy-command:{body.command}",
+        command_id=command_id,
+        run_id=str(status.get("run_id") or ""),
+        audit_params={"command": body.command},
+    )
+    outcome = _command_outcome(record)
+    if outcome["rejected"]:
+        raise ApiError(409, f"发布指令未生效：{outcome['reason']}")
+    if outcome["delivery"] != "pending":
+        metrics.observe_gate_event("deploy_command", body.command)
+    message = {
+        "accepted": "发布指令已受理",
+        "submitted": "发布指令已提交；业务结果以流程状态为准",
+    }.get(outcome["delivery"], "发布指令已登记，系统暂不可达，将自动重试")
+    return ok(
+        {
+            "ok": True,
+            "wf_id": wf_id,
+            "action": f"deploy-command:{body.command}",
+            "command_id": outcome["command_id"],
+            "delivery": outcome["delivery"],
+            "message": message,
+        }
+    )
 
 
 @router.post("/api/flows/{wf_id}/queue-patch")
 async def api_queue_patch(request: Request, wf_id: str, body: QueuePatchBody) -> dict:
     if not body.new_wf_id.startswith("aiops-fix-"):
         raise ApiError(400, "new_wf_id 需遵循 aiops-fix-{service}-{alert_id} 命名")
-    await _write_guard(wf_id, {"NOTIFYING"})
-    alert = Alert(alert_id=body.alert_id, service=body.service, description=body.description)
-    await gw.signal_queue_patch(wf_id, body.new_wf_id, alert)
-    gw.invalidate_cache()
-    audit.write_audit(
-        actor=request.state.identity.user,
-        action="queue-patch",
-        wf_id=wf_id,
-        params={"new_wf_id": body.new_wf_id, "alert_id": body.alert_id},
-        result="signaled",
+    status = await _write_guard(wf_id, {"NOTIFYING"})
+    actor = request.state.identity.user
+    command_id = command_contract.new_command_id()
+    envelope = command_contract.build_envelope(
+        command_type="queue-patch",
+        command_id=command_id,
+        actor=actor,
+        channel="console",
+        submitted_at=command_contract.utc_now_iso(),
+        payload=command_contract.queue_payload(
+            new_wf_id=body.new_wf_id,
+            service=body.service,
+            alert_id=body.alert_id,
+            description=body.description,
+        ),
     )
-    return ok({"ok": True, "wf_id": wf_id, "action": "queue-patch"})
+    record = await _record_and_deliver(
+        command_type="queue-patch",
+        wf_id=wf_id,
+        actor=actor,
+        channel="console",
+        payload=envelope,
+        audit_action="queue-patch",
+        command_id=command_id,
+        run_id=str(status.get("run_id") or ""),
+        audit_params={"new_wf_id": body.new_wf_id, "alert_id": body.alert_id},
+    )
+    outcome = _command_outcome(record)
+    if outcome["rejected"]:
+        raise ApiError(409, f"排队指令未生效：{outcome['reason']}")
+    message = {
+        "accepted": "排队指令已受理",
+        "submitted": "排队指令已提交；业务结果以流程状态为准",
+    }.get(outcome["delivery"], "排队指令已登记，系统暂不可达，将自动重试")
+    return ok(
+        {
+            "ok": True,
+            "wf_id": wf_id,
+            "action": "queue-patch",
+            "command_id": outcome["command_id"],
+            "delivery": outcome["delivery"],
+            "message": message,
+        }
+    )

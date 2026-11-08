@@ -37,22 +37,13 @@ import os
 from datetime import datetime, timezone
 
 from fastapi import APIRouter
-from temporalio.service import RPCError
 
 from aiops_agent import chatops as chatops_engine
-from aiops_agent import kill_switch, metrics, notify
+from aiops_agent import kill_switch, notify
 
-from .. import audit
-from ..deps import ApiError, gw, log
+from ..deps import ApiError, log
 from .chatops import _find_flow, _sender_roles
-from .flows import (
-    _approval_audit_params,
-    _first_approval_extra,
-    _second_approval_extra,
-    _signal_envelope,
-    _write_guard,
-    duty_separation_error,
-)
+from .flows import ApprovalBody, submit_approval_command
 
 router = APIRouter()
 
@@ -137,84 +128,47 @@ async def api_im_card_callback(payload: dict) -> dict:
         wf_id, _ = await _find_flow(wf_arg)
     except ApiError as exc:
         return _toast("error", exc.message)
-    extra = _first_approval_extra if gate == "approval" else _second_approval_extra
-    try:
-        status = await _write_guard(wf_id, {"WAIT_APPROVAL"}, extra)
-    except ApiError as exc:
-        log.info("[card-callback] 拒绝：operator=%s wf=%s：%s", operator, wf_id, exc.message)
-        return _toast("error", f"未执行：{exc.message}")
-
-    action = f"card-callback:{'approval' if gate == 'approval' else 'second-approval'}:{decision}"
-    separation = duty_separation_error(status, gate, operator)
-    if separation:
-        audit.write_audit(
-            actor=f"im:{operator}",
-            action=action,
-            wf_id=wf_id,
-            params={
-                "channel": "feishu-card",
-                "operator": operator,
-                "comment": comment,
-                "delivery": "denied",
-            },
-            result="denied",
-        )
-        return _toast("error", f"未执行：{separation}")
 
     evidence = notify.extract_callback_evidence(payload)
+    action = f"card-callback:{'approval' if gate == 'approval' else 'second-approval'}:{decision}"
     try:
-        signal_payload, command_id = _signal_envelope(
-            status,
+        outcome = await submit_approval_command(
+            wf_id=wf_id,
             gate=gate,
-            decision=decision,
             actor=operator,
             channel="feishu-card",
-            comment=comment,
-            expected_case_id=evidence.get("case_id", ""),
-            expected_diff_hash=evidence.get("diff_hash", ""),
-            expected_run_id=evidence.get("run_id", ""),
+            body=ApprovalBody(
+                decision=decision,
+                comment=comment,
+                expected_case_id=evidence.get("case_id", ""),
+                expected_diff_hash=evidence.get("diff_hash", ""),
+                expected_run_id=evidence.get("run_id", ""),
+            ),
+            audit_action=action,
+            audit_actor=f"im:{operator}",
         )
     except ApiError as exc:
         log.info("[card-callback] 拒绝：operator=%s wf=%s：%s", operator, wf_id, exc.message)
         return _toast("error", f"未执行：{exc.message}")
-    try:
-        if gate == "approval":
-            await gw.signal_approval(wf_id, signal_payload)
-        else:
-            await gw.signal_second_approval(wf_id, signal_payload)
-    except RPCError as exc:
-        log.warning("[card-callback] Temporal 调用失败：%s", exc)
-        return _toast("error", "系统暂时不可用，请稍后重试或在控制台处置")
-    gw.invalidate_cache()
 
-    # signal RPC 成功只代表命令已送达；业务回执以工作流记录为准。
-    delivery, receipt = (
-        await gw.approval_receipt(wf_id, command_id) if command_id else ("submitted", None)
-    )
-    audit.write_audit(
-        actor=f"im:{operator}",
-        action=action,
-        wf_id=wf_id,
-        params={
-            **_approval_audit_params(
-                signal_payload, command_id, comment, "feishu-card", delivery
-            ),
-            "operator": operator,
-            **({"receipt": receipt} if delivery == "rejected" else {}),
-        },
-        result="rejected" if delivery == "rejected" else "signaled",
-    )
-    if delivery == "rejected":
-        reason = (receipt or {}).get("reason") or "流程拒绝了该审批命令"
+    if outcome["rejected"]:
+        reason = outcome["reason"] or "流程拒绝了该审批命令"
         log.info("[card-callback] 流程拒绝：operator=%s wf=%s：%s", operator, wf_id, reason)
         return _toast("error", f"未生效：{reason}")
+    if outcome["delivery"] == "pending":
+        return _toast(
+            "warning",
+            (
+                f"命令已登记（{outcome['command_id']}），系统暂不可用，将自动重试；"
+                "请稍后查看流程状态"
+            ),
+        )
 
-    metrics.observe_gate_event(gate, decision)
     at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     label = f"{_ACTION_LABELS.get(gate, gate)}{_DECISION_LABELS.get(decision, decision)}命令已提交"
     log.info("[card-callback] %s → %s/%s（wf=%s）", operator, gate, decision, wf_id)
     result_card = notify.render_approval_result_card(
-        wf_id, gate, decision, operator, at, comment=comment, command_id=command_id
+        wf_id, gate, decision, operator, at, comment=comment, command_id=outcome["command_id"]
     )
     if isinstance(header, dict):  # 新版回调：card 带 type=raw 包装
         card_field: dict = {"type": "raw", "data": result_card["card"]}
@@ -223,7 +177,7 @@ async def api_im_card_callback(payload: dict) -> dict:
     return {
         "toast": {
             "type": "success",
-            "content": f"{label}（操作者 {operator}）{_delivery_suffix(delivery)}",
+            "content": f"{label}（操作者 {operator}）{_delivery_suffix(outcome['delivery'])}",
         },
         "card": card_field,
     }
