@@ -170,12 +170,16 @@ python demo_cli.py status --wf-id aiops-fix-order-a-1001
 #### 4.3.1 常规审批
 
 ```bash
-# 放行
+# 放行（意见可选，但建议写明依据）
 python demo_cli.py approve --wf-id aiops-fix-order-a-1001 --decision approve
-# 驳回
-python demo_cli.py approve --wf-id aiops-fix-order-a-1001 --decision reject
+# 驳回（意见必填，将写入审计记录）
+python demo_cli.py approve --wf-id aiops-fix-order-a-1001 --decision reject --comment "缺少回滚验证"
 ```
 
+- **审批证据绑定（approval-evidence-v1）**：每次审批都必须能回答「哪一次变更」。控制台、ChatOps、飞书卡片与 CLI 均从当前流程 `status.evidence_binding` 派生案件 ID / 补丁 ID / diff 哈希 / 测试报告哈希 / 策略哈希 / run ID；页面回传的 `expected_*` 仅用于拒绝过期页面（旧 diff / 旧 run 的审批会得到 409「审批未生效」并提示刷新）。
+- **意见必填**：驳回必须给出非空意见（≤2000 字）；飞书卡片按钮无法输入文本，点击「驳回」会提示改用控制台或群内「驳回 <ID前缀> -- 意见」。批准意见可选但全程留痕。
+- **职责分离**：流程发起人不得审批自己的变更；二级审批人不得与一级审批人相同。控制台、ChatOps、飞书回调与直接 Temporal 信号都会拦截。
+- **送达语义**：返回 `delivery=accepted` 表示工作流已受理并记录；`submitted` 仅表示命令已提交，业务结果以流程状态为准；`rejected` 不回执生效，卡片保留按钮便于修正后重试。
 - 收到**飞书**审批卡片后，直接点击卡片上的「批准 / 驳回」按钮即可完成审批（2026-10-14 起真实链路打通：应用机器人发卡 + 长连接接收回调，配置与自检见 7.1）：操作者需在 `AIOPS_IM_USERS` 中映射为 operator，成功后卡片就地替换为处置结果（toast + 绿/红回执卡，防重复点击）；权限不足 / 阶段不符 / 重复点击均会在 toast 中提示原因；钉钉按钮需外置网关转发（见第 7 章）；
 - **超时策略（锁定）**：规定时间（演示 300s / 生产 30m）内无响应 → **自动驳回**并升级值班负责人（`gate2:timeout->reject`）；驳回即关闭流程并留痕。
 
@@ -184,13 +188,14 @@ python demo_cli.py approve --wf-id aiops-fix-order-a-1001 --decision reject
 当补丁命中 `auth/**`、`payment/**`、`crypto/**` 时，需要**两级审批**：
 
 1. 一级审批通过后，日志出现 `!! 命中受保护目录，需二级审批（submit_second_approval）`；
-2. 二级审批人执行：
+2. 二级审批人执行（驳回同样必填意见）：
 
 ```bash
 python demo_cli.py second-approve --wf-id aiops-fix-order-a-1001 --decision approve
+python demo_cli.py second-approve --wf-id aiops-fix-order-a-1001 --decision reject --comment "待补充影响面评估"
 ```
 
-二级审批同样有超时自动驳回（`gate2b:timeout->reject`）。两级都通过才进入公告窗口。
+二级审批同样有超时自动驳回（`gate2b:timeout->reject`）。两级都通过才进入公告窗口；二级审批人与一级审批人、发起人不得相同。
 
 ### 4.4 发布窗口操作（闸门 3）
 
@@ -237,8 +242,10 @@ python demo_cli.py result --wf-id aiops-fix-order-a-1001
 | `帮助` | 命令说明 | viewer |
 | `待办` | 列出待审批流程（受保护目录流程会标注二级审批进度） | viewer |
 | `状态 <流程ID前缀>` | 单流程状态：阶段/根因/补丁/审批进度/截止时间 | viewer |
-| `批准` / `驳回 <流程ID前缀>` | 一级审批决策（闸门 2） | operator |
-| `二级批准` / `二级驳回 <流程ID前缀>` | 二级审批决策（受保护目录流程） | operator |
+| `批准 <ID前缀> [-- 意见]` | 一级审批放行（意见可选） | operator |
+| `驳回 <ID前缀> -- <意见>` | 一级审批驳回（意见必填） | operator |
+| `二级批准 <ID前缀> [-- 意见]` | 二级审批放行（受保护目录流程） | operator |
+| `二级驳回 <ID前缀> -- <意见>` | 二级审批驳回（意见必填） | operator |
 
 一段典型的群内对话：
 
@@ -247,17 +254,17 @@ python demo_cli.py result --wf-id aiops-fix-order-a-1001
 [AIOps助手] 待审批流程（2 个）：
               1. aiops-fix-order-a-1001（order）· 补丁 p-a-1001-r1（受保护目录，需二级审批）
               2. aiops-fix-coupon-a-1002（coupon）· 补丁 p-a-1002-r1
-              发送「批准 <ID前缀>」或「驳回 <ID前缀>」处置。
+              发送「批准 <ID前缀>」或「驳回 <ID前缀> -- 意见」处置。
 
 [值班人]    @AIOps助手 批准 aiops-fix-order-a-1001
-[AIOps助手] ✓ aiops-fix-order-a-1001：一级审批已批准（操作者 ou_xxxx）
+[AIOps助手] ✓ aiops-fix-order-a-1001：一级审批命令已提交（操作者 ou_xxxx；业务结果以流程状态为准）
 ```
 
 > 要点：
 > - 流程 ID 支持**唯一前缀**；前缀命中多条时机器人回复候选列表，补充字符后再发即可；
 > - 发送者未在 `AIOPS_IM_USERS` 中映射时按 **viewer** 处理（仅可查询）；审批类命令要求 operator 及以上；
-> - 审批安全语义与控制台完全一致：复用同款写守卫（仅运行中 + 等待审批 + 防重复）、kill switch 与操作审计（审计 actor 记为 `im:<发送者>`）；
-> - 命令级失败（无权限 / 流程已结束 / 前缀不唯一等）会以文字直接回复原因，不会静默失败。
+> - 审批安全语义与控制台完全一致：复用同款写守卫（仅运行中 + 等待审批 + 防重复）、kill switch 与操作审计（审计 actor 记为 `im:<发送者>`）；驳回意见必填，发起人不得自审，二级审批人不得与一级相同；
+> - 命令级失败（无权限 / 流程已结束 / 前缀不唯一 / 审批未生效等）会以文字直接回复原因，不会静默失败。
 
 ---
 
@@ -269,11 +276,13 @@ python demo_cli.py result --wf-id aiops-fix-order-a-1001
 
 内容：根因（含置信度）、补丁（编号/风险/文件）、完整 diff、测试报告（单测/回归/SAST）、回滚预案；受保护目录追加「需二级审批」提示。
 
-按钮：**批准**（`decision=approve`）、**驳回**（`decision=reject`）。按钮载荷契约：
+按钮：**批准**（`decision=approve`）、**驳回**（`decision=reject`，需在控制台或群内补充意见）。按钮载荷契约：
 
 ```json
-{"wf_id": "aiops-fix-order-a-1001", "gate": "approval", "decision": "approve"}
+{"wf_id": "aiops-fix-order-a-1001", "gate": "approval", "decision": "approve", "case_id": "a-1001", "diff_hash": "<sha256>", "run_id": "<temporal run id>"}
 ```
+
+卡片上的 `case_id/diff_hash/run_id` 仅用于服务端拒绝**过期卡片**（点击时与当前 `status.evidence_binding` 比对）；可信绑定与信封始终由 BFF 从流程状态重新派生。
 
 ### 5.2 用户公告卡片（蓝色）
 

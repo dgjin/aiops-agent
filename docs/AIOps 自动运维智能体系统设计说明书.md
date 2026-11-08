@@ -396,6 +396,20 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 - **客户端真实交互链路（2026-10-14 落地，长连接模式）**：发送侧新增应用机器人通道（`feishu_app.py`，三要素齐全时 `NotificationSender` 优先应用发卡——记录 `channel=feishu-app`，失败降级留痕且**不回落** webhook）；接收侧新增长连接网关 `feishu_gateway.py`（WSS 免公网订阅 `card.action.trigger`；`build_forward_payload` 以本进程 `AIOPS_FEISHU_VERIFY_TOKEN` 覆写 `header.token` 后转发 BFF 回调端点，3 秒时限内转发超时 2.5s，任何失败转 `toast.error` 不抛错；操作者 open_id 记入网关日志 `feishu_gateway.log`）；watchdog 条件托管（应用凭证齐全自动加挂为第 7 个组件，未配置默认仍 6 组件）；
 - **上游缺陷规避（lark-oapi ≤1.7.4）**：官方长连接客户端 `_handle_data_frame` 丢弃 `MessageType.CARD` 帧（larksuite/oapi-sdk-python issue #126，表现为点击按钮报错 200340）——网关安装帧类型改写补丁（CARD 帧 `type` 头改写为 `event` 后交官方派发，路由依据 payload 内 `event_type="card.action.trigger"`，响应回写逻辑复用官方），进程内幂等安装，上游修复后可移除。
 
+#### 4.6.2 审批证据绑定与职责分离（`approval-evidence-v1`，2026-11-08 落地）
+
+目标是让审批可独立回答「谁、何时、通过哪个通道、基于哪个 diff / 测试 / 策略、为何作出决定」，而不是只校验流程 ID 与当前阶段：
+
+- **证据绑定**（`aiops_agent/change_evidence.py`，纯函数、零 IO）：`case_id / patch_id / diff_hash / test_report_hash / policy_sha256 / run_id`。哈希为 SHA-256 并带领域前缀（`aiops-diff-v1` / `aiops-test-report-v1`）；测试报告只取固定字段的规范化 JSON（键排序 + 紧凑分隔），BFF 与工作流两侧得到完全相同的文本。`policy_sha256` 来自启动快照，运行期改 YAML 不影响在途流程；`run_id` 为 Temporal 运行实例 ID，同名重跑不复用；告警流 `case_id=alert_id`，需求流 `case_id=analysis_id`。
+- **信任模型**：BFF 一律从当前 `status.evidence_binding` 派生信封（不信任客户端提交的哈希）；客户端回传的 `expected_case_id/expected_diff_hash/expected_run_id` 只用于拒绝基于过期页面/旧补丁的审批。工作流收到信号后二次校验 `run/case/patch/diff/test/policy` 与绑定是否一致，任一不一致即登记 `approval_error` 并保持阶段不变（fail-closed）。
+- **协议与兼容**：新流程信号载荷为信封 `{contract, command_id, gate, decision, actor, channel, comment, submitted_at, ...证据哈希}`；旧流程保持字符串 `decision`。`workflow.patched("approval-evidence-v1")` 决定协议：历史无 marker 的重放返回 False，旧在途流程继续旧协议，滚动升级期间不会翻转历史决策。
+- **命令幂等**：`command_id` 由 BFF / CLI 生成。相同 `command_id` 且内容指纹相同 → 忽略（已生效，留痕）；相同 ID 不同内容 → 拒绝；结构合法后才判定 `already-decided`，避免重复投递被误报为业务冲突。
+- **职责分离**：流程发起人（需求批准人 / 人工重试发起人）不得审批自己的变更；一级与二级审批人不得相同。BFF 与工作流双侧校验，直接向 Temporal 发信号也无法绕过；违规信号不推进流程，并写入 `approval_rejected` 事件与 `approval_error` 原因。
+- **意见必填**：`reject` 必须带非空 `comment`（≤2000 字），`approve` 意见可选；控制台、ChatOps、飞书卡片回执与 CLI 同口径。卡片按钮无法输入文本时不伪造驳回理由，提示改用控制台或群内「驳回 <ID前缀> -- 意见」。
+- **送达语义**：`signal RPC` 成功仅代表命令已送达。BFF 回写 `delivery=accepted | submitted | rejected`：命中 `approvals[].command_id` 为 accepted，命中 `approval_error.command_id` 为 rejected，轮询窗口内未命中为 submitted；只有 accepted 才把卡片替换为处置回执，rejected 保留按钮便于修正后重试。
+- **审计透出**：运行中 `status()` 与终态 `_final()` 同步返回 `case_id/requested_by/parent_run_id/parent_wf_id/retry_wf_id/approval_contract/evidence_binding/approvals/approval_error/approval_rejections/gate_events`；控制台审批记录页展示审批人、通道、意见、命令 ID 与被拒命令。
+- **重试溯源**：转人工重试以新 `wf_id` 重启，`escalations.run_id` 记录原 run，新流程策略快照注入 `evidence_context{case_id, requested_by, parent_run_id, parent_wf_id, retry_wf_id}`，使重试流程仍能拒绝发起人自审。
+
 ### 4.7 执行层（`release.py`）
 
 - **发布编排 `run_canary`**：
@@ -458,11 +472,11 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 
 | 接口 | 类型 | 参数 | 语义 |
 | --- | --- | --- | --- |
-| `submit_approval` | signal | `decision: approve/reject` | 一级审批；超时 30m 自动驳回 |
-| `submit_second_approval` | signal | `decision: approve/reject` | 受保护目录二级审批 |
+| `submit_approval` | signal | v2：`envelope`（`approval-evidence-v1`，含 command_id/actor/channel/comment/证据哈希）；旧流程：`decision: approve/reject` | 一级审批；超时 30m 自动驳回；驳回必填意见 |
+| `submit_second_approval` | signal | 同上（`gate=second_approval`） | 受保护目录二级审批；审批人不得与一级/发起人相同 |
 | `submit_deploy_command` | signal | `command: deploy_now/cancel` | 窗口内加速 / 取消 |
 | `submit_patch` | signal | `workflow_id, alert: Alert` | 窗口内新补丁仅 FIFO 入队（不重置计时、不合并、无上限） |
-| `status` | query | — | 返回 `{stage, approval, second_approval, deploy_command, queued_patches[{workflow_id, alert_id}]}` |
+| `status` | query | — | 返回阶段/审批进度/补丁与测试证据 + 审批治理字段（`case_id/requested_by/approval_contract/evidence_binding/approvals/approval_error/approval_rejections/gate_events/parent_*`） |
 
 ### 5.3 外部系统接口契约
 
