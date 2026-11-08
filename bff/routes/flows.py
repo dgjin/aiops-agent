@@ -327,6 +327,21 @@ def _first_approval_extra(status: dict) -> str | None:
     return None
 
 
+def snapshot_command_error(status: dict, command: str) -> str | None:
+    """启动快照禁用发布指令时返回原因（M5）。
+
+    只认流程启动快照中的 ``allow_deploy_now`` / ``allow_cancel``：运行期修改磁盘
+    策略不得放开已启动流程。旧流程无快照（空字典）时保持 M5 前的行为。
+    """
+    snapshot = status.get("policy_snapshot")
+    if not isinstance(snapshot, dict) or not snapshot:
+        return None
+    key = "allow_deploy_now" if command == "deploy_now" else "allow_cancel"
+    if snapshot.get(key, True):
+        return None
+    return f"流程启动快照已禁用 {command}（{key}=false）；请在策略调整后重新发起流程"
+
+
 def _identity_key(value: str) -> str:
     """身份归一化：ChatOps/CLI 前缀不影响职责分离比较。"""
     key = str(value or "").strip()
@@ -607,7 +622,11 @@ async def api_second_approval(request: Request, wf_id: str, body: ApprovalBody) 
 
 @router.post("/api/flows/{wf_id}/deploy-command")
 async def api_deploy_command(request: Request, wf_id: str, body: DeployCommandBody) -> dict:
-    status = await _write_guard(wf_id, {"NOTIFYING"})
+    status = await _write_guard(
+        wf_id,
+        {"NOTIFYING"},
+        extra=lambda current: snapshot_command_error(current, body.command),
+    )
     actor = request.state.identity.user
     command_id = command_contract.new_command_id()
     envelope = command_contract.build_envelope(
