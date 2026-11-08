@@ -33,6 +33,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from aiops_agent import command_contract, kill_switch
+from aiops_agent import audit_chain
 from aiops_agent import db as db_layer
 from aiops_agent import metrics, mode
 
@@ -213,17 +214,19 @@ def record_intent(
             engine = db_layer.get_engine()
             with engine.begin() as conn:
                 # 同一事务：审计写不进去则命令也不存在，绝不出现「无审计推进」。
-                conn.execute(
-                    db_layer.audit_events.insert().values(
-                        ts=db_layer.to_dt(_now_iso()),
-                        actor=actor,
-                        action=audit_action,
-                        workflow_id=wf_id or "",
-                        target=None,
-                        detail=params,
-                        result="pending",
-                        mode="production",
-                    )
+                # 审计走哈希链受控链头（与 bff.audit.write_audit 共用同一串行化入口）。
+                audit_chain.append_db(
+                    conn,
+                    {
+                        "ts": _now_iso(),
+                        "actor": actor,
+                        "action": audit_action,
+                        "wf_id": wf_id,
+                        "target": None,
+                        "params": params,
+                        "result": "pending",
+                    },
+                    command_id=command_id,
                 )
                 conn.execute(
                     db_layer.workflow_commands.insert().values(

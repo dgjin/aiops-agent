@@ -5,12 +5,12 @@
 ===================  =========  =========  ==========================================
 数据类型              生产保留期  演示保留期  清理方式
 ===================  =========  =========  ==========================================
-审计事件              365 天     30 天      文件（web-audit/*.jsonl）+ 表行 DELETE
+审计事件              365 天     30 天      先归档 + 链校验 + SHA-256 复核，再删原始文件/表行
 沙箱工作区            7 天       1 天       目录 rm -rf（data/sandbox/<patch_id>）
 通知留痕              90 天      7 天       文件删除（data/notify/*.json）
 Qoder 工作区          7 天       1 天       目录 + *.run.json 删除（data/qoder/）
 ArgoCD 留痕           90 天      7 天       文件删除（data/argocd/*.json）
-工作流执行记录        365 天     30 天      workflow_runs 表行 DELETE
+工作流执行记录        365 天     30 天      workflow_runs 表行 DELETE（连带已完成的 History）
 ===================  =========  =========  ==========================================
 
 入口：
@@ -23,8 +23,13 @@ ArgoCD 留痕           90 天      7 天       文件删除（data/argocd/*.jso
 
 - 工作区删除仅限指定根目录的**直接子目录**；文件域仅匹配固定模式，不递归越界；
 - dry-run 只统计不删除；
-- 审计 JSONL 以文件名日期（``audit-YYYYMMDD.jsonl``，UTC）判定过期，无法解析时回退 mtime；
+- 审计域采用「先归档、后清理」（M4）：只有整条链校验通过、归档文件 SHA-256 复核一致
+  的条目才会删除原始文件/表行；未归档或归档校验失败的一律保留（不静默删除）；
+- 审计 JSONL 以文件名日期（``audit-YYYYMMDD.jsonl``，UTC）判定过期；非标准命名的
+  ``*.jsonl`` 仅统计为 ``unarchived`` 并保留，不回退 mtime 删除；
 - 表行删除仅在 production 模式执行（demo 不触达任何数据库）；
+- workflow_events 随已完成同步（history_complete=1）的过期运行一并清理，未完成运行
+  保留，供对账补数；
 - Temporal 历史保留（30 天）由 Temporal namespace retention 配置（部署侧），不在此模块。
 """
 
@@ -127,30 +132,79 @@ def _cleanup_workspaces(
 # ----------------------------------------------------------------------
 
 
-def _cleanup_audit_files(directory: Path, cutoff: datetime, dry_run: bool) -> int:
-    """审计 JSONL：优先按文件名日期（UTC 全天）判定，解析失败回退 mtime。
-
-    仅处理 ``*.jsonl``（审计留痕固定形态），目录内其他文件不受影响。
-    """
+def _audit_candidates(directory: Path, cutoff: datetime) -> tuple[list[Path], int]:
+    """返回可归档的过期审计文件与非标准命名（不参与清理）的过期文件数。"""
+    cutoff_day = cutoff.strftime("%Y%m%d")
+    expired: list[Path] = []
+    unarchived = 0
     if not directory.is_dir():
-        return 0
-    count = 0
+        return expired, unarchived
     for child in directory.iterdir():
         if not child.is_file() or child.suffix != ".jsonl":
             continue
         match = _AUDIT_FILE_RE.match(child.name)
-        expired = False
-        if match:
-            try:
-                file_day = datetime.strptime(match.group(1), "%Y%m%d").replace(tzinfo=timezone.utc)
-                expired = file_day < cutoff
-            except ValueError:
-                expired = _mtime(child) < cutoff
-        else:
-            expired = _mtime(child) < cutoff
-        if expired:
-            count += _remove_file(child, dry_run)
-    return count
+        if not match:
+            # 非 audit-YYYYMMDD 命名无法进入归档清单：只报告、不删除
+            if _mtime(child) < cutoff:
+                unarchived += 1
+            continue
+        if match.group(1) < cutoff_day:
+            expired.append(child)
+    return expired, unarchived
+
+
+def _archive_audit_files(directory: Path, cutoff: datetime, dry_run: bool) -> dict:
+    """审计 JSONL：先归档 + 链校验 + SHA-256 复核，复核通过才删除原文件（M4）。
+
+    返回 ``{archived, purged, skipped, unarchived, error}``；``purged`` 即实际删除的
+    原始文件数（与旧报告字段 ``audit_files`` 同口径）。
+    """
+    from . import audit_chain
+
+    expired, unarchived = _audit_candidates(directory, cutoff)
+    report = {"archived": 0, "purged": 0, "skipped": 0, "unarchived": unarchived, "error": ""}
+    if not expired:
+        return report
+    if dry_run:
+        report["purged"] = len(expired)
+        return report
+    result = audit_chain.archive_demo(directory, cutoff.strftime("%Y%m%d"), purge=True)
+    report.update(
+        archived=int(result.get("archived") or 0),
+        purged=int(result.get("purged") or 0),
+        skipped=int(result.get("skipped") or 0),
+        error=str(result.get("error") or ""),
+    )
+    return report
+
+
+def _archive_audit_rows(
+    engine, archive_dir: Path, cutoff: datetime, dry_run: bool
+) -> dict:
+    """production 审计表行：先归档 + 分段链校验，通过后才按归档区间删除。"""
+    from sqlalchemy import func, select
+
+    from . import audit_chain, db as db_layer
+
+    cutoff_naive = db_layer.to_dt(cutoff)
+    report = {"archived": 0, "purged": 0, "skipped": 0, "unarchived": 0, "error": ""}
+    if dry_run:
+        with engine.connect() as conn:
+            report["purged"] = int(
+                conn.execute(
+                    select(func.count())
+                    .select_from(db_layer.audit_events)
+                    .where(db_layer.audit_events.c.ts < cutoff_naive)
+                ).scalar_one()
+            )
+        return report
+    result = audit_chain.archive_db(engine, archive_dir, cutoff, purge=True)
+    report.update(
+        archived=int(result.get("archived") or 0),
+        purged=int(result.get("purged") or 0),
+        error=str(result.get("error") or ""),
+    )
+    return report
 
 
 def _db_rows_expired(table, column, cutoff_naive: datetime, dry_run: bool) -> int:
@@ -169,6 +223,35 @@ def _db_rows_expired(table, column, cutoff_naive: datetime, dry_run: bool) -> in
             )
     with engine.begin() as conn:
         return int(conn.execute(delete(table).where(column < cutoff_naive)).rowcount)
+
+
+def _cleanup_history_events(engine, cutoff_naive: datetime, dry_run: bool) -> int:
+    """清理已完成同步的过期运行的 History 事件（未完成运行保留，供对账补数）。"""
+    from sqlalchemy import delete, func, select, tuple_
+
+    from . import db as db_layer
+
+    runs = db_layer.workflow_runs
+    events = db_layer.workflow_events
+    expired = select(runs.c.workflow_id, runs.c.run_id).where(
+        runs.c.updated_at < cutoff_naive,
+        runs.c.history_complete.is_(True),
+    )
+    if dry_run:
+        with engine.connect() as conn:
+            return int(
+                conn.execute(
+                    select(func.count())
+                    .select_from(events)
+                    .where(tuple_(events.c.workflow_id, events.c.run_id).in_(expired))
+                ).scalar_one()
+            )
+    with engine.begin() as conn:
+        return int(
+            conn.execute(
+                delete(events).where(tuple_(events.c.workflow_id, events.c.run_id).in_(expired))
+            ).rowcount
+        )
 
 
 # ----------------------------------------------------------------------
@@ -213,13 +296,38 @@ def run_cleanup(
         "qoder_workspaces": 0,
         "qoder_records": 0,
         "argocd_files": 0,
+        "workflow_events": 0,
         "workflow_runs": 0,
+    }
+    audit_report = {
+        "archived": 0,
+        "purged": 0,
+        "skipped": 0,
+        "unarchived": 0,
+        "error": "",
     }
     errors: list[str] = []
 
-    # 文件域（demo / production 通用；Qoder 拆为「工作区目录」与「run.json 留痕」两段）
+    # 审计文件域（demo / production 遗留 JSONL）：先归档 + 链校验，复核通过才删
+    try:
+        file_report = _archive_audit_files(
+            audit_dir, now - timedelta(days=ttl["audit"]), dry_run
+        )
+        deleted["audit_files"] = file_report["purged"]
+        audit_report.update(
+            archived=audit_report["archived"] + file_report["archived"],
+            purged=audit_report["purged"] + file_report["purged"],
+            skipped=file_report["skipped"],
+            unarchived=file_report["unarchived"],
+            error=file_report["error"],
+        )
+        if file_report["error"]:
+            errors.append(f"审计文件（{audit_dir}）: {file_report['error']}")
+    except Exception as exc:  # noqa: BLE001 - 单域失败隔离，其余域继续
+        errors.append(f"审计文件（{audit_dir}）: {exc}")
+
+    # 其余文件域（工作区 / 通知 / ArgoCD）
     file_domains = [
-        ("audit_files", f"审计文件（{audit_dir}）", lambda c: _cleanup_audit_files(audit_dir, c, dry_run)),
         ("sandbox_workspaces", f"沙箱工作区（{sandbox_root}）", lambda c: _cleanup_workspaces(sandbox_root, c, dry_run, keep={"node-deps"})),
         ("notify_files", f"通知留痕（{notify_dir}）", lambda c: _cleanup_files(notify_dir, c, dry_run)),
         ("qoder_workspaces", f"Qoder 工作区（{qoder_root}）", lambda c: _cleanup_workspaces(qoder_root, c, dry_run)),
@@ -240,14 +348,27 @@ def run_cleanup(
     if mode.is_production():
         from . import db as db_layer
 
-        cutoff_naive = (now - timedelta(days=ttl["audit"])).replace(tzinfo=None)
+        engine = db_layer.get_engine()
+        audit_cutoff = now - timedelta(days=ttl["audit"])
         try:
-            deleted["audit_rows"] = _db_rows_expired(
-                db_layer.audit_events, db_layer.audit_events.c.ts, cutoff_naive, dry_run
+            rows_report = _archive_audit_rows(engine, audit_dir, audit_cutoff, dry_run)
+            deleted["audit_rows"] = rows_report["purged"]
+            audit_report.update(
+                archived=audit_report["archived"] + rows_report["archived"],
+                purged=audit_report["purged"] + rows_report["purged"],
+                error=audit_report["error"] or rows_report["error"],
             )
+            if rows_report["error"]:
+                errors.append(f"审计表行: {rows_report['error']}")
         except Exception as exc:  # noqa: BLE001
             errors.append(f"审计表行: {exc}")
         runs_cutoff = (now - timedelta(days=ttl["workflow_runs"])).replace(tzinfo=None)
+        try:
+            deleted["workflow_events"] = _cleanup_history_events(
+                engine, runs_cutoff, dry_run
+            )
+        except Exception as exc:  # noqa: BLE001 - 历史清理失败不阻塞运行记录清理
+            errors.append(f"History 事件: {exc}")
         try:
             deleted["workflow_runs"] = _db_rows_expired(
                 db_layer.workflow_runs, db_layer.workflow_runs.c.updated_at, runs_cutoff, dry_run
@@ -261,6 +382,7 @@ def run_cleanup(
         "run_at": now.isoformat(),
         "ttl_days": ttl,
         "deleted": deleted,
+        "audit": audit_report,
         "errors": errors,
     }
     log.info(

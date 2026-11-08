@@ -152,10 +152,17 @@ if _AVAILABLE:
     COMMAND_BACKLOG = Gauge("aiops_workflow_commands_pending", "待投递写命令数")
     COMMAND_OLDEST_WAIT = Gauge("aiops_workflow_commands_oldest_wait_seconds", "最老待投递命令等待秒数")
     COMMAND_FAILED_24H = Gauge("aiops_workflow_commands_failed_24h", "近 24 小时投递失败的写命令数")
+    # Temporal History 投影（M4）：未完成同步 / 事件断档 / 最大滞后
+    HISTORY_INCOMPLETE = Gauge(
+        "aiops_history_sync_incomplete", "尚未完成最终 History 同步的流程数"
+    )
+    HISTORY_GAPS = Gauge("aiops_history_sync_gaps", "检测到事件断档的流程数")
+    HISTORY_LAG = Gauge("aiops_history_sync_lag_seconds", "未完成同步流程的最大滞后秒数")
 else:  # pragma: no cover
     ALERT_PENDING = COMPENSATION_FAILURES = RELEASE_CONFLICTS = ROLLBACK_FAILURES = _NoopMetric()
     COMPONENT_RESTARTS = BACKUP_LAST_SUCCESS = BACKUP_OVERDUE = CERT_EXPIRES = CERT_RENEWAL_DUE = _NoopMetric()
     COMMAND_BACKLOG = COMMAND_OLDEST_WAIT = COMMAND_FAILED_24H = _NoopMetric()
+    HISTORY_INCOMPLETE = HISTORY_GAPS = HISTORY_LAG = _NoopMetric()
 
 _backup_success = 0.0
 _certificate_expiry = 0.0
@@ -175,6 +182,13 @@ def set_command_state(*, pending: int, oldest_seconds: float, failed_24h: int) -
     COMMAND_BACKLOG.set(max(0, int(pending)))
     COMMAND_OLDEST_WAIT.set(max(0.0, float(oldest_seconds)))
     COMMAND_FAILED_24H.set(max(0, int(failed_24h)))
+
+
+def set_history_state(*, incomplete: int, gaps: int, lag_seconds: float) -> None:
+    """Temporal History 投影完整性（M4）：由 projector 对账后刷新。"""
+    HISTORY_INCOMPLETE.set(max(0, int(incomplete)))
+    HISTORY_GAPS.set(max(0, int(gaps)))
+    HISTORY_LAG.set(max(0.0, float(lag_seconds)))
 
 
 def observe_compensation_failure() -> None:
