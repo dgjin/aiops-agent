@@ -571,7 +571,7 @@ curl -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8600/api/commands/<comm
 - **发布窗口指令看启动快照**：流程启动时固化当时的策略（含 `allow_deploy_now` / `allow_cancel`）。运行中修改 YAML **不会**放开已启动流程：控制台点「立即发布 / 取消」会返回 409 并说明被禁原因；即使绕过控制台直接发信号，工作流同样拒收并记入 `command_rejections`（`policy-disabled`），该次拒收不占用命令 ID。需要新策略时**重新发起流程**取得新快照，或先联系 admin 确认策略文件。
 - **系统状态页多一项 tracing**：`/api/subsystems` 与 `readyz` 会给出追踪状态（`otlp_not_configured / otlp_configured_not_initialized / otlp_init_failed / otlp_initialized`）。production 若开启 `AIOPS_OTEL_REQUIRED=true` 却未配置 `AIOPS_OTEL_ENDPOINT`，服务启动即失败（不伪造就绪）；这一项只校验「已配置并初始化」，Collector 是否真正收到数据仍需在观测平台核对。
 - **上线硬门禁新增三项**（`scripts/rollout_gate.py`，对所有阶段生效）：`audit-integrity` 审计哈希链校验通过、`command-backlog` 命令 0 积压 / 0 失败 / 最老等待 <300s、`notify-delivery` 升级通知 0 条未送达。任何一项数据读不到都记为 `unknown`（pending），**不要当作通过**；发布前先在审计页与系统状态页确认这三项为绿。
-- **值班演练**：`scripts/governance_drill.py` 在本机复现审计篡改、归档后链续接、命令重放 / 冲突、通知送达失败、History 断档、250 条事件分页六类异常并断言系统能发现，退出码 0 为全通过；该脚本只在临时目录操作，不影响现有数据。
+- **值班演练**：`scripts/governance_drill.py` 在本机复现审计篡改、归档后链续接、命令重放 / 冲突、过期审批（超时后迟到审批与旧 run 信封被拒）、通知送达失败、History 断档、250 条事件分页七类异常并断言系统能发现，退出码 0 为全通过；该脚本只在临时目录操作，不影响现有数据。
 
 ### 9.3 紧急停止（kill switch）
 

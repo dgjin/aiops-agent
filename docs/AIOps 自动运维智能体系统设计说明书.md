@@ -455,7 +455,7 @@ Alertmanager/webhook ──► alert_webhook ──► workflow 启动（幂等 
 - **启动快照门禁**（BFF + 工作流双侧）：流程启动时 `_capture_policy_snapshot()` 把 `policy_sha256 / shadow_mode / allow_deploy_now / allow_cancel` 固化为 `policy_snapshot`，`status()` 暴露。BFF `snapshot_command_error()` 在写守卫中按快照拒绝被禁指令（409 明确原因）；工作流在信封分支二次校验，绕过 BFF 直接发信号同样被拒，登记 `command_rejections[].code=policy-disabled` 且**不占用 command_id**（策略放开后可重投）。空快照 = 旧流程兼容放行；运行期修改磁盘 YAML 不会放开已启动流程，必须重新发起流程取得新快照。
 - **OTel 生产门禁**：`AIOPS_OTEL_REQUIRED=true` 时 production 必须配置 `AIOPS_OTEL_ENDPOINT`，否则启动即 `ModeConfigError`（不伪造就绪）；readiness 新增 `tracing` 检查并输出稳定原因码（`otlp_not_configured / otlp_configured_not_initialized / otlp_init_failed / otlp_initialized`），`aiops_otel_enabled` 指标与 `/api/subsystems` 明示。门禁只校验「已配置且初始化」，真实 Collector 联通仍属外部验收。
 - **上线硬门禁**（`scripts/rollout_gate.py`）：在既有样本 / 证据 / 沙箱 / 回滚 / 人工项之外，新增三项对**所有阶段**生效的检查——`audit-integrity`（哈希链校验通过）、`command-backlog`（0 积压 / 0 失败 / 最老等待 <300s）、`notify-delivery`（0 条未送达）。数据不可读一律 `unknown`（pending），不得当作通过。运营度量接口 `/api/metrics/ops` 新增 `commands` 与 `audit_integrity` 分量，`escalation_detail.notify_pending` 直出。
-- **故障演练**（`scripts/governance_drill.py`）：本机临时目录复现六类异常并断言系统必须发现——审计篡改、归档 purge 后链续接、命令重放/冲突、通知未送达计数、History 断档、250 条事件游标分页。退出码 0 全通过 / 1 有失败；输出注明外部 WORM / 通知通道 / Collector / 多主机**未实测**。
+- **故障演练**（`scripts/governance_drill.py`）：本机临时目录复现七类异常并断言系统必须发现——审计篡改、归档 purge 后链续接、命令重放/冲突、过期审批（超时后迟到审批被阶段守卫拒绝、旧 run 证据绑定被拒）、通知未送达计数、History 断档、250 条事件游标分页。退出码 0 全通过 / 1 有失败；输出注明外部 WORM / 通知通道 / Collector / 多主机**未实测**。
 
 ### 4.7 执行层（`release.py`）
 

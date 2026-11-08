@@ -269,13 +269,13 @@ export AIOPS_OTEL_REQUIRED=true                          # production 门禁：�
 - **故障演练**（`scripts/governance_drill.py`，本机临时目录，不连接 Temporal / MySQL / 外部通知）：
 
 ```bash
-.venv/bin/python scripts/governance_drill.py                 # 六类场景全跑
+.venv/bin/python scripts/governance_drill.py                 # 七类场景全跑
 .venv/bin/python scripts/governance_drill.py --scenario audit-tamper --keep
 ```
 
-覆盖审计篡改、归档 purge 后链续接、命令重放/冲突、通知未送达计数、History 断档与 250 条事件游标分页；退出码 0 = 全通过、1 = 有失败。输出固定声明「外部 WORM / 通知通道 / Collector / 多主机未实测」。
+覆盖审计篡改、归档 purge 后链续接、命令重放/冲突、过期审批（迟到审批与旧 run 信封被拒）、通知未送达计数、History 断档与 250 条事件游标分页；退出码 0 = 全通过、1 = 有失败。输出固定声明「外部 WORM / 通知通道 / Collector / 多主机未实测」。
 
-**M5 本机验收记录（2026-11-08）**：全量回归 `Ran 1987 tests … OK (skipped=6)`；本里程碑新增 64 例（`test_risk_policy` 19：等级 / 硬触发 / 权重累计 / 路径归一化 / 摘要 / 发布准入文案；`test_policy_snapshot` 17：BFF 与工作流快照门禁 / 职责分离 / 旧流程兼容 / 风险 patched 门控与 LLM 文本失效；`test_ops_metrics_governance` 13：命令积压 / 审计完整性 / 通知未送达分量与路由降级；`test_rollout_gate` +5：三项治理硬门禁与 unknown 语义；`test_metrics` +5：追踪状态机与 `aiops_otel_enabled`；`test_readiness` +2：tracing 检查与配置失败分支；`test_startup_mode` +3：OTEL_REQUIRED 生产门禁与脱敏）。`governance_drill.py` 六场景全部通过。真实 WORM、多主机并发、真实 OTel Collector、飞书 / ArgoCD / staging 故障演练均**未实测**。
+**M5 本机验收记录（2026-11-08）**：全量回归 `Ran 1987 tests … OK (skipped=6)`；本里程碑新增 64 例（`test_risk_policy` 19：等级 / 硬触发 / 权重累计 / 路径归一化 / 摘要 / 发布准入文案；`test_policy_snapshot` 17：BFF 与工作流快照门禁 / 职责分离 / 旧流程兼容 / 风险 patched 门控与 LLM 文本失效；`test_ops_metrics_governance` 13：命令积压 / 审计完整性 / 通知未送达分量与路由降级；`test_rollout_gate` +5：三项治理硬门禁与 unknown 语义；`test_metrics` +5：追踪状态机与 `aiops_otel_enabled`；`test_readiness` +2：tracing 检查与配置失败分支；`test_startup_mode` +3：OTEL_REQUIRED 生产门禁与脱敏）。`governance_drill.py` 七场景全部通过。真实 WORM、多主机并发、真实 OTel Collector、飞书 / ArgoCD / staging 故障演练均**未实测**。
 
 ### 2.8 稳定容器初始化（发布链路前置）
 
