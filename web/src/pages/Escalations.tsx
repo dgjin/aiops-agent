@@ -7,6 +7,12 @@
  *   （关闭原因 / 实际根因 / 实际处置 / 验证结果 / 对智能体判断的评价）或「重试修复」
  *   （新幂等键重启完整修复链路）；需求来源的待办（entry.requirement）重试时重启需求
  *   修复流（批准版方案 → 沙箱 → 审批 → 发布）。
+ * - 重试跟踪（M3）：重试启动后待办进入 retrying（不立即关闭），后台跟新流程终态：
+ *   DONE 自动结构化关闭；ESCALATED / FAILED / CANCELLED / SHADOWED 重新打开。
+ *   retrying 暂停 SLA 计时，行内展示重试流程链接与终态。
+ * - 再升级送达（M3）：仅通知通道真实送达（live）才算已再升级；仅留档 / 投递失败
+ *   按有界退避重试并保持超时，行内展示投递状态与失败原因。
+ * - 并发写入（M3）：所有写操作携带读取时的 version，旧版本返回 409，不再静默覆盖。
  * - 知识回流（M2）：关闭时勾选「提交知识库候选」进入 DRAFT；管理员在详情弹窗审核
  *   （approve / reject / revoke），批准后 BFF 同步导出语料，索引重建仍是显式动作。
  * - 内容管理：关键词搜索（监控系统 / 服务 / 升级原因 / 告警 / 工作流 / 责任人 / 备注 / 处置计划）+ 监控系统
@@ -54,6 +60,7 @@ const STATUS_TABS = [
   { value: 'all', label: '全部' },
   { value: 'open', label: '待指派' },
   { value: 'assigned', label: '已指派' },
+  { value: 'retrying', label: '重试跟踪' },
   { value: 'closed', label: '已关闭' },
 ] as const
 
@@ -62,6 +69,7 @@ type StatusFilter = (typeof STATUS_TABS)[number]['value']
 const STATUS_META: Record<EscalationEntry['status'], { label: string; cls: string }> = {
   open: { label: '待指派', cls: 'border-danger/40 text-danger' },
   assigned: { label: '已指派', cls: 'border-warn/40 text-warn' },
+  retrying: { label: '重试跟踪', cls: 'border-accent/40 text-accent' },
   closed: { label: '已关闭', cls: 'border-ok/40 text-ok' },
 }
 
@@ -76,8 +84,20 @@ type SortKey = ColumnKey | 'default'
 /** 默认排序：按监控系统分块（组内待处置优先）；点击表头后切换为按列排序。 */
 const DEFAULT_SORT: SortState<SortKey> = { key: 'default', dir: 'asc' }
 
-/** 状态权重（默认排序组内：open → assigned → closed）。 */
-const STATUS_RANK: Record<EscalationEntry['status'], number> = { open: 0, assigned: 1, closed: 2 }
+/** 状态权重（默认排序组内：open → assigned → retrying → closed）。 */
+const STATUS_RANK: Record<EscalationEntry['status'], number> = {
+  open: 0,
+  assigned: 1,
+  retrying: 2,
+  closed: 3,
+}
+
+/** 通知投递状态徽标（M3）：只有 live 才算已送达。 */
+const NOTIFY_META: Record<string, { label: string; cls: string }> = {
+  live: { label: '已送达', cls: 'border-ok/40 text-ok' },
+  recorded: { label: '仅留档', cls: 'border-warn/40 text-warn' },
+  failed: { label: '投递失败', cls: 'border-danger/40 text-danger' },
+}
 
 /** 处置分类展示（M1）：服务端已给 category_label，这里补色值；未知分类回退「其他」。 */
 const CATEGORY_META: Record<string, { label: string; cls: string }> = {
@@ -203,7 +223,7 @@ function AssignDialog({ entry, onClose }: { entry: EscalationEntry | null; onClo
     setBusy(true)
     setError(null)
     try {
-      await api.assignEscalation(entry.id, assignee.trim())
+      await api.assignEscalation(entry.id, assignee.trim(), entry.version ?? 0)
       await queryClient.invalidateQueries()
       onClose()
     } catch (err) {
@@ -303,6 +323,7 @@ function CloseDialog({ entry, onClose }: { entry: EscalationEntry; onClose: () =
         note: note.trim(),
         knowledge_candidate: candidate,
         sensitive_confirmed: sensitive,
+        version: entry.version ?? 0,
       })
       await queryClient.invalidateQueries()
       onClose()
@@ -480,7 +501,7 @@ function PlanDialog({ entry, onClose }: { entry: EscalationEntry; onClose: () =>
     setBusy(true)
     setError(null)
     try {
-      await api.planEscalation(entry.id, plan.trim())
+      await api.planEscalation(entry.id, plan.trim(), entry.version ?? 0)
       await queryClient.invalidateQueries()
       onClose()
     } catch (err) {
@@ -546,7 +567,12 @@ function DetailDialog({ entry, onClose }: { entry: EscalationEntry; onClose: () 
     setBusy(true)
     setError(null)
     try {
-      await api.reviewEscalationKnowledge(entry.id, decision, reason.trim())
+      await api.reviewEscalationKnowledge(
+        entry.id,
+        decision,
+        reason.trim(),
+        entry.version ?? 0,
+      )
       await queryClient.invalidateQueries()
       onClose()
     } catch (err) {
@@ -587,7 +613,28 @@ function DetailDialog({ entry, onClose }: { entry: EscalationEntry; onClose: () 
             关闭人：{resolution?.closed_by || entry.assignee || '—'}
           </div>
           <div>关闭时间：{resolution?.closed_at ? fmtDateTime(resolution.closed_at) : fmtDateTime(entry.closed_at)}</div>
+          {entry.retry_wf_id && (
+            <div className="col-span-2 truncate" title={entry.retry_wf_id}>
+              重试流程：
+              <Link
+                to={`/flows/${encodeURIComponent(entry.retry_wf_id)}`}
+                className="font-mono text-accent hover:underline"
+              >
+                {entry.retry_wf_id}
+              </Link>
+              {entry.retry_outcome_label && (
+                <span className="ml-2 text-idle">终态：{entry.retry_outcome_label}</span>
+              )}
+            </div>
+          )}
         </div>
+
+        {resolution?.source === 'retry-tracking' && (
+          <p className="rounded-lg border border-accent/40 p-3 text-xs text-accent">
+            该记录由后台重试跟踪自动关闭：重试流程 {entry.retry_wf_id} 终态为 DONE，
+            根因与处置取自新流程结果；未自动进入知识库候选。
+          </p>
+        )}
 
         <div className="flex flex-wrap items-center gap-1.5">
           {entry.close_reason_label && (
@@ -820,6 +867,7 @@ export function Escalations() {
     if (!stats) return 0
     if (tab === 'open') return stats.open
     if (tab === 'assigned') return stats.assigned
+    if (tab === 'retrying') return stats.retrying ?? 0
     if (tab === 'closed') return stats.closed
     return stats.total
   }
@@ -839,13 +887,13 @@ export function Escalations() {
           </div>
           <p className="text-xs text-idle">
             {entry.requirement
-              ? '需求来源待办：以新幂等键重启需求修复链路（批准版方案 → 补丁 → 沙箱 → 审批 → 公告 → 发布），不重走日志诊断；启动成功后本待办自动关闭。'
-              : '以新幂等键（自动追加 retry 序号）重启完整修复链路：诊断 → 补丁 → 沙箱 → 审批 → 发布；启动成功后本待办自动关闭。'}
+              ? '需求来源待办：以新幂等键重启需求修复链路（批准版方案 → 补丁 → 沙箱 → 审批 → 公告 → 发布），不重走日志诊断；启动后进入重试跟踪：新流程 DONE 才自动关闭，再次升级/失败会重新打开。'
+              : '以新幂等键（自动追加 retry 序号）重启完整修复链路：诊断 → 补丁 → 沙箱 → 审批 → 发布；启动后进入重试跟踪：新流程 DONE 才自动关闭，再次升级/失败会重新打开。'}
           </p>
         </div>
       ),
-      run: () => api.retryEscalation(entry.id),
-      success: '已启动重试修复流程',
+      run: () => api.retryEscalation(entry.id, entry.version ?? 0),
+      success: '已启动重试修复流程，待办进入重试跟踪',
     })
   }
 
@@ -888,8 +936,16 @@ export function Escalations() {
                 知识待审核 {data.stats.knowledge?.draft}
               </button>
             )}
+            {(data.stats.notify_pending ?? 0) > 0 && (
+              <span
+                title="再升级通知仅留档 / 投递失败，后台按退避重试中；未真实送达前不会标记已再升级"
+                className="rounded border border-warn/40 px-1.5 py-0.5 text-[10px] text-warn"
+              >
+                通知待重试 {data.stats.notify_pending}
+              </span>
+            )}
             <span>
-              SLA {data.stats.sla_minutes} 分钟：超时未处置自动再升级一次（每单一次，防轰炸）
+              SLA {data.stats.sla_minutes} 分钟：超时未处置自动再升级（以真实送达为准，未送达按退避重试）
             </span>
           </span>
         )}
@@ -1139,12 +1195,20 @@ export function Escalations() {
                             {entry.re_escalated && (
                               <span
                                 className="inline-flex"
-                                title="已超 SLA 未处置，BFF 巡检已自动再升级一次"
+                                title="已超 SLA 未处置，再升级通知已真实送达"
                               >
                                 <RefreshCw size={10} />
                               </span>
                             )}
                           </span>
+                          {entry.status === 'retrying' && (
+                            <span
+                              className="rounded border border-accent/40 px-1.5 py-0.5 text-[10px] text-accent"
+                              title={`重试流程：${entry.retry_wf_id || '—'}`}
+                            >
+                              {entry.retry_outcome_label || '跟踪中'}
+                            </span>
+                          )}
                           {entry.requirement && (
                             <span className="rounded border border-accent/40 px-1.5 py-0.5 text-[10px] text-accent">
                               需求
@@ -1173,6 +1237,14 @@ export function Escalations() {
                             title={`处置计划：${entry.plan}`}
                           >
                             计划：{entry.plan}
+                          </div>
+                        )}
+                        {entry.status === 'retrying' && entry.note && (
+                          <div
+                            className="mt-0.5 truncate text-[10px] text-idle"
+                            title={entry.note}
+                          >
+                            重试：{entry.note}
                           </div>
                         )}
                         {!open && entry.note && (
@@ -1224,6 +1296,18 @@ export function Escalations() {
                               {entry.wf_id}
                             </Link>
                           </div>
+                          {entry.retry_wf_id && (
+                            <div className="flex min-w-0 items-baseline gap-1">
+                              <span className="shrink-0 text-[10px] text-idle">重试</span>
+                              <Link
+                                to={`/flows/${encodeURIComponent(entry.retry_wf_id)}`}
+                                title={`查看重试流程详情：${entry.retry_wf_id}`}
+                                className="truncate font-mono text-[11px] text-accent hover:underline"
+                              >
+                                {entry.retry_wf_id}
+                              </Link>
+                            </div>
+                          )}
                         </div>
                       </td>
                       <td className="px-2.5 py-2.5 align-top">
@@ -1240,17 +1324,43 @@ export function Escalations() {
                         <div className="mt-0.5">
                           {!open ? (
                             <span className="text-[10px] text-idle">已关闭</span>
+                          ) : entry.status === 'retrying' ? (
+                            <span
+                              className="text-[10px] text-accent"
+                              title={`重试跟踪中暂停 SLA 计时${entry.retry_started_at ? `（始于 ${fmtDateTime(entry.retry_started_at)}）` : ''}`}
+                            >
+                              重试跟踪中
+                            </span>
                           ) : entry.overdue ? (
                             <span
                               className="rounded border border-danger/40 bg-danger/10 px-1 py-0.5 text-[10px] text-danger"
-                              title="已超 SLA 未处置，BFF 巡检已自动再升级一次"
+                              title={
+                                entry.notify_pending
+                                  ? '已超 SLA：再升级通知尚未真实送达，后台按退避重试中'
+                                  : '已超 SLA 未处置，再升级通知已真实送达'
+                              }
                             >
-                              已超时
+                              已超时{entry.notify_pending ? '（通知待送达）' : ''}
                             </span>
                           ) : (
                             <span className="text-[10px] text-ok">SLA 正常</span>
                           )}
                         </div>
+                        {entry.notify_pending && (
+                          <div className="mt-0.5">
+                            <span
+                              className={cn(
+                                'rounded border px-1 py-0.5 text-[10px]',
+                                NOTIFY_META[entry.notify_mode ?? 'failed']?.cls ??
+                                  'border-line text-idle',
+                              )}
+                              title={entry.notify_error || '再升级通知未送达'}
+                            >
+                              {entry.notify_label || NOTIFY_META[entry.notify_mode ?? '']?.label || '未通知'}
+                              {(entry.notify_attempts ?? 0) > 0 ? ` · ${entry.notify_attempts} 次` : ''}
+                            </span>
+                          </div>
+                        )}
                       </td>
                       <td className="px-2.5 py-2.5 align-top">
                         {entry.evidence?.available ? (
@@ -1308,9 +1418,15 @@ export function Escalations() {
                               <ActionButton size="sm" onClick={() => setCloseTarget(entry)}>
                                 关闭
                               </ActionButton>
-                              <ActionButton size="sm" tone="accent" onClick={() => openRetry(entry)}>
-                                重试
-                              </ActionButton>
+                              {entry.status !== 'retrying' && (
+                                <ActionButton
+                                  size="sm"
+                                  tone="accent"
+                                  onClick={() => openRetry(entry)}
+                                >
+                                  重试
+                                </ActionButton>
+                              )}
                             </PermissionGate>
                           ) : (
                             <>

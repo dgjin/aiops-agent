@@ -939,9 +939,11 @@ export interface EscalationResolution {
   note: string
   closed_by: string
   closed_at: string
+  /** 记录来源（M3：retry-tracking 表示重试流程终态自动关闭） */
+  source?: string
 }
 
-/** 结构化关闭请求体；旧字段 note 仍兼容（仅备注关闭）。 */
+/** 结构化关闭请求体；M3 起仅备注关闭已停用（服务端返回 400 迁移错误）。 */
 export interface EscalationClosePayload {
   note?: string
   close_reason?: EscalationCloseReason
@@ -951,6 +953,8 @@ export interface EscalationClosePayload {
   verdict?: AgentVerdict
   knowledge_candidate?: boolean
   sensitive_confirmed?: boolean
+  /** 读取时的记录版本（CAS）：与库中不一致返回 409 */
+  version?: number
 }
 
 /** 知识导出同步结果（关闭/审核后由 BFF 写入 knowledge_records.json）。 */
@@ -984,16 +988,16 @@ export interface EscalationEntry {
   knowledge_status?: KnowledgeStatus
   knowledge_label?: string
   alert: AlertMeta | null
-  status: 'open' | 'assigned' | 'closed'
+  status: 'open' | 'assigned' | 'retrying' | 'closed'
   assignee: string
   note: string
   escalated_at: string
   updated_at: string
   closed_at: string | null
-  /** 是否已因处置超时再升级（每单只升级一次） */
+  /** 是否已因处置超时再升级（仅真实送达才置 true） */
   re_escalated: boolean
   history: EscalationHistory[]
-  /** 已超 SLA 未处置（读侧派生） */
+  /** 已超 SLA 未处置（读侧派生；retrying 暂停计时） */
   overdue: boolean
   sla_minutes: number
   /** 需求来源待办（读侧派生；重试修复将重启需求修复流而非告警诊断流） */
@@ -1004,14 +1008,34 @@ export interface EscalationEntry {
   system: string
   /** 是否已在「被监控系统」清单纳管（node / redis 等基础设施服务为 false） */
   system_managed: boolean
+  /** 重试跟踪（M3）：新修复流程与父运行链 */
+  retry_wf_id?: string
+  parent_run_id?: string
+  retry_started_at?: string | null
+  retry_outcome?: '' | 'DONE' | 'ESCALATED' | 'FAILED' | 'CANCELLED' | 'SHADOWED'
+  retry_outcome_label?: string
+  /** 再升级通知投递（M3）：仅 live 且无错误才算已送达 */
+  notify_mode?: '' | 'live' | 'recorded' | 'failed'
+  notify_label?: string
+  notify_attempts?: number
+  notify_next_retry_at?: string | null
+  notify_error?: string
+  notify_updated_at?: string | null
+  notify_pending?: boolean
+  /** 记录版本（CAS）：写操作回传，旧版本返回 409 */
+  version?: number
 }
 
 export interface EscalationStats {
   total: number
   open: number
   assigned: number
+  /** 重试跟踪中（M3；开放统计包含，不算 overdue） */
+  retrying?: number
   closed: number
   re_escalated: number
+  /** 通知待重试（M3）：recorded / failed 且尚未送达 */
+  notify_pending?: number
   /** 分类计数（key 为 EscalationCategory；含 other） */
   categories?: Record<string, number>
   /** 知识审核计数（M2）：待审核 / 已入库 / 已拒绝 */
@@ -1031,6 +1055,8 @@ export interface EscalationWriteResp extends Timed {
   escalation: EscalationEntry
   /** retry 专用：新启动的修复流程 ID */
   new_wf_id?: string
+  /** retry 专用：重试跟踪的流程 ID（与原待办 retry_wf_id 一致） */
+  retry_wf_id?: string
   /** close / knowledge review 专用：知识导出同步结果 */
   knowledge_export?: KnowledgeExport
 }

@@ -313,40 +313,42 @@ export const api = {
     }),
 
   // ---- 转人工待办（P1-3；读侧自动登记 ESCALATED 流程） ----
-  escalations: (status: 'all' | 'open' | 'assigned' | 'closed' = 'all') =>
+  escalations: (status: 'all' | 'open' | 'assigned' | 'retrying' | 'closed' = 'all') =>
     request<EscalationsResp>(`/api/escalations${qs({ status })}`),
-  /** 指派/改派责任人（open/assigned 均可）。 */
-  assignEscalation: (escId: string, assignee: string) =>
+  /** 指派/改派责任人（open/assigned/retrying 均可；version 做 CAS）。 */
+  assignEscalation: (escId: string, assignee: string, version = 0) =>
     request<EscalationWriteResp>(`/api/escalations/${encodeURIComponent(escId)}/assign`, {
       method: 'POST',
-      body: JSON.stringify({ assignee }),
+      body: JSON.stringify({ assignee, version }),
     }),
-  /** 处置关闭：结构化记录（关闭原因 / 实际根因 / 处置 / 验证 / 判断评价）或仅备注。 */
+  /** 处置关闭：结构化记录（M3 起仅备注关闭已停用，version 做 CAS）。 */
   closeEscalation: (escId: string, payload: EscalationClosePayload) =>
     request<EscalationWriteResp>(`/api/escalations/${encodeURIComponent(escId)}/close`, {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
   /** 登记/清空未关闭待办的处理计划（允许保持 open，不批量关闭）。 */
-  planEscalation: (escId: string, plan: string) =>
+  planEscalation: (escId: string, plan: string, version = 0) =>
     request<EscalationWriteResp>(`/api/escalations/${encodeURIComponent(escId)}/plan`, {
       method: 'POST',
-      body: JSON.stringify({ plan }),
+      body: JSON.stringify({ plan, version }),
     }),
   /** 知识审核（仅管理员）：approve / reject / revoke；批准后导出待重建索引。 */
   reviewEscalationKnowledge: (
     escId: string,
     decision: 'approve' | 'reject' | 'revoke',
     reason = '',
+    version = 0,
   ) =>
     request<EscalationWriteResp>(
       `/api/escalations/${encodeURIComponent(escId)}/knowledge/review`,
-      { method: 'POST', body: JSON.stringify({ decision, reason }) },
+      { method: 'POST', body: JSON.stringify({ decision, reason, version }) },
     ),
-  /** 重试修复：以新幂等键重启修复流程，待办自动关闭。 */
-  retryEscalation: (escId: string) =>
+  /** 重试修复：以新幂等键重启修复流程，待办进入 retrying 后台跟踪。 */
+  retryEscalation: (escId: string, version = 0) =>
     request<EscalationWriteResp>(`/api/escalations/${encodeURIComponent(escId)}/retry`, {
       method: 'POST',
+      body: JSON.stringify({ version }),
     }),
 
   /** 运营度量（M5）：分维度完成率 / MTTA / 证据 / 沙箱 / 待办 SLA / 值班告警。 */
