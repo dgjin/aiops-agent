@@ -34,6 +34,8 @@ STAGES = ("staging-shadow", "production-shadow", "single-service", "limited-rele
 MIN_SAMPLES = 50
 MIN_DAYS = 7
 MIN_AUTO_FIX_RATE = 0.5
+# M5：写命令 outbox 最老等待超过该值即视为积压（与 readiness 降级阈值同口径）
+MAX_COMMAND_BACKLOG_SECONDS = 300
 MANUAL_ITEMS = {
     "backup-restore": "MySQL 备份恢复演练通过",
     "kill-switch": "Kill Switch 生效演练通过",
@@ -245,6 +247,88 @@ def _manual_checks(checks: list[dict], confirmed: set[str]) -> None:
         )
 
 
+def _integrity_check(checks: list[dict], metrics: dict) -> None:
+    """M5 硬门禁：审计链完整性。不可读不得视为通过。"""
+    integrity = metrics.get("audit_integrity") or {}
+    if not integrity.get("available"):
+        _check(
+            checks,
+            "audit-integrity",
+            "审计链完整性",
+            "unknown",
+            None,
+            "tamper-evident 校验通过",
+            "审计链不可读/校验不可用；不得当作未发生篡改",
+        )
+        return
+    ok = bool(integrity.get("ok"))
+    _check(
+        checks,
+        "audit-integrity",
+        "审计链完整性",
+        "pass" if ok else "fail",
+        {"checked": integrity.get("checked"), "legacy": integrity.get("legacy")},
+        "tamper-evident 校验通过",
+        integrity.get("error") or "链头与归档段均通过 SHA-256 校验",
+    )
+
+
+def _command_backlog_check(checks: list[dict], metrics: dict) -> None:
+    """M5 硬门禁：写命令 outbox 无积压、无失败。"""
+    commands = metrics.get("commands") or {}
+    if not commands.get("available"):
+        _check(
+            checks,
+            "command-backlog",
+            "写命令 outbox",
+            "unknown",
+            None,
+            "0 积压 / 0 失败",
+            "命令存储不可读；不得当作无积压",
+        )
+        return
+    pending = int(commands.get("pending") or 0)
+    oldest = float(commands.get("oldest_pending_seconds") or 0.0)
+    failed = int(commands.get("failed_24h") or 0)
+    ok = pending == 0 and failed == 0 and oldest < MAX_COMMAND_BACKLOG_SECONDS
+    _check(
+        checks,
+        "command-backlog",
+        "写命令 outbox",
+        "pass" if ok else "fail",
+        {"pending": pending, "oldest_pending_seconds": round(oldest, 1), "failed_24h": failed},
+        f"0 积压 / 0 失败 / 最老等待 <{MAX_COMMAND_BACKLOG_SECONDS}s",
+        "存在积压或失败时必须先恢复命令投递，再推进灰度",
+    )
+
+
+def _notify_delivery_check(checks: list[dict], metrics: dict) -> None:
+    """M5 硬门禁：转人工通知已实际送达（recorded/failed 不算送达）。"""
+    detail = metrics.get("escalation_detail") or {}
+    value = detail.get("notify_pending")
+    if not detail.get("available") or value is None:
+        _check(
+            checks,
+            "notify-delivery",
+            "转人工通知送达",
+            "unknown",
+            value,
+            "0 条未送达",
+            "待办统计不可读；不得当作已送达",
+        )
+        return
+    pending = int(value)
+    _check(
+        checks,
+        "notify-delivery",
+        "转人工通知送达",
+        "pass" if pending == 0 else "fail",
+        pending,
+        "0 条未送达",
+        "recorded/failed 且未升级的通知不计入已送达",
+    )
+
+
 def evaluate(
     stage: str,
     metrics: dict,
@@ -274,6 +358,10 @@ def evaluate(
         _baseline_check(checks, metrics, baseline)
     if stage == "expand" and not service:
         _check(checks, "service", "扩展目标服务", "unknown", None, "显式指定服务", "逐服务扩展必须单独验收")
+    # M5：证据完整性 / outbox 积压 / SLA 未送达 —— 所有阶段均为硬门禁
+    _integrity_check(checks, metrics)
+    _command_backlog_check(checks, metrics)
+    _notify_delivery_check(checks, metrics)
 
     statuses = {item["status"] for item in checks}
     decision = "block" if "fail" in statuses else ("pending" if "unknown" in statuses else "allow")

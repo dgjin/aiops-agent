@@ -17,7 +17,7 @@ from fastapi import APIRouter, Query
 
 from aiops_agent import log_health, mode
 
-from .. import audit, escalations, ops_metrics, ops_warehouse, runbooks
+from .. import audit, commands, escalations, ops_metrics, ops_warehouse, runbooks
 from ..deps import gw, ok
 
 router = APIRouter()
@@ -71,6 +71,24 @@ def _managed_services(degraded: list[str]) -> list[str] | None:
         return None
 
 
+async def _command_stats(degraded: list[str]) -> dict | None:
+    """写命令 outbox 积压（M5 上线硬门禁）；不可读时返回 None 而非 0。"""
+    try:
+        return await asyncio.to_thread(commands.stats)
+    except Exception:  # noqa: BLE001 - 命令存储不可读：门禁按 unknown 处理
+        degraded.append("commands")
+        return None
+
+
+async def _audit_integrity(degraded: list[str]) -> dict | None:
+    """审计链完整性（M5 上线硬门禁）；不可读时返回 None 而非「链正常」。"""
+    try:
+        return await asyncio.to_thread(audit.verify)
+    except Exception:  # noqa: BLE001 - 链校验失败/存储不可读：门禁按 unknown 处理
+        degraded.append("audit_integrity")
+        return None
+
+
 async def _load_warehouse(days: int, degraded: list[str]) -> dict | None:
     """production SQL 数据面；引擎不可达或镜像为空时返回 None（退回 Temporal）。"""
     try:
@@ -110,6 +128,8 @@ async def api_ops_metrics(days: int = Query(7, ge=1, le=30)) -> dict:
     esc_stats = await _escalation_stats(degraded)
     esc_entries = await _escalation_entries(degraded)
     log_ship = await asyncio.to_thread(_log_ship_snapshot, degraded)
+    command_stats = await _command_stats(degraded)
+    audit_integrity = await _audit_integrity(degraded)
 
     data = ops_metrics.compute(
         items,
@@ -121,6 +141,8 @@ async def api_ops_metrics(days: int = Query(7, ge=1, le=30)) -> dict:
         log_ship=log_ship,
         managed_services=managed_services,
         source=source,
+        command_stats=command_stats,
+        audit_integrity=audit_integrity,
     )
     data["mirror_updated_at"] = mirror_updated_at
     data["degraded"] = degraded

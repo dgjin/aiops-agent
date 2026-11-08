@@ -404,6 +404,46 @@ def _sandbox(closed: list[dict], esc_entries: list[dict] | None) -> dict:
     }
 
 
+def command_state(stats: dict | None) -> dict:
+    """写命令 outbox 分量（M5）：None = 存储不可读，不得当作 0 积压。"""
+    if stats is None:
+        return {
+            "available": False,
+            "pending": None,
+            "oldest_pending_seconds": None,
+            "failed_24h": None,
+        }
+    return {
+        "available": True,
+        "pending": int(stats.get("pending") or 0),
+        "oldest_pending_seconds": float(stats.get("oldest_pending_seconds") or 0.0),
+        "failed_24h": int(stats.get("failed_24h") or 0),
+    }
+
+
+def integrity_state(result: dict | None) -> dict:
+    """审计链完整性分量（M5）：None = 不可读，不冒充「链正常」。"""
+    if result is None:
+        return {
+            "available": False,
+            "ok": None,
+            "checked": None,
+            "legacy": None,
+            "broken_at": None,
+            "error": "",
+            "archives": None,
+        }
+    return {
+        "available": True,
+        "ok": bool(result.get("ok")),
+        "checked": result.get("checked"),
+        "legacy": result.get("legacy"),
+        "broken_at": result.get("broken_at"),
+        "error": str(result.get("error") or "")[:300],
+        "archives": result.get("archives"),
+    }
+
+
 def _escalation_detail(
     esc_stats: dict | None, esc_entries: list[dict] | None, *, now: datetime
 ) -> dict:
@@ -417,6 +457,7 @@ def _escalation_detail(
             "handle_avg_seconds": None,
             "sla_minutes": (esc_stats or {}).get("sla_minutes"),
             "sla_breach": None,
+            "notify_pending": (esc_stats or {}).get("notify_pending"),
             "close_reasons": [],
             "knowledge": (esc_stats or {}).get("knowledge"),
         }
@@ -448,6 +489,7 @@ def _escalation_detail(
         "handle_avg_seconds": _avg(handle),
         "sla_minutes": sla_minutes,
         "sla_breach": breach,
+        "notify_pending": (esc_stats or {}).get("notify_pending"),
         "close_reasons": [
             {"key": key, "label": CLOSE_REASON_LABELS.get(key, key), "count": count}
             for key, count in reasons.most_common()
@@ -568,6 +610,8 @@ def compute(
     log_ship: list[dict] | None = None,
     managed_services: list[str] | None = None,
     source: str = "temporal",
+    command_stats: dict | None = None,
+    audit_integrity: dict | None = None,
 ) -> dict:
     """聚合运营度量（纯函数，便于单测）。
 
@@ -576,7 +620,9 @@ def compute(
     ``esc_stats``：待办统计（不可读时 None）；
     ``esc_entries``：待办条目（用于 SLA / 关闭原因 / 改判率；None=不可读）；
     ``evidence_rows``：证据归档行（None=不可读，不是 0 条）；
-    ``log_ship``：采集心跳快照；``managed_services``：受管服务清单（覆盖率分母）。
+    ``log_ship``：采集心跳快照；``managed_services``：受管服务清单（覆盖率分母）；
+    ``command_stats``：写命令 outbox 积压（M5，None=不可读）；
+    ``audit_integrity``：审计链校验结果（M5，None=不可读）。
     """
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -652,6 +698,9 @@ def compute(
         "sandbox": sandbox,
         "escalations": esc_stats or None,
         "escalation_detail": escalation_detail,
+        # ---------- M5：上线硬门禁数据面 ----------
+        "commands": command_state(command_stats),
+        "audit_integrity": integrity_state(audit_integrity),
         # 模型成本：未接入真实计量，返回 null（不得显示 0）
         "cost": {
             "available": False,
