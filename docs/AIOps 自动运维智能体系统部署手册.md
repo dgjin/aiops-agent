@@ -322,6 +322,7 @@ nohup .venv/bin/python -m uvicorn bff.app:app --host 0.0.0.0 --port 8600 > bff.l
 - 访问：本机 **http://127.0.0.1:8600**；局域网设备 **http://<本机IP>:8600**（`--host 0.0.0.0` 监听全部网卡，无需额外做端口转发）；
 - 前置：`web/dist` 已构建（见 2.0 ⑥），否则首页提示缺前端产物；
 - 令牌：`AIOPS_CONSOLE_AUTH_TOKENS` 仅作**首次播种**，运行期注册表在 `data/console_tokens.json`（demo）或 MySQL（production，仅存 sha256 指纹）；自动轮换与宽限期见 4.1；
+- 登录：默认**用户名 + 密码**。首启自动播种管理员 `admin` / `admin123`（`AIOPS_BOOTSTRAP_ADMIN_PASSWORD` 可覆盖），**首登后请立即在用户菜单 →「修改密码」改密**（会吊销该账号全部会话）；密码为 pbkdf2_sha256（210k 迭代），生产存 MySQL `console_users`。静态令牌保留为自动化/应急通道（用户菜单 →「访问令牌」），两者权限等价；
 - 实测（2026-10-12）：局域网地址访问首页 200、静态资源 200、`/api` 无令牌 401（鉴权正常；静态页与 `/assets` 无需鉴权）；`/metrics` 无鉴权，生产以网络策略限制暴露面（见 5.2）。
 
 > 建议直接用 `bash scripts/demo-up.sh` 一键启动（自动含 BFF，见 3.1）。
@@ -593,6 +594,8 @@ export AIOPS_MCP_TOKEN=<控制台令牌>                 # 透传 BFF 鉴权；�
 | `AIOPS_DATABASE_URL` | 空（production 未配置则拒绝启动） | 全部组件 | MySQL 连接串（`mysql+pymysql://...?charset=utf8mb4`） |
 | `AIOPS_DATA_ROOT` | 按模式（demo=`data/`，production=`data/prod/`） | 全部组件 | 数据根目录覆盖 |
 | `AIOPS_CONSOLE_AUTH_TOKENS` | 空（fail-closed，`/api` 全部 503） | BFF | Bearer 令牌注册表 JSON（仅首次播种；运行期在 DB/文件注册表） |
+| `AIOPS_BOOTSTRAP_ADMIN_PASSWORD` | 空（= `admin123`） | BFF | 首启播种管理员 `admin` 的初始密码；仅在首次建库/建文件时生效，已有用户不会被覆盖 |
+| `AIOPS_SESSION_TTL_SECONDS` | `43200`（12 小时） | BFF | 用户名 + 密码登录的会话有效期（活跃自动续期） |
 | `AIOPS_REDIS_URL` | 空（退化为进程内限速窗口） | BFF | 限速窗口存储（多副本共享配额）；本机 compose 映射 6380 |
 | `AIOPS_RATE_LIMIT_ENABLED` | 按模式（production=1 / demo=0） | BFF | 限速总开关（1/0 显式覆盖） |
 | `AIOPS_RATE_LIMIT_READ_PER_MIN` / `_WRITE_PER_MIN` / `_AUTH_FAIL_PER_MIN` | `240` / `20` / `10` | BFF | 已认证读 / 已认证写 / 认证失败（按 IP）配额 |
@@ -1312,7 +1315,7 @@ SQL stdout 直接写入 600 暂存文件，不捕获到整块内存；逐行 SQL
 - **影子冒烟（W5）**：webhook 告警开出 workflow，链路 evidence（Loki）→ Drain3 聚类 → LLM triage（confidence=0.30）→ 闸门 1 转人工（投递=recorded），未触真实仓库/MR/发布路径。
 - **残余待办**：租约签发/解除与无人值守协调（备份调度启用前置）、03:00 实际调度与 26 小时告警接线、真实归档的隔离恢复灌入、SQLite/Loki 恢复演练、RPO≤24h / RTO≤60min 实测。异地容灾与全天日志灾备仍未通过。
 
-> 注（2026-10-13 网络变更后）：主机 LAN 地址由 DHCP 变更为 `192.168.0.6`；入口与监控目标已由 `./start.sh sync-ip` 同步切换，见 10.7。
+> 注（网络地址随 DHCP 变化）：主机 LAN 地址已经历 `10.1.112.39` → `192.168.0.6`（2026-10-13）→ `192.168.0.47`（2026-11-08）→ `10.1.112.137`（2026-11-09）；每次变更后都须执行 `./start.sh sync-ip`，执行记录与排障见 10.7 / 10.8。
 
 ### 10.7 LAN 地址迁移与动态同步（2026-10-13 增补）
 
@@ -1325,9 +1328,34 @@ SQL stdout 直接写入 600 暂存文件，不捕获到整块内存；逐行 SQL
 
 流程（`scripts/sync_lan_ip.py`）：探测并校验新地址（私网 IPv4、8643 可绑定）→ 就地更新 `data/production-deploy/Caddyfile`（站点与 bind）与 `settings.json`（含 `production-deploy-input` 镜像）→ 重渲染监控片段并在 `data/monitoring-wiring-review/lan-ip-<新地址>/` 生成迁移材料 → 调 `scripts/production_tls.py renew` 重签叶证书（SAN 含新地址）并 reload Caddy。地址未变化时仅做证书核查；续签或 reload 失败保留原证书，可重跑本命令重试。
 
-外部监控栈沿用第九节边界（工具不自动改写/重启）：按迁移材料人工替换监控栈 `deploy/prometheus.yml` 两个 targets 与 `deploy/alertmanager.yml` 的 receiver url（替换前保留 `.bak.<时间戳>`），重启两个容器（Alertmanager 由 entrypoint 渲染模板，改模板必须重启容器），以 targets `up` 与 `/-/ready` 验证。
+外部监控栈沿用第九节边界（工具不自动改写/重启）：按迁移材料人工替换监控栈 `deploy/prometheus.yml` 两个 targets 与 `deploy/alertmanager.yml` 的 receiver url（替换前保留 `.bak.<时间戳>`），重启两个容器（Alertmanager 由 entrypoint 渲染模板，改模板必须重启容器），以 targets `up` 与 `/-/ready` 验证。若监控栈已改为经 `host.docker.internal:8643` 访问（本机当前配置），LAN 地址变化不影响抓取，无需替换（见 10.8）。
 
 2026-10-13 首次执行记录（DHCP：`10.1.112.39` → `192.168.0.6`）：Caddyfile 2 处、两处 settings 与两个片段已更新；叶证书重签（SAN = host.docker.internal / localhost / 127.0.0.1 / ::1 / 192.168.0.6）并 reload，入口新地址与本机均可达 200；监控栈替换 + 容器重启后 Prometheus 双 job `up`、Alertmanager `/-/ready` 200；被监控应用条目 url 更新为 `http://192.168.0.6:3000/`（生产库 monitored_apps 表），巡检下一轮恢复在线。
+
+### 10.8 生产栈启动与入口排障（2026-11-09 增补）
+
+断电、重启或换网后拉起 production 栈的固定顺序与已踩过的四类坑：
+
+1. **Docker 未运行**：`./start.sh up` 报依赖不可用。先 `colima status`，未运行则 `colima start`（默认 4 CPU / 12 GiB），容器随 Docker 恢复。
+2. **维护标志仍有效**：`./start.sh up` 会拒绝启动并提示维护标志有效，改执行 `./start.sh resume`。容器刚起时依赖预检可能失败（统一显示“依赖预检失败…详情隐藏”），待 Temporal / MySQL / Redis 就绪后重试；`./start.sh status` 显示组件 6/6、守护 True 即成功。
+3. **Caddy 托管任务退出码 1、8643 不监听**：`data/production-deploy/caddy.log` 若出现 `listen tcp <旧地址>:8643: bind: can't assign requested address`，说明 Caddyfile 仍绑定已失效的 LAN 地址，执行 `./start.sh sync-ip`（见 10.7）。
+4. **`sync-ip` 报“续签加载失败…请执行 recover”**：Caddy 未运行时 reload 失败，会保留 `tls/transition.json` 并保持失败关闭。恢复顺序：
+
+```bash
+.venv/bin/python scripts/production_tls.py recover \
+  --deploy-dir data/production-deploy --approved-credentials-and-reload
+launchctl kickstart -k gui/$(id -u)/com.aiops.caddy
+./start.sh sync-ip        # 重跑一次，完成重签与 reload
+```
+
+**入口恢复验收（四项同时满足）**：① `lsof -nP -iTCP:8643 -sTCP:LISTEN` 含 `127.0.0.1` 与当前 LAN 地址；② `curl --cacert data/production-deploy/tls/ca/ca.crt https://<当前LAN地址>:8643/` 返回 200；③ `openssl x509 -in data/production-deploy/tls/current/leaf.crt -noout -ext subjectAltName` 含当前 LAN 地址；④ Prometheus 的 `aiops-production-bff` / `aiops-production-worker` 为 `up`，Alertmanager `/-/ready` 200。
+
+> 监控栈边界：本机 Prometheus / Alertmanager 的抓取与回调都走 `host.docker.internal:8643`，LAN 地址变化后**无需**改 `deploy/prometheus.yml` / `deploy/alertmanager.yml`；`sync-ip` 输出里的“监控栈仓库改 targets”是按 Caddyfile 直连地址渲染的通用提示，仅在监控栈确实写死了 `<IP>:8643` 时才照做。
+
+实测记录：
+
+- **2026-11-08**（旧地址 → `192.168.0.47`）：`colima start` 后 `resume` 二次成功（组件 6/6）；Caddy 因绑定已失效的 `10.1.113.243` 退出码 1；首次 `sync-ip` 因 Caddy 未运行导致 reload 失败并留下 `tls/transition.json`，经 `recover` + `launchctl kickstart` 后重跑 `sync-ip` 完成重签；新地址与 loopback 入口 200，SAN 含 `192.168.0.47`，Prometheus 双 job `up`。
+- **2026-11-09**（`192.168.0.47` → `10.1.112.137`）：Caddy 在运行，`sync-ip` 一次完成（Caddyfile 2 处、settings、监控片段与镜像 settings；无 transition 残留）；新地址与 loopback 入口 200，BFF `/readyz` = `{"ok":true}`，SAN = `host.docker.internal / localhost / 10.1.112.137 / 127.0.0.1 / ::1`，Prometheus 双 job `up`、Alertmanager `/-/ready` 200。
 
 ## 11 评测资产、质量门槛与模型路由（M3）
 

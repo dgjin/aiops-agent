@@ -132,13 +132,14 @@ cd aiops-agent
 - **策略文件**：`AIOPS_POLICY_PATH` 指定。演示用 `./demo-policy.yaml`（加速：审批 5 分钟、公告 30 秒、观测 10 秒）；生产用 `./release-gate-policy.yaml`。**worker / BFF / demo_cli 必须用同一份**，否则策略快照错配。
 - **环境变量**：全部见 `.env.example`（复制为 `.env` 后按需修改，支持自动加载）。
 - **端口约定**：控制台 8600、Temporal 7233、Loki 3101、稳定版服务 18080、告警 Webhook 8099。
-- **控制台鉴权（fail-closed + 自动轮换）**：全部 `/api` 接口需 `Authorization: Bearer <token>`。角色 `viewer`（读）/ `operator`（+审批、发布指令、排队）/ `admin`（+被监控应用维护、令牌轮换）。**未配置时所有 `/api` 请求返回 503**。
+- **控制台登录（两种通道）**：日常用**用户名 + 密码**（首启自动播种管理员 `admin` / `admin123`，可用 `AIOPS_BOOTSTRAP_ADMIN_PASSWORD` 覆盖；**首登后请立即在右上角用户菜单改密**，改密会吊销该账号全部会话）；脚本与应急排障用**静态 Bearer 令牌**（见下条）。两者权限等价，角色 `viewer`（读）/ `operator`（+审批、发布指令、排队）/ `admin`（+被监控应用维护、令牌轮换）不同。
+- **控制台鉴权（fail-closed + 自动轮换）**：全部 `/api` 接口需 `Authorization: Bearer <token>`。**未配置任何通道时所有 `/api` 请求返回 503**。
 
   令牌**运行时注册表**在 `data/console_tokens.json`（权限 600，含明文令牌，请勿提交）；`AIOPS_CONSOLE_AUTH_TOKENS` 仅作**首次播种**。系统按 `AIOPS_TOKEN_ROTATE_INTERVAL_SECONDS`（默认 30 天）**自动轮换**：为每个身份生成新令牌，旧令牌转 `previous` 并在 `AIOPS_TOKEN_GRACE_SECONDS`（默认 7 天）**宽限期内继续有效**——所以自动轮换不会把在用的运维锁在门外。间隔设 `0` 关闭。
 
-  > **本工程的当前档位：关闭自动轮换。** `.env` 设了 `AIOPS_TOKEN_ROTATE_INTERVAL_SECONDS=0`，令牌固定为 `.env` 播种的三枚（`tok-view`/viewer01、`tok-ops`/zhang、`tok-adm`/li），**不再定期失效**。改这个开关后需重启 BFF，并删除 `data/console_tokens.json` 让它按新档位重新播种（否则注册表里仍留着旧的 `interval_seconds`）。
+  > **本工程的当前档位：关闭自动轮换。** `.env` 设了 `AIOPS_TOKEN_ROTATE_INTERVAL_SECONDS=0`，停止的是**定期自动轮换**；**手动轮换仍会替换令牌**（旧值转 `previous`，宽限期后失效）。本机生产库已发生多次手动轮换，`.env` 播种的 `tok-view` / `tok-ops` / `tok-adm` 已过宽限期失效——运行期令牌一律以注册表为准：demo 读 `data/console_tokens.json`（含明文）；production 只存 sha256 指纹、**无法反查**，丢失后只能重新轮换，或清空 `console_tokens` 表让它按 `.env` 重新播种（会吊销全部当前令牌）。改轮换开关后需重启 BFF，并清空注册表让它按新档位重新播种。
 
-  管理员可在控制台左下角「访问令牌」处「立即轮换」——**该入口仅当自动轮换开启时才显示**（关闭轮换的部署里点它只会把令牌换成"界面取不回来"的新值）；也可直接调用 `GET /api/auth/status`（自身令牌状态）、`GET /api/auth/tokens`（清单，仅元数据）、`POST /api/auth/rotate`。令牌值默认**不经接口回显**，从注册表文件读取（`AIOPS_TOKEN_ALLOW_REVEAL=true` 可开启回显，属降低安全性）。
+  管理员可在控制台右上角用户菜单 →「访问令牌」处「立即轮换」——**该入口仅当自动轮换开启时才显示**（关闭轮换的部署里点它只会把令牌换成"界面取不回来"的新值，需读注册表取回或清空注册表重置）；也可直接调用 `GET /api/auth/status`（自身令牌状态）、`GET /api/auth/tokens`（清单，仅元数据）、`POST /api/auth/rotate`。令牌值默认**不经接口回显**，从注册表读取（`AIOPS_TOKEN_ALLOW_REVEAL=true` 可开启回显，属降低安全性）。
 
   > **两种操作语义不同，别搞混**（踩过坑）：
   > - **轮换**（控制台「立即轮换」或 `POST /api/auth/rotate`）——**平滑替换**：新令牌生效，旧令牌转 `previous` 并在宽限期内继续可用，不会把在用的人锁在门外，也不会让人手上的令牌立刻失效。

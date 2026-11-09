@@ -500,7 +500,12 @@ python demo_cli.py status --wf-id aiops-fix-nl2sql-logsurge-<HHMMSS>
 - **demo 档**：BFF 监听 `0.0.0.0`——本机 **http://127.0.0.1:8600**，局域网设备 **http://<本机IP>:8600**（IP 以 `bash scripts/demo-up.sh status` 显示或 `ipconfig getifaddr en0` 为准）。
 - **production 档**（见《部署手册》第 9 章）：BFF 收敛为仅 loopback，须经本机 Caddy 入口 **https://<本机IP>:8643** 访问（直连 `127.0.0.1:8600` 仅限本机）。
 
-首次使用需在登录页填入访问令牌（viewer / operator / admin 角色权限不同）。
+**登录方式（用户名密码与静态令牌两种通道并存）**
+
+- **用户名 + 密码（日常主通道）**：首启自动播种管理员 `admin`，初始密码 `admin123`（部署时可用 `AIOPS_BOOTSTRAP_ADMIN_PASSWORD` 覆盖）。**首次登录后请立即在右上角用户菜单 →「修改密码」改密**（需原密码；成功后该账号全部会话吊销，需用新密码重新登录）。会话默认 12 小时、活跃自动续期；生产档用户与会话存于 MySQL `console_users` / `console_sessions`（仅存密码哈希与会话指纹），demo 档落在 `data/console_users.json` / `data/console_sessions.json`。
+- **静态访问令牌（自动化 / 应急通道）**：右上角用户菜单 →「访问令牌（静态通道）」填入 Bearer 令牌，适合脚本、CLI 与登录页不可用时的应急排障；`.env` 的 `AIOPS_CONSOLE_AUTH_TOKENS` 只在首启播种，运行期以注册表为准（请勿把令牌贴进工单或聊天）。
+
+两种身份权限一致（viewer / operator / admin 角色不同），日常人工操作建议走用户名密码，避免长期令牌外泄。用户增删、角色分配、会话吊销与密码重置在「用户管理」（admin）。
 
 导航为四级分组（「总览 / 跨系统待办 / 被监控系统 / 平台」，2026-10 控制台重构后）：
 
@@ -518,7 +523,7 @@ python demo_cli.py status --wf-id aiops-fix-nl2sql-logsurge-<HHMMSS>
 | 平台 | 系统状态 | 配置与开关 | 策略来源与配置项生效方式（hot/restart/snapshot）、限速与 kill switch 状态、并发配额（本地 LLM / Qoder / 沙箱 / 发布各自的并发上限与锁定项） |
 | 平台 | 用户管理（admin） | 用户与会话 | 创建/停用用户、角色分配、会话吊销 |
 | 平台 | 帮助中心 | 使用帮助 | 常见操作指引 |
-| — | 左下角「访问令牌」 | 令牌状态 | 查看自身令牌状态 / 清单 / 触发轮换（仅自动轮换开启时显示「立即轮换」） |
+| — | 右上角用户菜单 | 身份与令牌 | 查看当前身份（会话/静态令牌）、修改密码、登出；「访问令牌」弹窗查看令牌状态 / 清单 / 触发轮换（仅自动轮换开启时显示「立即轮换」） |
 
 **转人工待办的重试跟踪与送达（M3，2026-11-08 起）**
 
@@ -612,7 +617,9 @@ curl -X POST http://127.0.0.1:8600/api/system/kill-switch \
 | --- | --- |
 | 启动即报「production 模式必须配置 AIOPS_DATABASE_URL」 | fail-fast 保护；配置连接串或显式 `AIOPS_MODE=demo` |
 | 所有 `/api` 返回 503 | 未配置令牌（fail-closed）；播种 `AIOPS_CONSOLE_AUTH_TOKENS` 并重启 |
+| 登录页 401「用户名或密码错误」 | 首启管理员为 `admin` / `admin123`（或部署时设的 `AIOPS_BOOTSTRAP_ADMIN_PASSWORD`）；改密后用新密码。忘记密码由其他 admin 在「用户管理」重置，应急可用静态令牌登录 |
 | 401「凭证无效或已过期」 | 令牌错误或被重置注册表吊销；读注册表取当前令牌（部署手册 4.1） |
+| 局域网打不开 8643 / 证书域名不符 | 主机 LAN 地址被 DHCP 变更；执行 `./start.sh sync-ip` 同步 Caddy 站点与证书 SAN（排障见部署手册 10.7） |
 | 写操作返回 429 | 触发限速（写 20/min）；稍后重试，或按容量调 `AIOPS_RATE_LIMIT_WRITE_PER_MIN` |
 | 认证失败连续 429 | 按 IP 的防爆破限速（10/min）；等待窗口恢复 |
 | 流程列表与 Temporal 不一致 | 生产档由 `workflow_runs` 同步任务周期补齐；检查 BFF 日志同步错误 |
