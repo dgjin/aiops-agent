@@ -238,6 +238,16 @@ textarea:focus-visible {
   animation: row-reveal 0.18s ease-out;
 }
 
+/* 流程图活跃关系线：短划线沿路径流动，表达「事件正在沿链路推进」 */
+@keyframes flow-dash {
+  to {
+    stroke-dashoffset: -16;
+  }
+}
+.flow-dash {
+  animation: flow-dash 1.15s linear infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

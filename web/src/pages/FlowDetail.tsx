@@ -271,7 +271,7 @@ function StatusSummary({ status }: { status: StatusPayload }) {
   return (
     <Panel title="运行状态">
       {/* 全链路状态机（交互式 SVG）：当前阶段高亮、三道闸门与异常出口一目了然 */}
-      <FlowStateMachine stage={status.stage} className="mb-4" />
+      <FlowStateMachine stage={status.stage} events={status.gate_events} className="mb-4" />
       <div className="space-y-2">
         <Field label="阶段">
           <StageBadge stage={status.stage} />
@@ -796,7 +796,7 @@ export function FlowDetail() {
               <>
                 {/* 终态流程：状态机仍展示（可直观看到走到哪一步、在哪中断） */}
                 <Panel title="流程状态机">
-                  <FlowStateMachine stage={stage} />
+                  <FlowStateMachine stage={stage} events={result.gate_events} />
                 </Panel>
                 <ResultSummary result={result} />
               </>
