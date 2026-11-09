@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "AIOps 自动运维闭环时序",
+    "locale": "zh-CN",
+    "output": "docs/aiops-event-flow.html",
+    "viewBox": [1080, 560],
+    "column_fit": "spread",
+    "animation": "trace",
+    "quality_profile": "showcase",
+    "legend": {
+      "mode": "auto",
+      "entries": {
+        "emphasis": { "label": "主链路调用" },
+        "security": { "label": "闸门与异常" },
+        "dashed": { "label": "异步留痕" }
+      }
+    },
+    "views": [
+      {
+        "id": "v-triage",
+        "label": "① 告警与修复",
+        "focus": ["am", "orch", "fix", "sandbox"],
+        "note": "告警幂等接入，分诊产出根因与影响面后生成 patch 候选"
+      },
+      {
+        "id": "v-gate",
+        "label": "② 沙箱与闸门",
+        "focus": ["fix", "sandbox", "approver", "orch"],
+        "note": "沙箱真实探活通过与超时升级是审批闸门的两条边界"
+      },
+      {
+        "id": "v-release",
+        "label": "③ 发布与收尾",
+        "focus": ["orch", "deploy", "audit", "am"],
+        "note": "审批是唯一放行点；劣化自动回滚，链路全程留痕并回写 resolved"
+      }
+    ]
+  },
+  "participants": [
+    { "id": "am", "type": "messagebus", "label": "Alertmanager", "sublabel": "告警 · 幂等 id" },
+    { "id": "orch", "type": "backend", "label": "编排器", "sublabel": "Temporal 状态机" },
+    { "id": "fix", "type": "backend", "label": "修复智能体", "sublabel": "Qoder / Ollama" },
+    { "id": "sandbox", "type": "security", "label": "沙箱", "sublabel": "隔离运行 · 探活" },
+    { "id": "approver", "type": "external", "label": "审批人", "sublabel": "双人复核 · SoD" },
+    { "id": "deploy", "type": "cloud", "label": "发布器", "sublabel": "金丝雀 · 回滚" },
+    { "id": "audit", "type": "database", "label": "审计库", "sublabel": "证据包 · 时间线" }
+  ],
+  "segments": [
+    { "from": 150, "to": 290, "label": "① 分诊与沙箱" },
+    { "from": 294, "to": 364, "label": "② 审批闸门" },
+    { "from": 368, "to": 474, "label": "③ 发布与收尾" }
+  ],
+  "messages": [
+    { "id": "incident", "from": "am", "to": "orch", "y": 160, "label": "触发 incident", "variant": "emphasis" },
+    { "id": "triage", "from": "orch", "to": "fix", "y": 188, "label": "分诊：根因 + 影响面", "variant": "emphasis" },
+    { "id": "patch", "from": "fix", "to": "sandbox", "y": 216, "label": "patch 候选", "variant": "emphasis" },
+    { "id": "probe-ok", "from": "sandbox", "to": "fix", "y": 244, "label": "探活通过", "variant": "return" },
+    { "id": "shadowed", "from": "fix", "to": "orch", "y": 272, "label": "SHADOWED 就绪", "variant": "dashed" },
+
+    { "id": "ask-approval", "from": "orch", "to": "approver", "y": 300, "label": "请求审批 · 证据包", "variant": "emphasis" },
+    { "id": "approved", "from": "approver", "to": "orch", "y": 328, "label": "双人复核通过", "variant": "return" },
+    { "id": "timeout", "from": "approver", "to": "orch", "y": 356, "label": "超时 → SLA 升级", "variant": "security" },
+
+    { "id": "release", "from": "orch", "to": "deploy", "y": 384, "label": "放行 · 金丝雀", "variant": "emphasis" },
+    { "id": "degraded", "from": "deploy", "to": "orch", "y": 412, "label": "观察窗劣化 → 回滚", "variant": "security" },
+
+    { "id": "evidence", "from": "orch", "to": "audit", "y": 440, "label": "全链路留痕", "variant": "dashed" },
+    { "id": "resolved", "from": "orch", "to": "am", "y": 468, "label": "resolved 通知", "variant": "return" }
+  ],
+  "activations": [
+    { "participant": "am", "from": 155, "to": 176, "type": "messagebus" },
+    { "participant": "orch", "from": 158, "to": 472, "type": "backend" },
+    { "participant": "fix", "from": 183, "to": 278, "type": "backend" },
+    { "participant": "sandbox", "from": 210, "to": 250, "type": "security" },
+    { "participant": "approver", "from": 294, "to": 362, "type": "external" },
+    { "participant": "deploy", "from": 378, "to": 418, "type": "cloud" },
+    { "participant": "audit", "from": 434, "to": 446, "type": "database" },
+    { "participant": "am", "from": 462, "to": 474, "type": "messagebus" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "主链路",
+      "items": [
+        "告警按 alert_id 幂等接入，Temporal 持久化编排",
+        "分诊给出根因与影响面，修复产出 patch 候选",
+        "沙箱探活通过才进审批，放行前不发任何变更"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "人工闸门",
+      "items": [
+        "发起人不得审批自己的变更（职责分离）",
+        "一级与二级审批人不得相同，证据缺项即拒绝",
+        "审批是唯一放行点，超时转 SLA 升级"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "异常与回退",
+      "items": [
+        "金丝雀劣化自动回滚到上一版本",
+        "沙箱失败退回人工重试，幂等重放不重复执行",
+        "全链路留痕进证据包，收尾回写 resolved"
+      ]
+    }
+  ]
+}
